@@ -1,0 +1,137 @@
+name: arrival-ledger
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-default-security: &default-security
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: ${BACKEND_IMAGE:-arrival-ledger-backend:local}
+    init: true
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      DATABASE_PATH: /data/db/arrival-manager.db
+      MEDIA_DIR: /data/media
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-12582912}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
+      TRUSTED_USER_USERNAME: ${TRUSTED_USER_USERNAME:-admin}
+      TRUSTED_LAN_CIDRS: ${TRUSTED_LAN_CIDRS:-192.168.1.0/24,127.0.0.1/32,::1/128}
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-192.168.1.5,localhost,127.0.0.1}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:?Set BOOTSTRAP_ADMIN_USERNAME in .env}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD in .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    expose:
+      - "8000"
+    volumes:
+      - type: bind
+        source: ${DATA_ROOT:-/home/jackson/arrival-manager-data}/db
+        target: /data/db
+      - type: bind
+        source: ${DATA_ROOT:-/home/jackson/arrival-manager-data}/media
+        target: /data/media
+      - type: bind
+        source: ${DATA_ROOT:-/home/jackson/arrival-manager-data}/uploads
+        target: /data/uploads
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    <<: *default-security
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          response = urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3);
+          raise SystemExit(0 if response.status == 200 else 1)
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks:
+      - app
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: ${FRONTEND_IMAGE:-arrival-ledger-frontend:local}
+    init: true
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8000
+      NGINX_ENVSUBST_FILTER: ^BACKEND_URL$
+      TZ: ${TZ:-Asia/Shanghai}
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${APP_PORT:-8766}:80"
+    expose:
+      - "80"
+    volumes:
+      - type: bind
+        source: ./deploy/nginx/default.conf.template
+        target: /etc/nginx/templates/default.conf.template
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /etc/nginx/conf.d:rw,noexec,nosuid,size=1m
+      - /var/cache/nginx:rw,noexec,nosuid,size=32m
+      - /var/run:rw,noexec,nosuid,size=1m
+      - /tmp:rw,noexec,nosuid,size=16m
+    <<: *default-security
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget --quiet --tries=1 --spider http://127.0.0.1/healthz || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 15s
+    logging: *default-logging
+    networks:
+      - app
+
+  quick-tunnel:
+    profiles:
+      - quick-tunnel
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}
+    init: true
+    restart: "no"
+    command:
+      - tunnel
+      - --no-autoupdate
+      - --url
+      - http://frontend:80
+    depends_on:
+      frontend:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    <<: *default-security
+    logging: *default-logging
+    networks:
+      - app
+
+networks:
+  app:
+    driver: bridge
