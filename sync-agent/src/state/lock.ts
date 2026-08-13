@@ -10,6 +10,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
+import { accountKeyFilePart } from "./cursor.js";
+
 export interface LockInfo {
   pid: number;
   worker_id: string;
@@ -32,8 +34,12 @@ export interface LockDenied {
 
 export type LockResult = AcquiredLock | LockDenied;
 
-export function lockFileName(stateDir: string, platform: string): string {
-  return join(stateDir, `${platform}.lock`);
+export function lockFileName(
+  stateDir: string,
+  platform: string,
+  accountKey: string,
+): string {
+  return join(stateDir, `${platform}-${accountKeyFilePart(accountKey)}.lock`);
 }
 
 export function readLockFile(path: string): LockInfo | null {
@@ -67,9 +73,10 @@ export function isProcessAlive(pid: number): boolean {
 export function acquireLock(
   stateDir: string,
   platform: string,
+  accountKey: string,
   workerId: string,
 ): LockResult {
-  const path = lockFileName(stateDir, platform);
+  const path = lockFileName(stateDir, platform, accountKey);
   const token = `lock-${randomUUID()}`;
   const info: LockInfo = {
     pid: process.pid,

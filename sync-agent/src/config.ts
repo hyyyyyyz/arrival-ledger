@@ -13,22 +13,38 @@ export interface SyncConfig {
   max_pages: number;
   max_records: number;
   page_delay_ms: number;
+  min_interval_minutes: number;
   profile_dirs: Record<Platform, string>;
+  account_keys: Record<Platform, string>;
+  order_list_urls: Record<Platform, string>;
 }
+
+export type IssueSeverity = "FAIL" | "WARN";
 
 export interface ConfigIssue {
   field: string;
   message: string;
+  severity: IssueSeverity;
 }
 
 const DEFAULT_STATE_DIR = "state";
 const DEFAULT_LOG_DIR = "logs";
+const ACCOUNT_KEY_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+export const DEFAULT_ORDER_LIST_URLS: Record<Platform, string> = {
+  pdd: "https://mobile.yangkeduo.com/orders.html",
+  "1688": "https://air.1688.com/app/ctf-page/trade-order-list/buyer-order-list.html",
+};
 
 export function defaultProfileDir(cwd: string, platform: Platform): string {
   if (process.platform === "win32") {
     return `C:/ArrivalLedger/profiles/${platform}`;
   }
   return join(cwd, "profiles", platform);
+}
+
+export function defaultAccountKey(platform: Platform): string {
+  return platform === "pdd" ? "pdd-main" : "1688-main";
 }
 
 export function defaultWorkerId(): string {
@@ -70,6 +86,7 @@ function asInt(
     issues.push({
       field: name,
       message: `must be an integer between ${minimum} and ${maximum}`,
+      severity: "FAIL",
     });
     return fallback;
   }
@@ -88,28 +105,53 @@ export function loadConfig(
     : {};
   const env = { ...fileValues, ...(options.env ?? process.env) };
 
-  const api_base_url = (env["ARRIVAL_API_BASE_URL"] ?? "http://192.168.1.5:8766").trim();
+  const apiBaseUrlRaw = env["ARRIVAL_API_BASE_URL"] ?? "http://192.168.1.5:8766";
+  const api_base_url = apiBaseUrlRaw.trim().replace(/\/+$/, "");
   if (!/^https?:\/\/[^\s]+$/.test(api_base_url)) {
     issues.push({
       field: "ARRIVAL_API_BASE_URL",
       message: "must be an http(s) URL",
+      severity: "FAIL",
     });
   }
 
+  const account_keys: Record<Platform, string> = {
+    pdd: (env["PDD_ACCOUNT_KEY"] ?? defaultAccountKey("pdd")).trim(),
+    "1688": (env["ALI1688_ACCOUNT_KEY"] ?? defaultAccountKey("1688")).trim(),
+  };
+  for (const platform of PLATFORMS) {
+    const field = platform === "pdd" ? "PDD_ACCOUNT_KEY" : "ALI1688_ACCOUNT_KEY";
+    if (!ACCOUNT_KEY_PATTERN.test(account_keys[platform])) {
+      issues.push({
+        field,
+        message: "must match /^[A-Za-z0-9_-]{1,64}$/",
+        severity: "FAIL",
+      });
+    }
+  }
+
+  const order_list_urls: Record<Platform, string> = {
+    pdd: (env["PDD_ORDER_URL"] ?? DEFAULT_ORDER_LIST_URLS["pdd"]).trim(),
+    "1688": (env["ALI1688_ORDER_URL"] ?? DEFAULT_ORDER_LIST_URLS["1688"]).trim(),
+  };
+  for (const platform of PLATFORMS) {
+    const field = platform === "pdd" ? "PDD_ORDER_URL" : "ALI1688_ORDER_URL";
+    if (!/^https:\/\/[^\s]+$/.test(order_list_urls[platform])) {
+      issues.push({
+        field,
+        message: "must be an https URL",
+        severity: "FAIL",
+      });
+    }
+  }
+
   const config: SyncConfig = {
-    api_base_url: api_base_url.replace(/\/+$/, ""),
+    api_base_url,
     worker_key: (env["ARRIVAL_SYNC_WORKER_KEY"] ?? "").trim(),
     worker_id: (env["ARRIVAL_WORKER_ID"] ?? defaultWorkerId()).trim(),
     state_dir: resolve(cwd, env["ARRIVAL_STATE_DIR"] ?? DEFAULT_STATE_DIR),
     log_dir: resolve(cwd, env["ARRIVAL_LOG_DIR"] ?? DEFAULT_LOG_DIR),
-    max_pages: asInt(
-      env["SYNC_MAX_PAGES"],
-      5,
-      1,
-      100,
-      "SYNC_MAX_PAGES",
-      issues,
-    ),
+    max_pages: asInt(env["SYNC_MAX_PAGES"], 5, 1, 100, "SYNC_MAX_PAGES", issues),
     max_records: asInt(
       env["SYNC_MAX_RECORDS"],
       30,
@@ -126,24 +168,40 @@ export function loadConfig(
       "SYNC_PAGE_DELAY_MS",
       issues,
     ),
+    min_interval_minutes: asInt(
+      env["SYNC_MIN_INTERVAL_MINUTES"],
+      15,
+      0,
+      1440,
+      "SYNC_MIN_INTERVAL_MINUTES",
+      issues,
+    ),
     profile_dirs: {
       pdd: (env["PDD_PROFILE_DIR"] ?? defaultProfileDir(cwd, "pdd")).trim(),
       "1688": (env["ALI1688_PROFILE_DIR"] ?? defaultProfileDir(cwd, "1688")).trim(),
     },
+    account_keys,
+    order_list_urls,
   };
 
   for (const platform of PLATFORMS) {
+    const field = platform === "pdd" ? "PDD_PROFILE_DIR" : "ALI1688_PROFILE_DIR";
     if (config.profile_dirs[platform].length === 0) {
-      issues.push({
-        field: platform === "pdd" ? "PDD_PROFILE_DIR" : "ALI1688_PROFILE_DIR",
-        message: "must not be empty",
-      });
+      issues.push({ field, message: "must not be empty", severity: "FAIL" });
     }
   }
   if (config.worker_id.length === 0 || config.worker_id.length > LIMITS.worker_id) {
-    issues.push({ field: "ARRIVAL_WORKER_ID", message: `must be 1-${LIMITS.worker_id} characters` });
+    issues.push({
+      field: "ARRIVAL_WORKER_ID",
+      message: `must be 1-${LIMITS.worker_id} characters`,
+      severity: "FAIL",
+    });
   }
   return { config, issues };
+}
+
+export function configFailures(issues: ConfigIssue[]): ConfigIssue[] {
+  return issues.filter((issue) => issue.severity === "FAIL");
 }
 
 export function maskKey(key: string): string {

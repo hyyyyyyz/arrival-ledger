@@ -4,22 +4,25 @@
 上传到到货管家自己的 `/api/sync/v1/batches`。本包不调用任何平台官方 API、OAuth、
 抓包或验证码绕过。完整边界见仓库根目录 [`docs/BROWSER_SYNC_SPEC.md`](../docs/BROWSER_SYNC_SPEC.md)。
 
-## 当前进度（D1：骨架与离线 doctor）
+## 当前进度（D3：1688 可见页面适配器与同步编排）
 
 已实现：
 
 - 统一订单/批次模型与客户端校验（`src/models.ts`）；
 - 纯函数字符串/日期/数量规范化（`src/normalize.ts`）；
-- 本机配置加载与脱敏展示（`src/config.ts`）；
-- 平台游标原子读写、单实例锁、脱敏 JSON Lines 日志（`src/state/`、`src/log.ts`）；
-- `doctor --offline` 本地自检命令。
+- 本机配置加载与脱敏展示，配置错误 fail-closed（`src/config.ts`）；
+- 平台游标按 `(platform, account_key)` 原子读写、单实例锁、脱敏 JSON Lines 日志（`src/state/`、`src/log.ts`）；
+- 内部批次传输客户端（`src/transport.ts`：401/403/409/422 不重试，429/5xx 有限退避）；
+- `doctor --offline`、`login-check`、`sync-once --mode dry-run|commit`（`src/cli.ts`）；
+- 同步编排 `src/run.ts`：dry-run 不上传；commit 必须 `--yes`；空列表不覆盖服务器数据；低频限制（默认 15 分钟）；
+- 1688 买家订单页适配器（`src/adapters/ali1688.ts`）：表头列映射 + 行内标签两种解析模式，登录/风控/空列表守卫，脱敏 fixture 测试。
 
 尚未实现（后续阶段）：
 
-- D2 服务器批次接收接口、`transport` 客户端；
-- D3/D4 `login-check`、`sync-once` 与 PDD/1688 可见页面适配器（当前命令会明确退出并提示未实现）。
+- D4 拼多多可见页面适配器（`login-check`/`sync-once --platform pdd` 会明确报错）；
+- D5 端到端联调与 Windows 真实页面验收（选择器需按真实页面调整）。
 
-本包不会连接真实平台页面；`doctor` 的非离线模式只检查本机 Chromium 是否可启动。
+本包在开发机上不连接真实平台页面；`doctor` 的非离线模式只检查本机 Chromium 是否可启动。
 
 ## 环境要求
 
@@ -39,8 +42,9 @@ npm ci
 npm run doctor -- --offline                     # 本地自检，不启动浏览器、不联网
 npm run doctor                                  # 额外检查本机 Chromium 是否可启动
 npm run doctor -- --platform pdd                # 只检查 pdd 一项
-npm run login-check -- --platform pdd           # D3/D4 实现（当前会提示未实现）
-npm run sync-once -- --platform pdd --mode dry-run
+npm run login-check -- --platform 1688          # 打开可见浏览器检查登录/风控状态
+npm run sync-once -- --platform 1688 --mode dry-run
+npm run sync-once -- --platform 1688 --mode commit --yes
 ```
 
 检查与测试：
@@ -61,14 +65,19 @@ ARRIVAL_SYNC_WORKER_KEY=填入本机密钥，不提交 Git
 ARRIVAL_WORKER_ID=win-arrival-01
 PDD_PROFILE_DIR=C:/ArrivalLedger/profiles/pdd
 ALI1688_PROFILE_DIR=C:/ArrivalLedger/profiles/1688
+PDD_ACCOUNT_KEY=pdd-main
+ALI1688_ACCOUNT_KEY=1688-main
 SYNC_MAX_PAGES=5
 SYNC_MAX_RECORDS=30
 SYNC_PAGE_DELAY_MS=2500
+SYNC_MIN_INTERVAL_MINUTES=15
 ARRIVAL_STATE_DIR=state
 ARRIVAL_LOG_DIR=logs
 ```
 
-- 默认值：`SYNC_MAX_PAGES=5`、`SYNC_MAX_RECORDS=30`（上限 500）、`SYNC_PAGE_DELAY_MS=2500`；
+- 默认值：`SYNC_MAX_PAGES=5`、`SYNC_MAX_RECORDS=30`（上限 500）、`SYNC_PAGE_DELAY_MS=2500`、`SYNC_MIN_INTERVAL_MINUTES=15`（0 表示不限制）；
+- 游标与锁按 `(platform, account_key)` 隔离；切换账号时修改对应 `*_ACCOUNT_KEY` 即可，不会复用旧账号游标；
+- 配置值“设置了但非法”会直接报错退出（fail-closed），不会静默回退默认值；
 - Windows 上默认 profile 目录为 `C:/ArrivalLedger/profiles/<platform>`，其他平台为 `./profiles/<platform>`；
 - worker key 只以明文保存在 Windows 本机受 ACL 保护的 `.env.local`，日志和输出中始终脱敏；
 - 公网隧道使用时 `ARRIVAL_API_BASE_URL` 必须为 `https://`。
@@ -78,17 +87,29 @@ ARRIVAL_LOG_DIR=logs
 ```text
 src/
   cli.ts          doctor / login-check / sync-once 命令入口
-  config.ts       本机配置，不含密码/Cookie
+  config.ts       本机配置（fail-closed），不含密码/Cookie
   models.ts       统一订单与批次类型、校验
   normalize.ts    纯函数规范化
+  transport.ts    到货管家内部批次接口客户端
+  run.ts          dry-run / commit 编排、游标推进、低频限制
   log.ts          JSON Lines 日志（自动脱敏）
   state/
     redact.ts     敏感字段打码
-    lock.ts       单实例锁（同平台同 profile 互斥）
-    cursor.ts     游标原子读写
-  browser/        D3/D4：持久 headed context 与页面守卫
-  adapters/       D3/D4：pdd / 1688 只读适配器
-tests/            脱敏 fixture 与单元测试
+    lock.ts       单实例锁（按 platform + account_key 互斥）
+    cursor.ts     游标原子读写（按 platform + account_key 隔离）
+  browser/
+    context.ts    persistent headed context
+    guards.ts     登录/验证码/页面状态守卫
+  adapters/
+    base.ts       适配器契约
+    ali1688.ts    1688 只读适配器（表头列映射 + 标签提取）
+    pdd.ts        拼多多适配器（D4）
+  extract/
+    text.ts       标签/文本纯函数
+    dates.ts      日期解析
+    tracking.ts   运单号规范化
+    order.ts      RawOrder -> UnifiedOrder 严格转换
+tests/            脱敏 fixture 与单元/适配器测试
 ```
 
 ## 安全红线

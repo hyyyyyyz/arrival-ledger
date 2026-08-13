@@ -92,6 +92,7 @@ export interface CursorState {
   platform: Platform;
   account_key: string;
   last_success_at: string | null;
+  last_sync_at: string | null;
   last_cursor: string | null;
   last_batch_id: string | null;
   last_status: SyncStatus;

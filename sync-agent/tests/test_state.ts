@@ -24,16 +24,17 @@ afterEach(() => {
 describe("cursor state", () => {
   it("loads null when no cursor exists", () => {
     const dir = tempStateDir();
-    expect(loadCursor(dir, "pdd")).toBeNull();
+    expect(loadCursor(dir, "pdd", "pdd-main")).toBeNull();
   });
 
   it("saves and loads a cursor round-trip", () => {
     const dir = tempStateDir();
     const cursor = emptyCursor("pdd", "pdd-main");
     saveCursor(dir, cursor);
-    const loaded = loadCursor(dir, "pdd");
+    const loaded = loadCursor(dir, "pdd", "pdd-main");
     expect(loaded).not.toBeNull();
     expect(loaded?.platform).toBe("pdd");
+    expect(loaded?.account_key).toBe("pdd-main");
     expect(loaded?.last_status).toBe("OK");
   });
 
@@ -43,44 +44,47 @@ describe("cursor state", () => {
       last_status: "SCHEMA_CHANGED",
       consecutive_failures: 2,
     });
-    const loaded = loadCursor(dir, "pdd");
+    const loaded = loadCursor(dir, "pdd", "pdd-main");
     expect(loaded?.last_status).toBe("SCHEMA_CHANGED");
     expect(loaded?.consecutive_failures).toBe(2);
     expect(loaded?.account_key).toBe("pdd-main");
 
     updateCursor(dir, "pdd", "pdd-main", { consecutive_failures: 3 });
-    expect(loadCursor(dir, "pdd")?.consecutive_failures).toBe(3);
-    expect(loadCursor(dir, "pdd")?.last_status).toBe("SCHEMA_CHANGED");
+    expect(loadCursor(dir, "pdd", "pdd-main")?.consecutive_failures).toBe(3);
+    expect(loadCursor(dir, "pdd", "pdd-main")?.last_status).toBe("SCHEMA_CHANGED");
+  });
+
+  it("isolates cursors per account_key on the same platform", () => {
+    const dir = tempStateDir();
+    updateCursor(dir, "pdd", "pdd-main", { consecutive_failures: 1 });
+    updateCursor(dir, "pdd", "pdd-test", { consecutive_failures: 7 });
+    expect(loadCursor(dir, "pdd", "pdd-main")?.consecutive_failures).toBe(1);
+    expect(loadCursor(dir, "pdd", "pdd-test")?.consecutive_failures).toBe(7);
+    expect(loadCursor(dir, "1688", "1688-main")).toBeNull();
   });
 
   it("rejects malformed cursor files", () => {
     const dir = tempStateDir();
-    writeFileSync(join(dir, "cursor-pdd.json"), '{"platform":"not-a-platform"}', "utf8");
-    expect(loadCursor(dir, "pdd")).toBeNull();
-  });
-
-  it("keeps platforms isolated", () => {
-    const dir = tempStateDir();
-    updateCursor(dir, "pdd", "pdd-main", { consecutive_failures: 1 });
-    expect(loadCursor(dir, "1688")).toBeNull();
+    writeFileSync(join(dir, "cursor-pdd-pdd-main.json"), '{"platform":"not-a-platform"}', "utf8");
+    expect(loadCursor(dir, "pdd", "pdd-main")).toBeNull();
   });
 });
 
 describe("platform lock", () => {
   it("acquires and releases cleanly", () => {
     const dir = tempStateDir();
-    const first = acquireLock(dir, "pdd", "worker-1");
+    const first = acquireLock(dir, "pdd", "pdd-main", "worker-1");
     expect(first.held).toBe(true);
-    expect(existsSync(join(dir, "pdd.lock"))).toBe(true);
+    expect(existsSync(join(dir, "pdd-pdd-main.lock"))).toBe(true);
     if (first.held) first.release();
-    expect(existsSync(join(dir, "pdd.lock"))).toBe(false);
+    expect(existsSync(join(dir, "pdd-pdd-main.lock"))).toBe(false);
   });
 
-  it("denies a second holder for the same platform", () => {
+  it("denies a second holder for the same platform and account", () => {
     const dir = tempStateDir();
-    const first = acquireLock(dir, "pdd", "worker-1");
+    const first = acquireLock(dir, "pdd", "pdd-main", "worker-1");
     expect(first.held).toBe(true);
-    const second = acquireLock(dir, "pdd", "worker-2");
+    const second = acquireLock(dir, "pdd", "pdd-main", "worker-2");
     expect(second.held).toBe(false);
     if (!second.held) {
       expect(second.reason).toBe("already-held");
@@ -89,13 +93,16 @@ describe("platform lock", () => {
     if (first.held) first.release();
   });
 
-  it("allows different platforms to run in parallel", () => {
+  it("allows different accounts and platforms in parallel", () => {
     const dir = tempStateDir();
-    const pdd = acquireLock(dir, "pdd", "worker-1");
-    const ali = acquireLock(dir, "1688", "worker-1");
-    expect(pdd.held).toBe(true);
+    const pddMain = acquireLock(dir, "pdd", "pdd-main", "worker-1");
+    const pddTest = acquireLock(dir, "pdd", "pdd-test", "worker-1");
+    const ali = acquireLock(dir, "1688", "1688-main", "worker-1");
+    expect(pddMain.held).toBe(true);
+    expect(pddTest.held).toBe(true);
     expect(ali.held).toBe(true);
-    if (pdd.held) pdd.release();
+    if (pddMain.held) pddMain.release();
+    if (pddTest.held) pddTest.release();
     if (ali.held) ali.release();
   });
 
@@ -103,7 +110,7 @@ describe("platform lock", () => {
     const dir = tempStateDir();
     const deadPid = 999999999;
     writeFileSync(
-      join(dir, "pdd.lock"),
+      join(dir, "pdd-pdd-main.lock"),
       JSON.stringify({
         pid: deadPid,
         worker_id: "ghost",
@@ -112,22 +119,22 @@ describe("platform lock", () => {
       }),
       "utf8",
     );
-    const acquired = acquireLock(dir, "pdd", "worker-live");
+    const acquired = acquireLock(dir, "pdd", "pdd-main", "worker-live");
     expect(acquired.held).toBe(true);
     if (acquired.held) acquired.release();
   });
 
   it("release does not remove a lock owned by someone else", () => {
     const dir = tempStateDir();
-    const first = acquireLock(dir, "pdd", "worker-1");
+    const first = acquireLock(dir, "pdd", "pdd-main", "worker-1");
     expect(first.held).toBe(true);
     if (!first.held) return;
     first.release();
-    const second = acquireLock(dir, "pdd", "worker-2");
+    const second = acquireLock(dir, "pdd", "pdd-main", "worker-2");
     expect(second.held).toBe(true);
     if (!second.held) return;
     first.release();
-    expect(readLockFile(join(dir, "pdd.lock"))?.worker_id).toBe("worker-2");
+    expect(readLockFile(join(dir, "pdd-pdd-main.lock"))?.worker_id).toBe("worker-2");
     second.release();
   });
 });

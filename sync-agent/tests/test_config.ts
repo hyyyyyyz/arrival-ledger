@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { loadConfig, maskKey, parseEnvFile } from "../src/config.js";
+import { configFailures, loadConfig, maskKey, parseEnvFile } from "../src/config.js";
 
 const createdDirs: string[] = [];
 
@@ -47,9 +47,13 @@ describe("loadConfig", () => {
     expect(config.max_pages).toBe(5);
     expect(config.max_records).toBe(30);
     expect(config.page_delay_ms).toBe(2500);
+    expect(config.min_interval_minutes).toBe(15);
     expect(config.worker_id.length).toBeGreaterThan(0);
+    expect(config.account_keys["pdd"]).toBe("pdd-main");
+    expect(config.account_keys["1688"]).toBe("1688-main");
     expect(config.profile_dirs["pdd"]).toBeTruthy();
     expect(config.profile_dirs["1688"]).toBeTruthy();
+    expect(config.order_list_urls["1688"]).toContain("1688.com");
     expect(issues).toEqual([]);
   });
 
@@ -57,13 +61,21 @@ describe("loadConfig", () => {
     const dir = tempDir();
     writeFileSync(
       join(dir, ".env.local"),
-      "SYNC_MAX_RECORDS=60\nSYNC_PAGE_DELAY_MS=1000\nPDD_PROFILE_DIR=C:/ArrivalLedger/profiles/pdd\n",
+      [
+        "SYNC_MAX_RECORDS=60",
+        "SYNC_PAGE_DELAY_MS=1000",
+        "SYNC_MIN_INTERVAL_MINUTES=30",
+        "PDD_PROFILE_DIR=C:/ArrivalLedger/profiles/pdd",
+        "PDD_ACCOUNT_KEY=pdd-buyer-1",
+      ].join("\n"),
       "utf8",
     );
     const { config } = loadConfig({ cwd: dir, env: {} });
     expect(config.max_records).toBe(60);
     expect(config.page_delay_ms).toBe(1000);
+    expect(config.min_interval_minutes).toBe(30);
     expect(config.profile_dirs["pdd"]).toBe("C:/ArrivalLedger/profiles/pdd");
+    expect(config.account_keys["pdd"]).toBe("pdd-buyer-1");
   });
 
   it("process env overrides the env file", () => {
@@ -73,20 +85,42 @@ describe("loadConfig", () => {
     expect(config.max_records).toBe(80);
   });
 
-  it("reports out-of-range values as issues and falls back to defaults", () => {
+  it("marks set-but-invalid values as FAIL and falls back to defaults", () => {
     const { config, issues } = loadConfig({
       cwd: tempDir(),
-      env: { SYNC_MAX_RECORDS: "9999", SYNC_MAX_PAGES: "0" },
+      env: {
+        SYNC_MAX_RECORDS: "9999",
+        SYNC_MAX_PAGES: "0",
+        PDD_ACCOUNT_KEY: "bad account key!",
+      },
     });
     expect(config.max_records).toBe(30);
     expect(config.max_pages).toBe(5);
-    expect(issues.map((issue) => issue.field)).toContain("SYNC_MAX_RECORDS");
-    expect(issues.map((issue) => issue.field)).toContain("SYNC_MAX_PAGES");
+    const fields = issues.map((issue) => issue.field);
+    expect(fields).toContain("SYNC_MAX_RECORDS");
+    expect(fields).toContain("SYNC_MAX_PAGES");
+    expect(fields).toContain("PDD_ACCOUNT_KEY");
+    expect(issues.every((issue) => issue.severity === "FAIL")).toBe(true);
   });
 
-  it("validates the API base URL scheme", () => {
+  it("validates the API base URL scheme as FAIL", () => {
     const { issues } = loadConfig({ cwd: tempDir(), env: { ARRIVAL_API_BASE_URL: "ftp://x" } });
     expect(issues.map((issue) => issue.field)).toContain("ARRIVAL_API_BASE_URL");
+    expect(issues[0]?.severity).toBe("FAIL");
+  });
+
+  it("requires https order list URLs", () => {
+    const { issues } = loadConfig({ cwd: tempDir(), env: { ALI1688_ORDER_URL: "http://insecure" } });
+    expect(issues.some((issue) => issue.field === "ALI1688_ORDER_URL" && issue.severity === "FAIL")).toBe(true);
+  });
+
+  it("configFailures filters FAIL severity only", () => {
+    const { issues } = loadConfig({
+      cwd: tempDir(),
+      env: { SYNC_MAX_PAGES: "abc" },
+    });
+    expect(configFailures(issues).length).toBeGreaterThan(0);
+    expect(configFailures([])).toEqual([]);
   });
 });
 

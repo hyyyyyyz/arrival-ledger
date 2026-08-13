@@ -1,9 +1,13 @@
 import { existsSync, mkdirSync, accessSync, constants } from "node:fs";
 import { parseArgs } from "node:util";
 
-import { loadConfig, maskKey } from "./config.js";
+import { getAdapter } from "./adapters/index.js";
+import { launchSyncBrowser } from "./browser/context.js";
+import { checkPageState } from "./browser/guards.js";
+import { configFailures, loadConfig, maskKey } from "./config.js";
 import { JsonLogger } from "./log.js";
 import { isPlatform, PLATFORMS, type Platform } from "./models.js";
+import { runSyncOnce } from "./run.js";
 import { acquireLock, describeHolder } from "./state/lock.js";
 import { loadCursor } from "./state/cursor.js";
 
@@ -13,25 +17,47 @@ interface DoctorCheck {
   detail: string;
 }
 
-const HELP = `arrival-ledger sync-agent (D1 skeleton)
+const HELP = `arrival-ledger sync-agent (browser sync MVP)
 
 Usage:
   sync-agent doctor [--offline] [--platform <pdd|1688>]
   sync-agent login-check --platform <pdd|1688>
-  sync-agent sync-once --platform <pdd|1688> --mode <dry-run|commit>
+  sync-agent sync-once --platform <pdd|1688> --mode <dry-run|commit> [--yes]
 
 Commands:
   doctor       Check local configuration, state, locks and (unless --offline)
                the local Chromium installation. Never contacts platform sites.
-  login-check  Planned for D3/D4 (not implemented in this milestone).
-  sync-once    Planned for D3/D4 (not implemented in this milestone).
+  login-check  Open the visible browser on the platform order list and report
+               login/captcha state. It never fills passwords or solves
+               captchas; log in manually in the visible window.
+  sync-once    Read visible orders once. dry-run only prints a local report;
+               commit uploads the SAME record set and requires --yes.
+
+Flags:
+  --offline    doctor: skip the Chromium check
+  --platform   one of: pdd, 1688
+  --mode       dry-run | commit
+  --yes        confirm commit after reviewing the dry-run report
 `;
 
 function parsePlatformFlag(values: { platform?: string } | undefined): Platform | null {
   const platform = values?.platform;
   if (platform === undefined) return null;
-  if (!isPlatform(platform)) return null;
-  return platform;
+  return isPlatform(platform) ? platform : null;
+}
+
+function fail(message: string, exitCode = 2): number {
+  process.stderr.write(`error: ${message}\n`);
+  return exitCode;
+}
+
+function requireValidConfig(issues: ReturnType<typeof loadConfig>["issues"]): number | null {
+  const failures = configFailures(issues);
+  if (failures.length === 0) return null;
+  for (const issue of failures) {
+    process.stderr.write(`error: config ${issue.field}: ${issue.message}\n`);
+  }
+  return fail("invalid configuration; fix .env.local and retry (fail-closed)", 1);
 }
 
 function ensureWritableDirectory(path: string): { state: DoctorCheck["state"]; detail: string } {
@@ -80,7 +106,7 @@ async function runDoctor(options: {
   logger.info({ command: "doctor", message: "doctor started", counts: { offline: options.offline ? 1 : 0 } });
 
   const checks: DoctorCheck[] = [];
-  const [major, minor] = process.versions.node.split(".").map(Number);
+  const [major] = process.versions.node.split(".").map(Number);
   checks.push({
     label: "node version",
     state: (major ?? 0) >= 20 ? "OK" : "FAIL",
@@ -90,7 +116,11 @@ async function runDoctor(options: {
   const platforms = options.platform === null ? [...PLATFORMS] : [options.platform];
 
   for (const issue of issues) {
-    checks.push({ label: `config ${issue.field}`, state: "WARN", detail: issue.message });
+    checks.push({
+      label: `config ${issue.field}`,
+      state: issue.severity === "FAIL" ? "FAIL" : "WARN",
+      detail: issue.message,
+    });
   }
   if (issues.length === 0) {
     checks.push({ label: "config", state: "OK", detail: "all configured values are valid" });
@@ -104,27 +134,33 @@ async function runDoctor(options: {
   checks.push({
     label: "api base url",
     state: "OK",
-    detail: `${config.api_base_url} (sync-once is not implemented in D1; no request was made)`,
+    detail: `${config.api_base_url} (doctor itself makes no network requests)`,
   });
   checks.push({
     label: "worker key",
     state: config.worker_key.length > 0 ? "OK" : "WARN",
     detail: config.worker_key.length > 0
       ? `configured as ${maskKey(config.worker_key)}`
-      : "not set; required before the first commit (D2+)",
+      : "not set; required before the first commit",
   });
 
   for (const platform of platforms) {
+    const accountKey = config.account_keys[platform];
     const profileDir = config.profile_dirs[platform];
     checks.push({
       label: `${platform} profile dir`,
       state: existsSync(profileDir) ? "OK" : "WARN",
       detail: existsSync(profileDir)
         ? profileDir
-        : `${profileDir} does not exist yet; create it before D3/D4 login checks`,
+        : `${profileDir} does not exist yet; run login-check to create and log in`,
+    });
+    checks.push({
+      label: `${platform} account key`,
+      state: "OK",
+      detail: `${accountKey} (cursor and lock are isolated per account_key)`,
     });
 
-    const lock = acquireLock(config.state_dir, platform, config.worker_id);
+    const lock = acquireLock(config.state_dir, platform, accountKey, config.worker_id);
     if (lock.held) {
       lock.release();
       checks.push({ label: `${platform} lock`, state: "OK", detail: "acquired and released" });
@@ -136,14 +172,14 @@ async function runDoctor(options: {
       });
     }
 
-    const cursor = loadCursor(config.state_dir, platform);
+    const cursor = loadCursor(config.state_dir, platform, accountKey);
     checks.push({
       label: `${platform} cursor`,
       state: "OK",
       detail:
         cursor === null
           ? "no cursor yet"
-          : `last=${cursor.last_status} failures=${cursor.consecutive_failures}`,
+          : `last=${cursor.last_status} failures=${cursor.consecutive_failures} sync=${cursor.last_sync_at ?? "never"}`,
     });
   }
 
@@ -170,16 +206,60 @@ async function runDoctor(options: {
   return failures.length === 0 ? 0 : 1;
 }
 
-function notImplemented(command: string, values: { platform?: string } | undefined): number {
-  const platform = parsePlatformFlag(values);
-  if (platform === null) {
-    process.stderr.write(`error: --platform <pdd|1688> is required for ${command}\n`);
-    return 2;
+async function runLoginCheck(platform: Platform): Promise<number> {
+  const { config, issues } = loadConfig();
+  const configExit = requireValidConfig(issues);
+  if (configExit !== null) return configExit;
+
+  const logger = new JsonLogger({ logDir: config.log_dir });
+  const accountKey = config.account_keys[platform];
+  const profileDir = config.profile_dirs[platform];
+  if (!existsSync(profileDir)) {
+    return fail(`profile dir ${profileDir} does not exist; create it before login-check`, 1);
   }
-  process.stderr.write(
-    `${command} for ${platform} is not implemented in this milestone (D1); it will land with the D3/D4 visible-page adapters.\n`,
-  );
-  return 2;
+
+  const lock = acquireLock(config.state_dir, platform, accountKey, config.worker_id);
+  if (!lock.held) {
+    logger.error({
+      command: "login-check",
+      platform,
+      message: `another sync is running (${describeHolder(lock.holder)})`,
+      error_code: "LOCKED",
+    });
+    return 1;
+  }
+
+  const adapter = getAdapter(platform);
+  let browser = null;
+  try {
+    browser = await launchSyncBrowser(profileDir);
+    const page = browser.context.pages()[0] ?? (await browser.context.newPage());
+    await adapter.openOrders(page, { max_pages: 1, max_records: 1 });
+    const state = await checkPageState(page, adapter);
+    process.stdout.write(`[${state.status === "OK" ? "OK" : "WARN"}] ${platform} login state: ${state.detail}\n`);
+    if (state.status !== "OK") {
+      process.stdout.write(
+        "Please finish login manually in the visible browser window. This tool never fills passwords or solves captchas.\n",
+      );
+      logger.warn({ command: "login-check", platform, status: state.status, message: state.detail });
+      return 1;
+    }
+    logger.info({ command: "login-check", platform, status: "OK", message: state.detail });
+    return 0;
+  } finally {
+    if (browser !== null) await browser.close().catch(() => undefined);
+    lock.release();
+  }
+}
+
+async function runSyncOnceCommand(platform: Platform, mode: "dry-run" | "commit", confirm: boolean): Promise<number> {
+  const { config, issues } = loadConfig();
+  const configExit = requireValidConfig(issues);
+  if (configExit !== null) return configExit;
+
+  const logger = new JsonLogger({ logDir: config.log_dir });
+  const outcome = await runSyncOnce({ config, platform, mode, confirm, logger });
+  return outcome.exitCode;
 }
 
 async function main(): Promise<number> {
@@ -192,6 +272,7 @@ async function main(): Promise<number> {
       offline: { type: "boolean", default: false },
       platform: { type: "string" },
       mode: { type: "string" },
+      yes: { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
   });
@@ -201,32 +282,37 @@ async function main(): Promise<number> {
     process.stdout.write(HELP);
     return 0;
   }
+  if (extraPositionals.length > 0) {
+    return fail(`unexpected arguments: ${extraPositionals.join(" ")}`);
+  }
+
+  const platform = parsePlatformFlag(values);
+  if (command !== "doctor" && values.platform === undefined) {
+    return fail(`--platform <pdd|1688> is required for ${command}`);
+  }
+  if (values.platform !== undefined && platform === null) {
+    return fail(`--platform must be one of: ${PLATFORMS.join(", ")}`);
+  }
 
   switch (command) {
-    case "doctor": {
-      if (extraPositionals.length > 0) {
-        process.stderr.write(`error: unexpected arguments: ${extraPositionals.join(" ")}\n`);
-        return 2;
-      }
-      const platform = parsePlatformFlag(values);
-      if (values.platform !== undefined && platform === null) {
-        process.stderr.write(`error: --platform must be one of: ${PLATFORMS.join(", ")}\n`);
-        return 2;
-      }
+    case "doctor":
       return runDoctor({ offline: values.offline, platform });
-    }
     case "login-check":
+      if (platform === null) return fail(`--platform is required for login-check`);
+      return runLoginCheck(platform);
     case "sync-once": {
-      if (command === "sync-once" && values.mode !== undefined && !["dry-run", "commit"].includes(values.mode)) {
-        process.stderr.write("error: --mode must be dry-run or commit\n");
-        return 2;
+      if (platform === null) return fail(`--platform is required for sync-once`);
+      if (values.mode === undefined) return fail(`--mode dry-run|commit is required for sync-once`);
+      if (values.mode !== "dry-run" && values.mode !== "commit") {
+        return fail("--mode must be dry-run or commit");
       }
-      return notImplemented(command, values);
+      if (values.mode === "commit" && !values.yes) {
+        return fail("commit requires --yes after reviewing the dry-run report; nothing was uploaded");
+      }
+      return runSyncOnceCommand(platform, values.mode, values.yes);
     }
-    default: {
-      process.stderr.write(`error: unknown command: ${command}\n\n${HELP}`);
-      return 2;
-    }
+    default:
+      return fail(`unknown command: ${command}\n\n${HELP}`);
   }
 }
 
