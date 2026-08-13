@@ -88,14 +88,25 @@ describe("postBatch", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 
-  it("surfaces 429 with Retry-After", async () => {
+  it("surfaces 429 with a long Retry-After immediately", async () => {
     const fetchImpl = vi.fn(
-      async () => new Response("{}", { status: 429, headers: { "Retry-After": "120" } }),
+      async () => new Response("{}", { status: 429, headers: { "Retry-After": "3600" } }),
     ) as unknown as typeof fetch;
     await expect(postBatch({ ...options, backoff_ms: 1 }, validBatch(), fetchImpl)).rejects.toMatchObject({
       kind: "rate_limited",
-      retry_after_seconds: 120,
+      retry_after_seconds: 3600,
     });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries 429 with a short Retry-After", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response("{}", { status: 429, headers: { "Retry-After": "1" } }),
+    ) as unknown as typeof fetch;
+    await expect(postBatch({ ...options, backoff_ms: 1 }, validBatch(), fetchImpl)).rejects.toMatchObject({
+      kind: "rate_limited",
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 
   it("rejects malformed server responses", async () => {

@@ -4,7 +4,7 @@
 上传到到货管家自己的 `/api/sync/v1/batches`。本包不调用任何平台官方 API、OAuth、
 抓包或验证码绕过。完整边界见仓库根目录 [`docs/BROWSER_SYNC_SPEC.md`](../docs/BROWSER_SYNC_SPEC.md)。
 
-## 当前进度（D4：拼多多可见页面适配器）
+## 当前进度（D5：端到端测试与交接就绪）
 
 已实现：
 
@@ -12,17 +12,19 @@
 - 纯函数字符串/日期/数量规范化（`src/normalize.ts`）；
 - 本机配置加载与脱敏展示，配置错误 fail-closed（`src/config.ts`）；
 - 平台游标按 `(platform, account_key)` 原子读写、单实例锁、脱敏 JSON Lines 日志（`src/state/`、`src/log.ts`）；
-- 内部批次传输客户端（`src/transport.ts`：401/403/409/422 不重试，429/5xx 有限退避）；
+- 内部批次传输客户端（`src/transport.ts`：401/403/409/422 不重试；429/5xx 有限退避；`Retry-After ≥ 60s` 直接放弃）；
 - `doctor --offline`、`login-check`、`sync-once --mode dry-run|commit`（`src/cli.ts`）；
 - 同步编排 `src/run.ts`：dry-run 不上传；commit 必须 `--yes`；空列表不覆盖服务器数据；低频限制（默认 15 分钟）；
 - 1688 买家订单页适配器（表头列映射 + 行内标签两种解析模式）；
 - 拼多多订单页适配器（卡片式结构：标签提取 + 结构化 class 兜底，`加载更多` 分页）；
-- 登录/风控/空列表守卫、状态映射、脱敏 fixture 测试。
+- 跨语言契约锁定：TS 序列化 golden fixture 与后端 pytest 直接互验（`tests/fixtures/batch_contract.json`）；
+- 契约级端到端测试：真实 HTTP 模拟服务器验证上传、幂等重放、409、401、429 与游标推进。
 
-尚未完成（后续阶段）：
+待手工验收（唯一剩余项）：
 
-- D5 Windows 真实页面验收：两个平台各手动 dry-run 20–30 条真实订单，字段完整率 ≥95% 后再评估 commit；
-- 选择器是依据规格书编写的初始版本，真实页面结构不一致时程序会以 `SCHEMA_CHANGED` 熔断，需要按真实页面在对应 adapter 中调整选择器并补充脱敏 fixture。
+- 按 [`docs/SYNC_MANUAL_ACCEPTANCE.md`](../docs/SYNC_MANUAL_ACCEPTANCE.md) 在 Windows 真机上各平台 dry-run 20–30 条真实订单；
+- 真实页面结构不一致时程序会以 `SCHEMA_CHANGED` 熔断，需按真实页面调整对应 adapter 选择器并补充脱敏 fixture 后重新跑测试；
+- 全部通过后才评估 commit 与 Task Scheduler。
 
 本包在开发机上不连接真实平台页面；`doctor` 的非离线模式只检查本机 Chromium 是否可启动。
 

@@ -79,7 +79,10 @@ export function validateBatchForSubmission(batch: unknown): ValidationIssue[] {
 }
 
 export function isRetryable(error: TransportError): boolean {
-  return error.kind === "server" || error.kind === "network" || error.kind === "rate_limited";
+  if (error.kind === "rate_limited") {
+    return error.retry_after_seconds === null || error.retry_after_seconds < 60;
+  }
+  return error.kind === "server" || error.kind === "network";
 }
 
 export async function postBatch(

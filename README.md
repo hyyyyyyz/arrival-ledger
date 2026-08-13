@@ -16,10 +16,13 @@ GitHub 仓库名与工程标识为 `arrival-ledger`；中文产品名继续使�
 
 ## 当前开发路线（v1.0）
 
-1688 和拼多多不再接入官方平台 API、OAuth 或 AppKey/token。订单同步统一放在闲置 Windows 电脑上，用两个独立的可见 Chrome profile 和 Playwright 读取用户可见订单页面；服务器只接收规范化订单批次。平台同步端尚未实现，先按文档冻结契约，再交给 DeepSeek 分阶段开发。
+1688 和拼多多不再接入官方平台 API、OAuth 或 AppKey/token。订单同步统一放在闲置 Windows 电脑上，用两个独立的可见 Chrome profile 和 Playwright 读取用户可见订单页面；服务器只接收规范化订单批次。
+
+同步端代码已在 `feat/browser-sync-mvp` 分支完成（骨架、离线 doctor、`/api/sync/v1/batches` 批次接收、1688 与 PDD 只读适配器、dry-run/commit 编排），并通过全部自动化测试；尚未合并 main，待 Windows 真机按手工验收清单跑通后再合并。真实平台只能先 dry-run，禁止自动登录、验证码绕过或上传 Cookie/profile。
 
 - [总体计划](PLAN.md)
 - [浏览器同步技术规格](docs/BROWSER_SYNC_SPEC.md)
+- [Windows 手工验收清单](docs/SYNC_MANUAL_ACCEPTANCE.md)
 - [DeepSeek 实现任务单](DEEPSEEK_HANDOFF.md)
 - [开发与提交规范](CONTRIBUTING.md)
 
