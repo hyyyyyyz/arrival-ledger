@@ -14,6 +14,34 @@ GitHub 仓库名与工程标识为 `arrival-ledger`；中文产品名继续使�
 
 面向手机和微信内置浏览器的私有包裹到货确认工具。当前部署目标是 Ubuntu 22.04 + Docker Compose，迁移后的局域网入口为 `http://192.168.1.5:8766`。访问模式由 `.env` 控制：局域网免登录只适合可信 Wi-Fi；本次公网测试期间目标机已切换为 `AUTH_REQUIRED=true`、`COOKIE_SECURE=true`，请通过 HTTPS 临时隧道访问并登录。
 
+## 当前开发路线（v1.0）
+
+1688 和拼多多不再接入官方平台 API、OAuth 或 AppKey/token。订单同步统一放在闲置 Windows 电脑上，用两个独立的可见 Chrome profile 和 Playwright 读取用户可见订单页面；服务器只接收规范化订单批次。平台同步端尚未实现，先按文档冻结契约，再交给 DeepSeek 分阶段开发。
+
+- [总体计划](PLAN.md)
+- [浏览器同步技术规格](docs/BROWSER_SYNC_SPEC.md)
+- [DeepSeek 实现任务单](DEEPSEEK_HANDOFF.md)
+- [开发与提交规范](CONTRIBUTING.md)
+
+第一测试版的固定流程是：
+
+```text
+doctor → login-check → sync-once --mode dry-run → 用户确认 → --mode commit
+```
+
+“不要 API”在这里指“不调用 1688/PDD 官方平台 API”。Windows 同步端仍需调用到货管家自己的 `/api/sync/v1/batches`，这是内部的安全传输接口，不接受密码、Cookie 或浏览器 profile。
+
+### Windows 同步端预期目录
+
+```text
+C:\ArrivalLedger\profiles\pdd       # 拼多多独立登录态
+C:\ArrivalLedger\profiles\1688      # 1688 独立登录态
+C:\ArrivalLedger\state               # 游标和批次状态
+C:\ArrivalLedger\logs                # 脱敏日志
+```
+
+首次运行必须在可见窗口手工登录；MVP 不自动填密码、不后台运行、不启用任务计划。真实订单、截图、Chrome profile 和登录态不得复制到服务器或提交 Git。
+
 ## 部署结构
 
 ```text

@@ -37,6 +37,16 @@ uploads/
 backups/
 *.tar.gz
 pdd-profile/
+sync-agent/.env.local
+sync-agent/profiles/
+sync-agent/state/
+sync-agent/logs/
+sync-agent/failed/
+sync-agent/artifacts/
+sync-agent/test-results/
+sync-agent/storage-state*.json
+*.har
+*.trace.zip
 imports/private/
 exports/
 订单数据_*.csv

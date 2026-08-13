@@ -1,6 +1,6 @@
 # arrival-ledger（「到货管家」）采购包裹到货确认系统
 
-## 总体实施计划 v0.9（2026-08-13）
+## 总体实施计划 v1.0（2026-08-13）
 
 > 这份文档是当前方案的唯一事实来源。它把手机收货页面、订单导入、平台同步和公网访问拆成可以分别验收的模块。平台同步失败时，核心的拍照收货功能仍必须可用。
 
@@ -21,47 +21,27 @@
 |---|---|---:|---|
 | 仓库局域网 | 微信 H5，访问 http://192.168.1.5:8766 | 否 | `.5` 已部署并通过服务端健康检查，待真机完整验收 |
 | 外网/异地 | HTTPS 临时 Quick Tunnel（无域名） | 是 | `.5` 已启用临时隧道并通过公网健康检查；等待手机登录/拍照验收 |
-| 拼多多订单采集 | 闲置 Windows 上的独立 Chrome + 本地同步程序 | 拼多多登录只留在 Windows | 计划中的实验功能 |
-| 1688 订单采集 | 1688 官方开放平台买家接口 | 手机端不需要 | 等账号资格和权限验证 |
+| 平台订单采集 | 闲置 Windows 上的两个独立 Chrome profile + `sync-agent` | 平台登录只留在 Windows | MVP 正在设计，先手动 dry-run |
 
-服务器是纯 Server，不需要安装桌面环境。Windows 电脑只承担“保持拼多多浏览器登录并同步订单”的工作；Mac 不参与采集，也不需要一直开着。
+服务器是纯 Server，不需要安装桌面环境。Windows 电脑只承担“保持 PDD/1688 浏览器登录并同步订单”的工作；Mac 不参与采集，也不需要一直开着。
 
 ### 0.3 平台结论
 
-#### 拼多多
+#### 1688 与拼多多（统一浏览器自动化路线）
 
-截至本版本核查，拼多多公开订单接口面向店铺/卖家或特定推广场景，不是普通买家跨店查看“我的采购订单”的公开 API。官方订单说明、授权说明和 FAQ 可分别查看：
+本项目明确**不申请、不实现、不依赖 1688 或拼多多的官方平台 API**。此前调研过的开放平台、OAuth、AppKey、AppSecret、access token、官方订单导出等路径全部从实现计划中移除；它们不应出现在同步端代码、配置或部署步骤里。
 
-- [订单基础介绍](https://open.pinduoduo.com/application/document/browse?idStr=10388E8ACD79B689)
-- [授权说明](https://open.pinduoduo.com/application/document/browse?idStr=BD3A776A4D41D5F5)
-- [FAQ：订单所属店铺](https://open.pinduoduo.com/application/faq?id=A9918F5819234A65)
-- [FAQ：订单查询范围](https://open.pinduoduo.com/application/faq?id=A3BC2723097BFE24)
-- [FAQ：token 与店铺关系](https://open.pinduoduo.com/application/faq?id=EF2DB30A2A9C8FD7)
+两个平台统一由 Windows 闲置电脑上的 Node.js/TypeScript + Playwright headed worker 读取用户已经打开并登录的可见网页：
 
-个人开发者身份也不能自动解决这个问题；[官方身份说明](https://open.pinduoduo.com/application/business/list?role=softwareService&activeKey=1&alias=pop_identificationcertificate)中，个人应用主要是“多多客联盟”推广场景，不等于个人购物订单接口。因此不把“申请拼多多个人开发者 API”作为当前路线。
+1. 用户在两个独立 Chrome profile 中手工登录；
+2. worker 打开订单列表，只读取用户可见 DOM/无障碍文本和正常分页；
+3. 先生成 dry-run 预览，用户明确确认后才上传结构化订单；
+4. 到货管家服务器按订单/商品/运单号幂等入库；
+5. 手机扫码得到快递运单号，再反查订单和商品。
 
-不购买多多开时，按以下优先级处理：
+浏览器同步是非官方、可失效的实验增强能力，可能因页面改版、登录过期、验证码、风控或平台规则而停止。禁止调用平台内部 API、抓包、网络拦截、验证码/滑块绕过、代理池、IP 轮换和高频抓取；遇到阻断必须熔断并人工处理。完整规格见 [`docs/BROWSER_SYNC_SPEC.md`](docs/BROWSER_SYNC_SPEC.md)。
 
-1. 先测试拼多多官方的个人信息下载/订单导出功能；
-2. 已有 CSV 导出直接批量导入；
-3. 若必须定期自动更新，再在 Windows 上做低频、只读、可见的浏览器同步实验；
-4. 同步失效时回退到 CSV、截图/OCR 或少量手工补录。
-
-浏览器同步不是官方 API，可能因页面改版、登录过期、验证码或平台规则而失效，不能把它承诺为永久稳定能力。拼多多用户协议对插件、机器人、爬虫及程序化获取内容有限制，实施时不得绕过验证码、滑块、风控，不使用代理池、IP 轮换或高频抓取；遇到阻断立即停止并交给人工处理。[拼多多用户服务协议](https://www.yangkeduo.com/pdd_user_services_agreement.pdf)
-
-#### 1688
-
-优先尝试官方的“采购解决方案（买家自用版）”，官方方案页为：
-
-[1688 采购解决方案（买家自用版）](https://open.1688.com/solution/solutionDetail.htm?solutionKey=1613638539385)
-
-当前官方描述要求 1688 L2 以上买家/已有历史买卖关系，实际能否订购以控制台资格为准。只读匹配链路规划为：
-
-订单列表 → 买家订单详情 → NativeLogistics 中的 logisticsBillNo → 与面单运单号匹配
-
-订单列表本身只提供基本订单信息，不保证含物流。一个订单要遍历所有 logisticsItems；orderId 以字符串保存，不能用前端 Number 处理 18 位 ID。若订单详情没有物流字段，再按权限申请 com.alibaba.logistics 的买家物流接口。
-
-企业自用应用通常可以在“授权配置”中添加实际采购账号并取得持久 token，从而不需要先配置公网 OAuth 回调；AppSecret 和 token 只能放服务器。若账号不满足资格或订单详情权限未开通，保留手工/CSV/截图兜底，不阻塞收货闭环。
+CSV、截图/OCR和手工录入是降级路径，不依赖平台 API，也不阻塞 P0 收货闭环。
 
 ### 0.4 当前最重要的取舍
 
@@ -147,7 +127,8 @@ ZXing/条码库足以处理规则清晰的条码；OCR 或大模型只作为破�
     OK
     NEEDS_LOGIN
     CAPTCHA_OR_BLOCKED
-    FAILED
+    SCHEMA_CHANGED
+    NETWORK_ERROR
     DISABLED
 
 ## 3. 用户交互流程
@@ -205,15 +186,15 @@ Ubuntu 服务器 192.168.1.5
   ├─ FastAPI 业务 API
   ├─ SQLite（订单、包裹、事件、同步任务）
   ├─ 本地照片目录与备份
-  └─ 1688 服务端适配器（未来）
+  └─ 内部 sync ingest API（只接收 Windows 结构化批次）
                 ▲
-                │ 局域网出站 API，最小字段
+                │ Windows 主动出站，最小字段
                 │
 闲置 Windows 电脑
-  ├─ 独立 Chrome user-data-dir
-  ├─ 拼多多登录态（只留本机）
-  ├─ 本地同步程序/Playwright（未来实验）
-  └─ Windows Task Scheduler（低频定时）
+  ├─ 独立 Chrome profile：PDD
+  ├─ 独立 Chrome profile：1688
+  ├─ Node.js/TypeScript + Playwright headed worker
+  └─ Task Scheduler（MVP 验收后才启用）
 ~~~
 
 ### 4.1 手机 H5 负责什么
@@ -231,12 +212,12 @@ Ubuntu 服务器 192.168.1.5
 - 以 client_event_id 做幂等；
 - 保存订单、包裹、商品行和多对多关系；
 - 查询、去重、匹配、事件时间线和备份；
-- 接收 Windows/1688 同步任务；
+- 接收 Windows 浏览器同步批次；
 - 不负责把拼多多账号登录到网页，也不保存浏览器会话。
 
 ### 4.3 Windows 同步端负责什么
 
-- 在真实用户已登录的拼多多网页环境中读取订单展示数据；
+- 在真实用户已登录的 1688/拼多多网页环境中读取订单展示数据；
 - 只上传必要的非 PII 字段；
 - 记录同步游标、结果和错误状态；
 - 登录失效/验证码/页面改版时停止并提示人工；
@@ -244,9 +225,21 @@ Ubuntu 服务器 192.168.1.5
 
 Windows 端不需要把 Chrome 窗口交给服务器控制，也不要求 Mac 同时运行。服务器是纯 Server，没有桌面依赖。
 
-## 5. 订单导入路线（按推荐顺序）
+## 5. 订单进入路线
 
-### 5.1 路线 A：CSV 批量导入（第一优先级）
+### 5.1 主路线：Windows 浏览器自动化
+
+平台订单的主路线统一是 `sync-agent`：Windows 上两个独立、可见的 Chrome profile，用户手工登录，程序读取可见订单页面，先 dry-run 预览再提交。PDD 和 1688 只在各自 adapter 内处理页面差异，服务器不运行浏览器。
+
+第一测试版固定为：
+
+```text
+doctor → login-check → sync-once --mode dry-run → 用户确认 → --mode commit
+```
+
+每个平台最多先读取 3–5 页/30 条，默认从最新订单向旧订单读取。两次成功同步后才设计游标增量；MVP 不启用无人值守定时任务。
+
+### 5.2 降级路线：CSV 批量导入
 
 用户此前提供的拼多多测试导出样本约有 10 条数据、34 列，包含订单号、下单时间、状态、商品名称/规格/数量、店铺、快递公司和运单号；其中约 9 条有有效运单号，另有退款/未知物流记录。这证明 CSV 已经足够建立订单—包裹映射，不必逐单录入，也不必购买多多开才能导入已有文件。
 
@@ -265,39 +258,23 @@ Windows 端不需要把 Chrome 窗口交给服务器控制，也不要求 Mac �
 
 第一批实现应先导入该样本，再用 100、500、1000 行合成数据验证性能和幂等。
 
-### 5.2 路线 B：拼多多官方个人信息下载/导出（先验证）
-
-拼多多隐私政策提到用户可以在个人中心、设置、账号与安全、个人信息下载申请数据。先在真实采购账号上测试下载文件是否包含订单号、商品和运单字段。若包含完整字段，优先开发 Windows 下载目录监控器：
-
-~~~text
-用户在拼多多页面发起官方下载
-  → 文件落到 Windows Downloads
-  → 监控器发现新文件
-  → 解析、预览、去重
-  → 上传最小字段到服务器
-~~~
-
-这条路线比直接读取动态网页稳定、风险低。官方文档没有承诺下载文件一定包含完整物流字段，因此必须以实际样本验收。
-
-参考：[拼多多隐私政策](https://www.yangkeduo.com/pdd_privacy_policy.pdf)
-
-### 5.3 路线 C：Windows 浏览器同步实验（不购买多多开）
+### 5.3 浏览器同步详细规则
 
 这是用户当前希望采用的免费方案，但必须标记为“非官方、可失效增强能力”。
 
 初始配置：
 
 - Windows 10/11 闲置电脑；
-- 独立 Chrome 数据目录，例如 C:\ArrivalLedger\pdd-profile；
-- 不复用日常 Chrome profile；
+- 两个独立 Chrome 数据目录：`C:/ArrivalLedger/profiles/pdd`、`C:/ArrivalLedger/profiles/1688`；
+- 不复用日常 Chrome profile，不同时打开同一个 profile；
 - 第一次由用户在可见窗口中手工登录；
 - 首次同步前显示当前账号的脱敏标识和订单数量，由用户确认“这是采购账号”后才允许导入；
 - 如果误登录测试账号，只在这个独立 profile 内切换账号或清除拼多多站点数据，不能清理日常 Chrome profile；
 - 密码、Cookie、profile 永不上传服务器，也不进入服务器备份；
-- 单账号、只读、低频，初期每天 1–2 次或每 6–12 小时一次；
-- 首次运行允许前台回补最近几百条，之后按上次成功时间增量同步；
-- Windows 关机/休眠时任务跳过，开机后补跑；
-- 初期保留窗口可见或最小化，不做隐藏式无人值守。
+- 单账号、只读、低频；MVP 只允许手动运行，不启用定时任务；
+- 首次运行最多前台回补 30 条（后续经用户确认才允许扩大到几百条）；
+- Windows 关机/休眠时不运行，任务计划属于验收后的后续阶段；
+- 始终 headed、窗口可见，不做隐藏式无人值守。
 
 同步流程：
 
@@ -316,7 +293,8 @@ Windows 端不需要把 Chrome 窗口交给服务器控制，也不要求 Mac �
 - OK：成功完成；
 - NEEDS_LOGIN：登录过期，提示用户在 Windows 窗口重新登录；
 - CAPTCHA_OR_BLOCKED：出现验证码/风控，立即停止，不自动处理；
-- FAILED：页面结构、网络或解析错误，保留日志和上次成功游标；
+- SCHEMA_CHANGED：页面结构无法确认，保留日志和上次成功游标；
+- NETWORK_ERROR：网络失败，有限退避后停止；
 - DISABLED：用户手动停用同步。
 
 绝不实现：
@@ -325,45 +303,67 @@ Windows 端不需要把 Chrome 窗口交给服务器控制，也不要求 Mac �
 - 代理池、IP 轮换、多账号并发；
 - 高频轮询或伪造用户行为；
 - 自动支付、下单、退款、确认收货；
-- 把内部接口当作长期稳定 API。
+- 把内部同步接口当成平台 API 或控制通道；它只接收 worker 主动提交的结构化批次。
 
-只有手动同步在 20–30 个真实订单上验证字段完整率、去重和登录失效提示后，才允许交给 Windows 任务计划定时运行。
+只有手动同步在两个平台各 20–30 个真实订单上验证字段完整率、去重和登录失效提示后，才允许交给 Windows 任务计划定时运行。
 
-### 5.4 路线 D：截图/OCR/手工兜底
+### 5.4 截图/OCR/手工兜底
 
 订单页或物流页截图可以上传，OCR 结果必须在页面上由用户确认后入库。面单照片中的条码识别失败时，可以手工补录运单号。大模型 API 仅作为后续低频疑难图片辅助，不作为第一版依赖。
 
-## 6. 1688 官方接入路线
+## 6. 浏览器自动化实现方案
 
-### 6.1 申请前提
+### 6.1 MVP 技术选型
 
-1. 使用实际下单的 1688 买家账号；
-2. 登录 [1688 开放平台控制台](https://open.1688.com/console)；
-3. 如提示无身份，先完成[入驻/认证](https://open.1688.com/support/register)；
-4. 申请[采购解决方案（买家自用版）](https://open.1688.com/solution/solutionDetail.htm?solutionKey=1613638539385)；
-5. 方案当前说明要求 L2 以上买家/已有历史买卖关系，是否可订购以控制台实际结果为准。
+- Windows 10/11；
+- Node.js 20 LTS + TypeScript strict；
+- Playwright（锁定版本）+ `chromium.launchPersistentContext`；
+- headed Chrome，两个独立 `user-data-dir`；
+- CLI 先支持 `doctor`、`login-check`、`sync-once --mode dry-run|commit`；
+- 服务器只增加内部 `/api/sync/v1/batches` 接收接口，不把平台 API 误称为“不要 API”。
 
-### 6.2 只读同步链路
+### 6.2 适配器分层
 
-~~~text
-getBuyerOrderList
-  → alibaba.trade.get.buyerView(webSite=1688, orderId,
-                                includeFields=NativeLogistics)
-  → nativeLogistics.logisticsItems[].logisticsBillNo
-  → 与面单 tracking_no 匹配
-~~~
+```text
+browser/guards      登录、验证码、风控、页面状态守卫
+adapters/pdd.ts     拼多多页面入口、订单卡片、详情和分页
+adapters/ali1688.ts 1688 页面入口、订单行、详情和分页
+extract/            纯函数：文本、日期、数量、运单号、订单模型
+state/              游标、批次、单实例锁、失败状态
+transport/          到货管家内部批次上传
+run/                dry-run 预览、用户确认、commit 编排
+```
 
-订单列表本身只提供基本订单信息，不保证含物流。一个订单要遍历所有 logisticsItems；orderId 以字符串保存，不能用前端 Number 处理 18 位 ID。若订单详情没有物流字段，再按权限申请 com.alibaba.logistics 的买家物流接口。
+适配器只能读取用户可见 DOM/无障碍文本和正常分页；不允许 `page.on('request')`、`evaluate(fetch(...))`、抓取隐藏接口或注入脚本改变页面。页面结构不确定时返回 `SCHEMA_CHANGED`，保留游标，不猜数据。
 
-### 6.3 凭据和最小权限
+### 6.3 统一状态
 
-- 优先使用企业自用应用的授权配置/持久 token（若控制台提供）；
-- AppSecret、access token 只放服务器加密配置；
-- 前端、Windows 拼多多端和聊天记录都不能接触 1688 密钥；
-- 只申请订单列表、订单详情、物流号所需权限；
-- 不申请或读取地址、电话等无关字段；
-- token 撤销、应用下线或权限变化时，任务进入 FAILED/NEEDS_AUTH，不影响已有数据；
-- 资格不满足时继续使用 CSV/手工导入，不绕过平台。
+```text
+OK
+NEEDS_LOGIN
+CAPTCHA_OR_BLOCKED
+SCHEMA_CHANGED
+NETWORK_ERROR
+DISABLED
+```
+
+只有 `OK` 才能推进游标。验证码、滑块、异常登录或风控状态不重试；网络错误最多有限退避；连续解析失败熔断并要求人工检查。
+
+### 6.4 内部同步接口
+
+“不用平台 API”不等于“不要内部 HTTP 接口”。Windows 端必须通过本项目自己的接口把规范化订单安全、幂等地送到服务器：
+
+```http
+POST /api/sync/v1/batches
+Authorization: Bearer <worker-token>
+Idempotency-Key: <run-id>
+```
+
+请求只允许 `platform`、`account_key`、订单/商品/包裹、游标和批次统计；拒绝密码、Cookie、token、地址、电话、HTML、截图和未知敏感字段。服务器保存 worker token 摘要，按 `(platform, account_key, platform_order_id)` 幂等 upsert，订单与包裹采用多对多关系。详细 JSON 契约见 [`docs/BROWSER_SYNC_SPEC.md`](docs/BROWSER_SYNC_SPEC.md)。
+
+### 6.5 账户与人工确认
+
+`account_key` 由用户在 Windows 本地配置，不能依赖抓取手机号。首次 `login-check` 显示脱敏账号标识和订单数量，用户确认后才可 `commit`。程序不自动输入密码、不处理短信/二维码登录，不上传 profile。
 
 ## 7. 数据模型（目标模型）
 
@@ -389,7 +389,7 @@ order_items(
 )
 
 packages(
-  id, platform_account_id, courier,
+  id, courier,
   tracking_no, tracking_no_normalized,
   match_status, receipt_status, source,
   first_received_at, created_at, updated_at
@@ -407,14 +407,15 @@ import_batches(
   records_skipped, error_count, report_json
 )
 
-sync_jobs(
-  id, platform, source, started_at, finished_at,
+sync_runs(
+  id, run_id, platform, account_key, worker_id, source,
+  started_at, finished_at,
   status, cursor, records_seen, records_changed,
   error_code, error_message
 )
 ~~~
 
-现有 receipt_events 继续追加式保存 RECEIVE、REVOKE、REMATCH 事件，并关联照片、SHA-256、设备 ID 和操作人。packages 的唯一性不能只用全局 tracking_no；应按平台账号、承运商和标准化单号组合，未知承运商时允许候选匹配后再合并。
+现有 receipt_events 继续追加式保存 RECEIVE、REVOKE、REMATCH 事件，并关联照片、SHA-256、设备 ID 和操作人。物理包裹优先按 `courier_normalized + tracking_no_normalized` 建立全局候选，同一包裹可同时关联 PDD/1688 订单；未知承运商时先保留候选，不覆盖已有关系。
 
 原始平台文件和原始响应如需短期留存，必须单独隔离、限制权限并设置删除周期；业务表不保存收件人姓名、电话和完整地址。
 
@@ -457,8 +458,9 @@ sync_jobs(
 - TypeScript 检查通过；
 - 生产构建通过；
 - 尚未完成真实 iPhone/Android 微信连续 30 件验收；
-- 尚未完成 Windows 同步端；
+- 尚未完成 Windows 浏览器同步端和内部批次接收接口；
 - 尚未完成采购订单/CSV 导入模块；
+- 浏览器自动化文档、数据契约和 DeepSeek 交接规范已冻结，尚未开始真实平台采集；
 - Git 回滚基线已建立并推送到 GitHub `hyyyyyyz/arrival-ledger`（提交 `d431654`）。
 
 ### 8.4 服务器迁移：192.168.1.4 → 192.168.1.5
@@ -517,7 +519,7 @@ sync_jobs(
 - 至少一份备份放另一台设备或异地存储；
 - 建议 7 个日备、4 个周备、12 个月备；
 - 每月执行恢复演练；
-- .env、AppSecret、token 和 worker key 单独保存，不进入普通照片备份。
+- .env 和 sync worker key 单独保存，不进入普通照片备份；平台密码、Cookie 和 profile 只在 Windows 本地。
 
 ## 10. 分阶段实施计划
 
@@ -541,7 +543,7 @@ sync_jobs(
 - [ ] 无订单映射时仍可拍照收货；
 - [ ] 导出/备份基础数据。
 
-验收：没有任何平台接口时，仍能完整处理 30 个包裹，并能查询、纠错和恢复。
+验收：没有任何平台同步时，仍能完整处理 30 个包裹，并能查询、纠错和恢复。
 
 ### 阶段 P1：CSV 批量导入（立即优先）
 
@@ -564,19 +566,17 @@ sync_jobs(
 
 ### 阶段 P2：拼多多低频同步（实际优先级最高的平台增强）
 
-拼多多是当前必须覆盖的平台，因此在 CSV 导入完成后优先验证 Windows 路线；这项能力仍然是非官方实验，不能阻塞 P0/P1。
+拼多多是当前必须覆盖的平台，因此在 CSV 导入完成后优先验证 Windows 浏览器路线；这项能力仍然是非官方实验，不能阻塞 P0/P1。
 
-- [ ] 在 Windows 真实账号测试官方个人信息下载；
-- [ ] 若文件有订单/物流字段，开发 Downloads 目录监控；
-- [ ] Windows 10/11 安装独立 profile；
+- [ ] Windows 10/11 安装独立 `pdd` profile；
 - [ ] 首次人工登录并确认账号不是测试号；
-- [ ] 手动“立即同步”按钮；
+- [ ] `login-check` 和 `sync-once --mode dry-run` 可见运行；
 - [ ] 读取最近 20–30 个真实订单；
 - [ ] 字段完整率、运单匹配率、重复幂等验收；
-- [ ] 加入 NEEDS_LOGIN/CAPTCHA_OR_BLOCKED/FAILED 状态；
-- [ ] 稳定后接 Windows Task Scheduler，每天 1–2 次；
-- [ ] 首次回补几百条，之后按游标增量；
-- [ ] Windows 关机/休眠后恢复补跑。
+- [ ] 加入 NEEDS_LOGIN/CAPTCHA_OR_BLOCKED/SCHEMA_CHANGED/NETWORK_ERROR 状态；
+- [ ] 用户确认 dry-run 报告后再执行 commit；
+- [ ] 稳定后才评估 Windows Task Scheduler，每天 1–2 次；
+- [ ] 首次扩大回补范围前先做备份和人工抽样。
 
 只有以下条件同时满足，才允许定时启用：
 
@@ -587,17 +587,19 @@ sync_jobs(
 - 登录失效能明确提示而不是静默写错；
 - CSV/手工导入仍可独立使用。
 
-### 阶段 P3：1688 官方只读同步（可与 P2 并行申请）
+### 阶段 P3：1688 可见浏览器同步
 
-- [ ] 用户完成 1688 实际采购账号认证和买家方案资格检查；
-- [ ] 创建自用应用并验证授权配置；
-- [ ] API 测试订单列表；
-- [ ] API 测试订单详情 NativeLogistics；
-- [ ] 服务器保存最小字段并按运单号匹配；
-- [ ] 处理 token 失效、未发货、无物流和权限错误；
-- [ ] 保留 CSV/手工降级。
+1688 与拼多多使用完全相同的 worker 信任边界；不申请官方开放平台权限，不保存 AppKey/AppSecret/OAuth/token。
 
-通过官方测试后再写生产适配器，不在前端放任何 1688 凭据。
+- [ ] Windows 10/11 安装独立 `1688` profile；
+- [ ] 用户在可见窗口手工登录实际采购账号；
+- [ ] 适配订单列表、详情、分页/加载更多和物流字段；
+- [ ] 读取最近 20–30 条真实订单并先 dry-run；
+- [ ] 用户确认后 commit，验证订单—包裹—商品关系；
+- [ ] 页面改版、登录失效、验证码均进入明确状态并保留游标；
+- [ ] 与 PDD 共用内部批次接口，但账号 profile、account_key 和状态完全隔离。
+
+平台页面无法读取时回退 CSV/截图/OCR/手工录入，不绕过页面保护。
 
 ### 阶段 P4：公网和运维
 
@@ -641,26 +643,19 @@ sync_jobs(
 6. 导入报告能解释每一行的结果；
 7. 运单号能和收货照片识别结果匹配。
 
-### 11.3 1688
-
-1. 只读取被授权账号订单；
-2. 订单 ID、商品行、NativeLogistics 运单号可保存；
-3. 拆包/合包不会覆盖；
-4. 权限或 token 失效有告警；
-5. 不调用写订单接口。
-
-### 11.4 Windows 拼多多同步
+### 11.3 Windows 浏览器同步（PDD 与 1688）
 
 1. 独立 profile 首次人工登录成功；
-2. 手动同步 20–30 条真实订单；
+2. 两个平台各手动同步 20–30 条真实订单；
 3. 订单号、商品、规格、数量、店铺、快递和运单字段完整率 ≥95%；
 4. 重复同步不增加重复记录；
 5. 服务器收不到密码、Cookie 或完整 profile；
 6. 登录过期/验证码/页面改版进入明确错误状态；
-7. Task Scheduler 可在开机后补跑；
-8. 停止同步端时，P0/P1 功能仍正常。
+7. dry-run 与 commit 的记录集合一致，重复 commit 幂等；
+8. 停止同步端时，P0/P1 功能仍正常；
+9. 只有验收通过后，才允许 Task Scheduler 低频运行。
 
-### 11.5 公网
+### 11.4 公网
 
 1. AUTH_REQUIRED=true、HTTPS、非公开图片；
 2. 7 天连续测试页面和照片上传；
@@ -672,9 +667,10 @@ sync_jobs(
 
 | 风险 | 影响 | 应对 |
 |---|---|---|
-| 拼多多网页改版/风控 | 同步停止 | CSV、官方下载、截图/OCR；同步熔断 |
+| PDD/1688 网页改版/风控 | 同步停止 | CSV、截图/OCR、手工导入；同步熔断 |
 | 拼多多协议限制 | 账号或工具风险 | 只读、低频、单账号、人工登录，不绕过验证 |
-| 1688 资格不足 | 官方同步不可用 | CSV/手工导入，不阻塞核心 |
+| 浏览器登录失效/验证码 | 同步不可用 | Windows 窗口人工处理；不自动重试或绕过 |
+| 页面结构变化 | 错误订单入库 | `SCHEMA_CHANGED` 熔断，保留游标和脱敏诊断 |
 | 面单无平台订单号 | 无法直接反查 | 预先建立运单映射，未知单号进入待认领 |
 | 同一订单拆包/合包 | 错误打勾 | 多对多链接和包裹级确认 |
 | 手机浏览器清理本地数据 | 待上传照片丢失 | 尽快上传、显示未同步、服务器/异机备份 |
@@ -688,23 +684,31 @@ sync_jobs(
 这些事项不会阻塞 P0：
 
 1. 闲置 Windows 的版本（Windows 10/11）及是否允许长期接电运行；
-2. 是否先在拼多多真实账号测试“个人信息下载”；
+2. PDD、1688 两个独立 profile 对应的 `account_key` 标签；
 3. 服务器照片的异机备份目标；
 4. 是否在临时隧道验收后恢复局域网免登录，还是继续保留认证模式；
-5. 1688 账号是否已完成认证、是否出现 L2/买家自用方案。
+5. 首次手动同步的最大订单数（MVP 默认 30）。
 
 ## 14. 下一步执行顺序
 
 1. 先完成微信真机拍摄一件和连续 30 件局域网验收；
 2. 实现 CSV 预览、导入、去重和订单—包裹匹配；
 3. 用现有拼多多样本验证扫描运单号能反查商品；
-4. 在 Windows 上测试 PDD 官方下载目录监控；
-5. 若官方下载不含字段，再实现可见浏览器手动同步；
+4. DeepSeek 按 [`DEEPSEEK_HANDOFF.md`](DEEPSEEK_HANDOFF.md) 完成 sync-agent 骨架和内部批次接口；
+5. Windows 上分别对 PDD、1688 执行 `doctor → login-check → dry-run → commit`；
 6. 手动同步稳定后才启用每天 1–2 次任务计划；
-7. 同时在 1688 控制台确认资格并做只读 API 测试；
-8. 最后决定公网域名/Tunnel，并在公网前切换认证。
+7. 最后决定公网访问策略，并在公网前切换认证。
 
 ## 15. 变更记录
+
+### v1.0（2026-08-13）
+
+- 根据实际账号权限结果，正式废弃 1688/PDD 官方平台 API、OAuth、AppKey/AppSecret 和 token 路线；不再把申请平台权限作为任务或前置条件；
+- 将 PDD 与 1688 统一为 Windows 独立 Chrome profile + Node.js/TypeScript + Playwright headed 浏览器同步；
+- 冻结可见 DOM、只读、低频、人工登录、验证码/风控熔断等安全边界；
+- 新增 [`docs/BROWSER_SYNC_SPEC.md`](docs/BROWSER_SYNC_SPEC.md)：浏览器适配器、订单模型、游标、批次接口、数据表、测试矩阵和 MVP 验收；
+- 新增 [`DEEPSEEK_HANDOFF.md`](DEEPSEEK_HANDOFF.md) 与 [`CONTRIBUTING.md`](CONTRIBUTING.md)，规定实现顺序、提交格式、测试门槛和禁止事项；
+- 明确“不要平台 API”不等于“不要到货管家内部同步接口”：Windows 端只上传规范化订单批次，服务器负责幂等和匹配。
 
 ### v0.8（2026-08-13）
 
@@ -712,9 +716,8 @@ sync_jobs(
 - 仓库/工程名改为 arrival-ledger；现有服务器路径、数据库文件名和浏览器存储命名空间暂时兼容旧名；
 - 明确服务器是纯 Server，Mac 不参与采集；
 - 明确拼多多普通买家无可依赖的公开订单 API，个人开发者申请不作为路线；
-- 增加官方个人信息下载/CSV 目录监控优先路径；
 - 增加 CSV 清洗、PII 丢弃、批量幂等和导入验收；
-- 把 1688 官方买家 API 链路、L2/历史订单前提和持久 token 路径写实；
+- （历史）曾记录平台官方接口调研；v1.0 已明确不实现这些接口；
 - 将平台同步从核心 P0 中剥离，增加失败时的人工降级；
 - 修正局域网免登录的威胁边界、公网认证要求和 Windows 凭据边界；
 - 校正当前部署、测试和未完成项；
