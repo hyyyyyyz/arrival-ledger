@@ -1,238 +1,140 @@
 # arrival-ledger（到货管家）
 
-GitHub 仓库名与工程标识为 `arrival-ledger`；中文产品名继续使用“到货管家”。
+私有包裹到货确认系统：仓库收货人用手机微信拍照签收，系统保存「照片 + 运单号 + 服务器时间」
+作为实物到达凭证，并按预先导入的订单数据反查商品。个人/固定协作者私用，不开放注册、不做 SaaS。
 
-## 服务器迁移到 192.168.1.5
+## 它解决什么问题
 
-目标实例已部署在 192.168.1.5:8766；旧 `.4` arrival 栈已停止，旧代码/数据暂存为带时间戳的可恢复归档，待手机真机拍照上传验收后最终删除。目标机已有 Caddy/cash-save 占用 80、443 和 127.0.0.1:8000，本项目不得修改它们。迁移仅使用宿主机 8766。
+每天收 10–30 个包裹时，「到底收没收到、什么时候收到」靠人脑和聊天记录不可靠。到货管家把收货变成
+一条可查询、可纠错、有照片证据的记录：
 
-迁移前必须在所有手机的旧页面确认本机待上传、失败和上传中均为 0，因为 IP 变化会形成新的浏览器 origin，IndexedDB 队列不会自动迁移。然后在旧机生成一致性备份，代码以本 Git 仓库为准，只迁移 db/media/uploads 和私有 .env；目标机 .env 的 TRUSTED_HOSTS 改为 192.168.1.5。
+- 微信打开链接即可连续拍照收货，无需安装 App；
+- 断网、重复点击、页面重载都不会丢照片或产生重复记录；
+- 面单上的快递运单号自动反查平台订单和商品；
+- 查不到订单的包裹进入待认领区，绝不丢弃；
+- 撤销、重新匹配等操作保留完整事件历史。
 
-目标机服务端健康检查已通过；只有手机真机上传、重启持久化和备份恢复均通过后，才可停止旧栈。清理旧机时只能删除本项目的旧 Compose 容器/网络/镜像以及旧应用/数据目录；不得使用全局 prune、不得执行 down -v，也不得影响 pharos:8848。删除前另存最终归档及 SHA-256。
+订单和包裹是两个概念：面单上读到的是快递运单号，不是平台订单号。一个订单可以拆多个包裹，
+一个包裹也可以关联多个订单。
 
-> 兼容性说明：服务器已经使用 `/home/jackson/arrival-manager`、`/home/jackson/arrival-manager-data` 和 `/data/db/arrival-manager.db`，手机浏览器也已有 `arrival-manager-*` 本地存储键。这些运行期名称暂时保留，避免升级时出现空数据库、丢失待上传队列或与旧容器冲突。首次把新工程名版本部署到服务器前，必须先备份并执行一次性 Compose 栈迁移。
+## 功能
 
-面向手机和微信内置浏览器的私有包裹到货确认工具。当前部署目标是 Ubuntu 22.04 + Docker Compose，迁移后的局域网入口为 `http://192.168.1.5:8766`。访问模式由 `.env` 控制：局域网免登录只适合可信 Wi-Fi；本次公网测试期间目标机已切换为 `AUTH_REQUIRED=true`、`COOKIE_SECURE=true`，请通过 HTTPS 临时隧道访问并登录。
+### 手机收货（已完成）
 
-## 当前开发路线（v1.0）
+- 微信 H5，iPhone/Android 直接打开；
+- 拍摄面单照片，本机压缩到约 0.5–1 MB，ZXing 本地条码识别；
+- IndexedDB 离线队列：网络断开时「本机已保存，待同步」，恢复后自动补传；
+- 服务端以 `client_event_id` 幂等，保存 SHA-256、服务器接收时间、设备 ID；
+- 重复运单号提示首次确认时间和原照片，不重复计数；
+- 待认领、待补单号、按平台/单号/关键词查询、撤销与重新匹配。
 
-1688 和拼多多不再接入官方平台 API、OAuth 或 AppKey/token。订单同步统一放在闲置 Windows 电脑上，用两个独立的可见 Chrome profile 和 Playwright 读取用户可见订单页面；服务器只接收规范化订单批次。
+### 订单数据
 
-同步端代码已在 `feat/browser-sync-mvp` 分支完成（骨架、离线 doctor、`/api/sync/v1/batches` 批次接收、1688 与 PDD 只读适配器、dry-run/commit 编排），并通过全部自动化测试；尚未合并 main，待 Windows 真机按手工验收清单跑通后再合并。真实平台只能先 dry-run，禁止自动登录、验证码绕过或上传 Cookie/profile。
+| 路线 | 状态 |
+|---|---|
+| CSV 批量导入（幂等、忽略 PII、退款/取消明确状态） | 规划中（P1） |
+| Windows 浏览器可见页面同步 PDD/1688（`sync-agent`） | 代码完成，待 Windows 真机手工验收 |
+| 截图 / OCR / 手工录入 | 兜底路径 |
 
-- [总体计划](PLAN.md)
-- [浏览器同步技术规格](docs/BROWSER_SYNC_SPEC.md)
-- [Windows 手工验收清单](docs/SYNC_MANUAL_ACCEPTANCE.md)
-- [DeepSeek 实现任务单](DEEPSEEK_HANDOFF.md)
-- [开发与提交规范](CONTRIBUTING.md)
+浏览器同步**不调用任何平台官方 API**：在闲置 Windows 上用两个独立 Chrome profile，由用户手工
+登录，程序只读可见页面，先 dry-run 预览、用户确认后才提交脱敏批次到自家服务器。同步失败
+不影响拍照收货。
 
-第一测试版的固定流程是：
+### 安全与隐私
 
-```text
-doctor → login-check → sync-once --mode dry-run → 用户确认 → --mode commit
-```
+- 局域网免登录（可信 Wi-Fi）与公网 HTTPS 认证两种模式，公网启用前必须关闭免登录；
+- 照片、数据库只在自家服务器，不保存收件人电话和完整地址；
+- 平台密码、Cookie、登录态只留在 Windows 本机，永不上传、不进日志、不进 Git；
+- 同步接口使用独立 worker token（服务器只存摘要，可撤销/轮换）。
 
-“不要 API”在这里指“不调用 1688/PDD 官方平台 API”。Windows 同步端仍需调用到货管家自己的 `/api/sync/v1/batches`，这是内部的安全传输接口，不接受密码、Cookie 或浏览器 profile。
-
-### Windows 同步端预期目录
-
-```text
-C:\ArrivalLedger\profiles\pdd       # 拼多多独立登录态
-C:\ArrivalLedger\profiles\1688      # 1688 独立登录态
-C:\ArrivalLedger\state               # 游标和批次状态
-C:\ArrivalLedger\logs                # 脱敏日志
-```
-
-首次运行必须在可见窗口手工登录；MVP 不自动填密码、不后台运行、不启用任务计划。真实订单、截图、Chrome profile 和登录态不得复制到服务器或提交 Git。
-
-## 部署结构
+## 系统架构
 
 ```text
 手机 / 微信浏览器
-       |
-       v
-0.0.0.0:8766 -> frontend (Nginx :80) -> /api/* -> backend (:8000)
-                                              |
-                                              +-> SQLite / 照片持久化目录
+  │  拍照、压缩、ZXing 识别、IndexedDB 队列
+  ▼
+Ubuntu 服务器（纯 Server，无桌面）
+  ├─ Nginx 网关 :8766 ──► FastAPI 业务 API ──► SQLite + 照片目录
+  └─ 内部同步接口 /api/sync/v1/batches（只接收 Windows 主动提交的批次）
+                      ▲
+                      │ 可见页面只读同步（可失效的增强能力）
+闲置 Windows 电脑
+  ├─ 独立 Chrome profile：PDD / 1688（用户手工登录）
+  └─ sync-agent：Node 20 + TypeScript + Playwright headed
 ```
 
-只有前端网关映射到宿主机；后端端口不会直接暴露。现有 `pharos:8848` 不会被修改或占用。
+技术栈：FastAPI + SQLite（后端）、Vue 3 + IndexedDB + ZXing（手机 H5）、
+Node 20 + TypeScript + Playwright（同步端）。
 
-持久数据默认位于：
+## 快速开始
+
+需要 Docker + Compose，目标机为 Ubuntu（详细部署见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)）：
+
+```bash
+git clone https://github.com/hyyyyyz/arrival-ledger.git
+cd arrival-ledger
+cp .env.example .env          # chmod 600 .env，替换 SESSION_SECRET 和管理员密码
+sudo docker compose config --quiet
+sudo docker compose build --pull
+sudo docker compose up -d
+deploy/scripts/verify.sh http://127.0.0.1:8766
+```
+
+局域网免登录模式用手机打开 `http://<服务器IP>:8766`；外网/公网必须使用 HTTPS 隧道并保持
+`AUTH_REQUIRED=true`。
+
+## 浏览器订单同步（Windows）
+
+固定流程：
 
 ```text
-/home/jackson/arrival-manager-data/
-├── db/
-├── media/
-├── uploads/   # 预留给后续分片/导入任务
-└── backups/
+doctor → login-check → sync-once --mode dry-run → 用户确认 → sync-once --mode commit --yes
 ```
 
-## 首次部署
+- 规格与边界：[`docs/BROWSER_SYNC_SPEC.md`](docs/BROWSER_SYNC_SPEC.md)
+- 手工验收清单：[`docs/SYNC_MANUAL_ACCEPTANCE.md`](docs/SYNC_MANUAL_ACCEPTANCE.md)
+- 运行与配置说明：[`sync-agent/README.md`](sync-agent/README.md)
 
-以下命令均在项目根目录执行。
+首次运行必须在可见窗口手工登录；程序不自动填密码、不绕过验证码、不隐藏窗口；只有手动同步
+验收通过后才允许考虑定时任务。
 
-1. 创建数据目录。后端容器使用固定 UID/GID `10001:10001`；备份目录由当前 SSH 用户维护：
+## 仓库结构
 
-   ```bash
-   sudo install -d -m 0750 -o "$(id -u)" -g 10001 \
-     /home/jackson/arrival-manager-data
-   sudo install -d -m 0750 -o 10001 -g 10001 \
-     /home/jackson/arrival-manager-data/db \
-     /home/jackson/arrival-manager-data/media \
-     /home/jackson/arrival-manager-data/uploads
-   sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" \
-     /home/jackson/arrival-manager-data/backups
-   ```
+```text
+backend/     FastAPI + SQLite：收货凭证、认证、订单/包裹数据模型、同步批次接收
+frontend/    Vue 3 微信 H5：拍照、压缩、条码、离线队列、清单
+sync-agent/  Windows 同步端：doctor / login-check / sync-once，PDD 与 1688 适配器
+deploy/      Nginx 模板、备份/验证脚本
+docs/        计划、规格、部署、验收文档
+```
 
-2. 创建私有配置：
-
-   ```bash
-   cp .env.example .env
-   chmod 600 .env
-   openssl rand -hex 32
-   ```
-
-   把生成的随机值写入 `.env` 的 `SESSION_SECRET`，并替换管理员密码。不要提交或发送 `.env`。如果密码含 `$`，在 Compose 的 `.env` 中写成 `$$`。
-
-3. 静态检查并构建：
-
-   ```bash
-   sudo docker compose config --quiet
-   sudo docker compose build --pull
-   ```
-
-4. 启动默认的局域网服务：
-
-   ```bash
-   sudo docker compose up -d
-   sudo docker compose ps
-   sudo docker compose logs --tail=100 backend frontend
-   ```
-
-5. 验证：
-
-   ```bash
-   deploy/scripts/verify.sh http://127.0.0.1:8766
-   curl -fsS http://192.168.1.5:8766/api/health
-   ```
-
-局域网免登录时保持 `COOKIE_SECURE=false`、`AUTH_REQUIRED=false`；正式外网访问必须使用 HTTPS，并把 `AUTH_REQUIRED` 改为 `true`。当前目标机已经处于公网测试配置，因此直接访问 `http://192.168.1.5:8766` 会要求登录且 Secure Cookie 不会在 HTTP 上传送；测试请使用下面的 HTTPS 隧道地址。不能把家庭公网 IP 或 `192.168.1.5` 当作 Cloudflare 固定公网地址。
-
-## 日常更新
-
-更新代码前先备份，再重建有变化的镜像：
+## 开发
 
 ```bash
-deploy/scripts/backup.sh
-sudo docker compose build
-sudo docker compose up -d --remove-orphans
-deploy/scripts/verify.sh
+# 后端（Python 3.11+）
+cd backend && python -m pytest tests
+
+# 前端
+cd frontend && npm test -- --run && npm run typecheck && npm run build
+
+# 同步端
+cd sync-agent && npm ci && npm test && npm run typecheck && npm run build && npm run doctor -- --offline
 ```
 
-查看状态与日志：
+提交规范、测试门槛与安全红线见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 
-```bash
-sudo docker compose ps
-sudo docker compose logs -f --tail=200 backend frontend
-sudo docker stats --no-stream
-```
+## 文档
 
-Compose 已设置：
+- [总体实施计划](PLAN.md) —— 产品结论、数据模型、分阶段计划与验收标准
+- [部署与运维](docs/DEPLOYMENT.md) —— 迁移、备份恢复、公网隧道、回滚、故障排查
+- [浏览器同步技术规格](docs/BROWSER_SYNC_SPEC.md)
+- [Windows 手工验收清单](docs/SYNC_MANUAL_ACCEPTANCE.md)
+- [DeepSeek 实现任务单](DEEPSEEK_HANDOFF.md)
 
-- `restart: unless-stopped`，服务器或 Docker 重启后自动恢复；
-- 每个容器日志最多约 `5 x 10 MiB`，防止日志占满磁盘；
-- 前后端健康检查；
-- 非 root 后端、只读容器根文件系统、`no-new-privileges`；
-- Nginx 安全响应头、16 MiB 请求上限和120秒弱网上传超时；
-- 后端最终按 `MAX_UPLOAD_BYTES`（默认12 MiB）校验单个上传文件。
+## 项目状态
 
-## 临时 Quick Tunnel
-
-本项目当前使用宿主机上的 Cloudflare `cloudflared` 临时隧道，入口只转发到到货管家 `127.0.0.1:8766`，不会经过目标机现有 Caddy/cash-save（80/443/8000）。启动隧道本身不需要重启 backend/frontend：
-
-```bash
-/usr/local/bin/cloudflared tunnel --no-autoupdate \
-  --edge-ip-version 4 --protocol http2 \
-  --url http://127.0.0.1:8766
-```
-
-当前公网测试配置为 `AUTH_REQUIRED=true`、`COOKIE_SECURE=true`，所以必须从生成的 `https://*.trycloudflare.com` 地址打开并登录；不要把 SSH 的 sudo 密码当作应用登录密码。隧道 URL 会在进程重启后变化，日志和启动输出是唯一可靠的地址来源。当前运行实例的 URL 不写入仓库，避免把一次性地址误当成固定入口。
-
-测试结束可只停止隧道（不影响后端）：
-
-```bash
-kill "$(cat /home/jackson/arrival-ledger-cloudflared.pid)"
-```
-
-Quick Tunnel 是 Cloudflare 的临时开发/测试能力，没有固定地址或 SLA；参见 [Cloudflare Quick Tunnels 文档](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)。不购买域名就不能得到稳定的自定义公网地址；长期使用应另行配置域名 + Named Tunnel，或继续使用局域网 IP。恢复局域网免登录前，需修改目标机私有 `.env` 并重新创建前后端容器，不能在公网隧道仍运行时关闭认证。
-
-## 备份和恢复
-
-一致性备份会短暂停止后端，压缩 `db/`、`media/`、`uploads/`，完成后自动恢复服务：
-
-```bash
-deploy/scripts/backup.sh
-BACKUP_ROOT=/另一块磁盘/arrival-ledger-backups deploy/scripts/backup.sh
-```
-
-默认备份写入 `/home/jackson/arrival-manager-data/backups/`。这仍与主数据在同一磁盘，不足以防磁盘损坏；至少每天把备份同步到另一台设备或异地存储。`.env` 含密钥，应单独保存到密码管理器，不进入普通照片备份。
-
-恢复会替换当前业务数据，因此先停止服务并保留现状目录，确认备份文件的绝对路径后再执行：
-
-```bash
-sudo docker compose down
-STAMP="$(date +%Y%m%d-%H%M%S)"
-sudo mv /home/jackson/arrival-manager-data/db "/home/jackson/arrival-manager-data/db.before-${STAMP}"
-sudo mv /home/jackson/arrival-manager-data/media "/home/jackson/arrival-manager-data/media.before-${STAMP}"
-sudo mv /home/jackson/arrival-manager-data/uploads "/home/jackson/arrival-manager-data/uploads.before-${STAMP}"
-sudo tar -xzf /绝对路径/arrival-ledger-YYYYMMDDTHHMMSSZ.tar.gz -C /home/jackson/arrival-manager-data
-sudo chown -R 10001:10001 \
-  /home/jackson/arrival-manager-data/db \
-  /home/jackson/arrival-manager-data/media \
-  /home/jackson/arrival-manager-data/uploads
-sudo docker compose up -d
-deploy/scripts/verify.sh
-```
-
-确认恢复正确后再手工清理 `.before-*` 目录。
-
-## 应用版本回滚
-
-发布更新前，可先给当前镜像增加可恢复标签：
-
-```bash
-STAMP="$(date +%Y%m%d-%H%M%S)"
-sudo docker image tag "$(sudo docker compose images -q backend)" "arrival-ledger-backend:rollback-${STAMP}"
-sudo docker image tag "$(sudo docker compose images -q frontend)" "arrival-ledger-frontend:rollback-${STAMP}"
-echo "rollback tag: ${STAMP}"
-```
-
-如果新版本失败，使用上一步打印的时间标签回滚；若新版本升级过数据库结构，同时恢复更新前的数据备份：
-
-```bash
-sudo env BACKEND_IMAGE=arrival-ledger-backend:rollback-时间标签 FRONTEND_IMAGE=arrival-ledger-frontend:rollback-时间标签 docker compose up -d --no-build --force-recreate
-deploy/scripts/verify.sh
-```
-
-需要长期保持回滚版本时，把这两个镜像名写入 `.env`。
-
-## 故障排查
-
-```bash
-# 端口是否被占用
-sudo ss -lntp | grep -E ':(8766|8848)\\b'
-
-# 健康状态与最近日志
-sudo docker compose ps
-sudo docker compose logs --since=15m backend frontend
-
-# 数据目录权限（应显示 UID/GID 10001）
-sudo stat -c '%u:%g %a %n' /home/jackson/arrival-manager-data/{db,media,uploads}
-
-# 磁盘空间
-df -h /home/jackson/arrival-manager-data
-du -sh /home/jackson/arrival-manager-data/*
-```
-
-不要执行 `docker compose down -v`、不要手工删除 SQLite 的 `-wal`/`-shm` 文件，也不要清理 `media/` 中未核对的照片。
+- 服务器已部署在 `192.168.1.5:8766`（局域网免登录；当前公网测试期使用 HTTPS 临时隧道 + 登录）；
+- 拍照收货闭环可用，待真机连续 30 件验收；
+- 平台同步代码已完成于 `feat/browser-sync-mvp` 分支并通过自动化测试，待 Windows 真机
+  验收后合并 main；CSV 导入尚未开始；
+- 详细状态与决策记录见 [PLAN.md](PLAN.md) 第 0 节和变更记录。

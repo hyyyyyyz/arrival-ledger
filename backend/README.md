@@ -23,6 +23,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `MEDIA_DIR` | 凭证照片目录 | `/data/media` |
 | `MAX_UPLOAD_BYTES` | 单张照片最大字节数 | `12582912`（12 MiB） |
 | `SESSION_TTL_SECONDS` | 登录会话有效期 | `2592000`（30 天） |
+| `SYNC_WORKER_TOKENS` | Windows 同步端 worker token，逗号分隔、每个至少 16 字符；只存摘要，从列表移除即撤销。为空时同步接口返回 503 | 无（默认关闭同步） |
+| `SYNC_RATE_LIMIT_PER_HOUR` | 每个 token 每小时最多接受的批次数（1–60） | `6` |
+| `SYNC_MAX_BATCH_ORDERS` | 单批次最大订单数（1–100） | `100` |
+| `SYNC_MAX_BATCH_BYTES` | 单批次请求体最大字节数（4096–2097152） | `262144` |
 
 初始化规则：只有 `users` 表为空时，服务才会读取 bootstrap 管理员配置并创建密码哈希。之后重启不会用环境变量覆盖账号或密码；数据库已有用户时，可以删除 `BOOTSTRAP_ADMIN_PASSWORD` 后正常启动。若数据库为空且没有提供该密码，服务会拒绝启动，避免产生无人能登录的实例。
 
@@ -38,6 +42,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - `GET /api/receipts`
 - `PATCH /api/receipts/{id}/tracking`
 - `GET /api/receipts/{id}/photo`
+- `POST /api/sync/v1/batches`（Windows 同步端批次接收，Bearer worker token，幂等/限频/严格校验）
 
 当 `AUTH_REQUIRED=true` 时，除健康检查和登录外均要求服务端会话 Cookie。将其设为 `false` 后，服务会先校验 `TRUSTED_HOSTS` 和 `TRUSTED_LAN_CIDRS`，再把 `TRUSTED_USER_USERNAME` 对应的启用用户作为固定操作人，打开局域网页面即可使用，不再要求账号密码。免登录模式的写请求还必须带内部前端标识头；这不是身份认证，只是降低跨站伪造风险。免登录模式只适用于可信局域网；任何公网、Quick Tunnel 或端口转发前都必须恢复为 `AUTH_REQUIRED=true`。Cookie 为 `HttpOnly`、`SameSite=Lax`，`Secure` 由 `COOKIE_SECURE` 控制。
 
