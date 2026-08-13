@@ -1,0 +1,80 @@
+{
+  "note": "Synthetic, sanitized sample orders. No real account, phone, address, cookie or tracking data. All identifiers are fabricated for tests.",
+  "batch": {
+    "schema_version": 1,
+    "batch_id": "b0000000-0000-4000-8000-000000000001",
+    "worker_id": "worker-test-fixture",
+    "platform": "pdd",
+    "platform_account_key": "pdd-fixture",
+    "started_at": "2026-08-13T02:00:00.000Z",
+    "finished_at": "2026-08-13T02:01:00.000Z",
+    "cursor_before": null,
+    "cursor_after": null,
+    "mode": "commit",
+    "orders": [
+      {
+        "platform_order_id": "260813-0000000000001",
+        "ordered_at": "2026-08-12T10:30:00.000Z",
+        "status": "SHIPPED",
+        "shop_name": "测试店铺甲",
+        "items": [
+          {
+            "item_key": "item-0001",
+            "title": "示例商品 A 一箱",
+            "sku_text": "规格:标准",
+            "quantity": 2,
+            "unit_price": "12.50"
+          }
+        ],
+        "packages": [
+          { "courier": "顺丰速运", "tracking_no": "SF5154000000001", "status": "SHIPPED" }
+        ],
+        "observed_at": "2026-08-13T02:00:10.000Z"
+      },
+      {
+        "platform_order_id": "260813-0000000000002",
+        "ordered_at": "2026-08-11T08:00:00.000Z",
+        "status": "CANCELLED",
+        "shop_name": "测试店铺乙",
+        "items": [
+          {
+            "item_key": null,
+            "title": "示例商品 B",
+            "sku_text": null,
+            "quantity": 1,
+            "unit_price": null
+          }
+        ],
+        "packages": [],
+        "observed_at": "2026-08-13T02:00:10.000Z"
+      },
+      {
+        "platform_order_id": "260813-0000000000003",
+        "ordered_at": null,
+        "status": "UNKNOWN",
+        "shop_name": null,
+        "items": [
+          {
+            "item_key": "item-0003-a",
+            "title": "示例商品 C 零件",
+            "sku_text": "3 件装",
+            "quantity": 3,
+            "unit_price": "0.99"
+          },
+          {
+            "item_key": "item-0003-b",
+            "title": "示例商品 D 配件",
+            "sku_text": null,
+            "quantity": 1,
+            "unit_price": null
+          }
+        ],
+        "packages": [
+          { "courier": null, "tracking_no": "ZTO-20260813-0001", "status": null },
+          { "courier": null, "tracking_no": "ZTO-20260813-0002", "status": null }
+        ],
+        "observed_at": "2026-08-13T02:00:10.000Z"
+      }
+    ]
+  }
+}

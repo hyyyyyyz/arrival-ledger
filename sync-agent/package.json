@@ -1,0 +1,26 @@
+{
+  "name": "arrival-ledger-sync-agent",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Windows visible-page order sync worker for arrival-ledger (PDD / 1688)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "doctor": "npm run build --silent && node dist/cli.js doctor",
+    "login-check": "npm run build --silent && node dist/cli.js login-check",
+    "sync-once": "npm run build --silent && node dist/cli.js sync-once"
+  },
+  "dependencies": {
+    "playwright": "1.62.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "~5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
