@@ -12,7 +12,7 @@ GitHub 仓库名与工程标识为 `arrival-ledger`；中文产品名继续使�
 
 > 兼容性说明：服务器已经使用 `/home/jackson/arrival-manager`、`/home/jackson/arrival-manager-data` 和 `/data/db/arrival-manager.db`，手机浏览器也已有 `arrival-manager-*` 本地存储键。这些运行期名称暂时保留，避免升级时出现空数据库、丢失待上传队列或与旧容器冲突。首次把新工程名版本部署到服务器前，必须先备份并执行一次性 Compose 栈迁移。
 
-面向手机和微信内置浏览器的私有包裹到货确认工具。当前部署目标是 Ubuntu 22.04 + Docker Compose，迁移后的局域网入口为 `http://192.168.1.5:8766`。当前局域网原型采用免登录直达模式，打开链接即可拍照；该模式不能用于公网。
+面向手机和微信内置浏览器的私有包裹到货确认工具。当前部署目标是 Ubuntu 22.04 + Docker Compose，迁移后的局域网入口为 `http://192.168.1.5:8766`。访问模式由 `.env` 控制：局域网免登录只适合可信 Wi-Fi；本次公网测试期间目标机已切换为 `AUTH_REQUIRED=true`、`COOKIE_SECURE=true`，请通过 HTTPS 临时隧道访问并登录。
 
 ## 部署结构
 
@@ -86,7 +86,7 @@ GitHub 仓库名与工程标识为 `arrival-ledger`；中文产品名继续使�
    curl -fsS http://192.168.1.5:8766/api/health
    ```
 
-局域网原型保持 `COOKIE_SECURE=false`，并可使用 `AUTH_REQUIRED=false` 免登录直达。正式外网访问需要 HTTPS 且必须把 `AUTH_REQUIRED` 改为 `true`；不能直接把家庭公网 IP 或 `192.168.1.5` 发给异地手机。
+局域网免登录时保持 `COOKIE_SECURE=false`、`AUTH_REQUIRED=false`；正式外网访问必须使用 HTTPS，并把 `AUTH_REQUIRED` 改为 `true`。当前目标机已经处于公网测试配置，因此直接访问 `http://192.168.1.5:8766` 会要求登录且 Secure Cookie 不会在 HTTP 上传送；测试请使用下面的 HTTPS 隧道地址。不能把家庭公网 IP 或 `192.168.1.5` 当作 Cloudflare 固定公网地址。
 
 ## 日常更新
 
@@ -118,22 +118,23 @@ Compose 已设置：
 
 ## 临时 Quick Tunnel
 
-Quick Tunnel 只用于临时外网拍照测试：地址随机、没有 SLA，默认 profile 不会启动它。启动前必须让登录 Cookie 只经 HTTPS 发送：
+本项目当前使用宿主机上的 Cloudflare `cloudflared` 临时隧道，入口只转发到到货管家 `127.0.0.1:8766`，不会经过目标机现有 Caddy/cash-save（80/443/8000）。启动隧道本身不需要重启 backend/frontend：
 
 ```bash
-sudo env AUTH_REQUIRED=true COOKIE_SECURE=true docker compose --profile quick-tunnel up -d --force-recreate backend frontend quick-tunnel
-sudo docker compose --profile quick-tunnel logs -f quick-tunnel
+/usr/local/bin/cloudflared tunnel --no-autoupdate \
+  --edge-ip-version 4 --protocol http2 \
+  --url http://127.0.0.1:8766
 ```
 
-日志中会出现 `https://*.trycloudflare.com`。该地址公开可达，必须使用强管理员密码，测试结束立即停止：
+当前公网测试配置为 `AUTH_REQUIRED=true`、`COOKIE_SECURE=true`，所以必须从生成的 `https://*.trycloudflare.com` 地址打开并登录；不要把 SSH 的 sudo 密码当作应用登录密码。隧道 URL 会在进程重启后变化，日志和启动输出是唯一可靠的地址来源。当前运行实例的 URL 不写入仓库，避免把一次性地址误当成固定入口。
+
+测试结束可只停止隧道（不影响后端）：
 
 ```bash
-sudo docker compose --profile quick-tunnel stop quick-tunnel
-sudo docker compose rm -f quick-tunnel
-sudo docker compose up -d --force-recreate backend frontend
+kill "$(cat /home/jackson/arrival-ledger-cloudflared.pid)"
 ```
 
-最后一条命令会重新采用局域网配置中的 `AUTH_REQUIRED=false` 和 `COOKIE_SECURE=false`，恢复打开即用的局域网模式。不要把 Quick Tunnel 当正式入口；稳定公网方案应使用自有域名的 Named Tunnel，且先实测中国大陆网络质量。
+Quick Tunnel 是 Cloudflare 的临时开发/测试能力，没有固定地址或 SLA；参见 [Cloudflare Quick Tunnels 文档](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)。不购买域名就不能得到稳定的自定义公网地址；长期使用应另行配置域名 + Named Tunnel，或继续使用局域网 IP。恢复局域网免登录前，需修改目标机私有 `.env` 并重新创建前后端容器，不能在公网隧道仍运行时关闭认证。
 
 ## 备份和恢复
 
