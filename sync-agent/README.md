@@ -4,7 +4,7 @@
 上传到到货管家自己的 `/api/sync/v1/batches`。本包不调用任何平台官方 API、OAuth、
 抓包或验证码绕过。完整边界见仓库根目录 [`docs/BROWSER_SYNC_SPEC.md`](../docs/BROWSER_SYNC_SPEC.md)。
 
-## 当前进度（D3：1688 可见页面适配器与同步编排）
+## 当前进度（D4：拼多多可见页面适配器）
 
 已实现：
 
@@ -15,12 +15,14 @@
 - 内部批次传输客户端（`src/transport.ts`：401/403/409/422 不重试，429/5xx 有限退避）；
 - `doctor --offline`、`login-check`、`sync-once --mode dry-run|commit`（`src/cli.ts`）；
 - 同步编排 `src/run.ts`：dry-run 不上传；commit 必须 `--yes`；空列表不覆盖服务器数据；低频限制（默认 15 分钟）；
-- 1688 买家订单页适配器（`src/adapters/ali1688.ts`）：表头列映射 + 行内标签两种解析模式，登录/风控/空列表守卫，脱敏 fixture 测试。
+- 1688 买家订单页适配器（表头列映射 + 行内标签两种解析模式）；
+- 拼多多订单页适配器（卡片式结构：标签提取 + 结构化 class 兜底，`加载更多` 分页）；
+- 登录/风控/空列表守卫、状态映射、脱敏 fixture 测试。
 
-尚未实现（后续阶段）：
+尚未完成（后续阶段）：
 
-- D4 拼多多可见页面适配器（`login-check`/`sync-once --platform pdd` 会明确报错）；
-- D5 端到端联调与 Windows 真实页面验收（选择器需按真实页面调整）。
+- D5 Windows 真实页面验收：两个平台各手动 dry-run 20–30 条真实订单，字段完整率 ≥95% 后再评估 commit；
+- 选择器是依据规格书编写的初始版本，真实页面结构不一致时程序会以 `SCHEMA_CHANGED` 熔断，需要按真实页面在对应 adapter 中调整选择器并补充脱敏 fixture。
 
 本包在开发机上不连接真实平台页面；`doctor` 的非离线模式只检查本机 Chromium 是否可启动。
 
@@ -43,8 +45,10 @@ npm run doctor -- --offline                     # 本地自检，不启动浏览
 npm run doctor                                  # 额外检查本机 Chromium 是否可启动
 npm run doctor -- --platform pdd                # 只检查 pdd 一项
 npm run login-check -- --platform 1688          # 打开可见浏览器检查登录/风控状态
+npm run login-check -- --platform pdd
 npm run sync-once -- --platform 1688 --mode dry-run
-npm run sync-once -- --platform 1688 --mode commit --yes
+npm run sync-once -- --platform pdd --mode dry-run
+npm run sync-once -- --platform pdd --mode commit --yes
 ```
 
 检查与测试：
@@ -99,11 +103,12 @@ src/
     cursor.ts     游标原子读写（按 platform + account_key 隔离）
   browser/
     context.ts    persistent headed context
+    dom.ts        标签提取 + 结构化兜底字段提取
     guards.ts     登录/验证码/页面状态守卫
   adapters/
     base.ts       适配器契约
     ali1688.ts    1688 只读适配器（表头列映射 + 标签提取）
-    pdd.ts        拼多多适配器（D4）
+    pdd.ts        拼多多只读适配器（标签提取 + class 兜底）
   extract/
     text.ts       标签/文本纯函数
     dates.ts      日期解析

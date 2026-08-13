@@ -1,6 +1,7 @@
 import type { Locator, Page } from "playwright";
 
-import { cleanText, stripLabelPrefix } from "../extract/text.js";
+import { extractLabelValue } from "../browser/dom.js";
+import { cleanText } from "../extract/text.js";
 import type { RawOrder, RawOrderItem, RawOrderPackage, StatusMap } from "../extract/order.js";
 import type {
   BlockState,
@@ -125,26 +126,6 @@ export function splitLogisticsCell(text: string): { courier: string | null; trac
   if (!hasLettersAndDigits) return { courier: cleaned, tracking: null };
   const courier = cleaned.replace(tracking, " ").trim();
   return { courier: courier.length > 0 ? courier : null, tracking };
-}
-
-async function extractLabelValue(
-  container: Locator,
-  labels: readonly string[],
-): Promise<string | null> {
-  for (const label of labels) {
-    const marker = container.locator(`:has-text("${label}")`).first();
-    if ((await marker.count()) === 0) continue;
-    const ownText = await marker.innerText().catch(() => "");
-    const stripped = stripLabelPrefix(ownText, [label]);
-    if (stripped.length > 0) return stripped;
-    const siblingText = await marker
-      .locator("xpath=following-sibling::*[1]")
-      .first()
-      .innerText()
-      .catch(() => "");
-    if (siblingText.trim().length > 0) return siblingText.trim();
-  }
-  return null;
 }
 
 async function cellText(row: Locator, index: number): Promise<string | null> {
