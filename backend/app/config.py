@@ -66,6 +66,10 @@ class Settings:
     cookie_name: str = "arrival_session"
     session_ttl_seconds: int = 60 * 60 * 24 * 30
     max_upload_bytes: int = 12 * 1024 * 1024
+    sync_worker_tokens: tuple[str, ...] = ()
+    sync_rate_limit_per_hour: int = 6
+    sync_max_batch_orders: int = 100
+    sync_max_batch_bytes: int = 256 * 1024
 
     def validate(self) -> None:
         if len(self.session_secret) < 32:
@@ -85,6 +89,17 @@ class Settings:
             self.bootstrap_admin_password.encode("utf-8")
         ) > 72:
             raise ValueError("BOOTSTRAP_ADMIN_PASSWORD exceeds bcrypt's 72-byte limit")
+        for token in self.sync_worker_tokens:
+            if len(token) < 16:
+                raise ValueError(
+                    "SYNC_WORKER_TOKENS entries must contain at least 16 characters"
+                )
+        if not 1 <= self.sync_rate_limit_per_hour <= 60:
+            raise ValueError("SYNC_RATE_LIMIT_PER_HOUR must be between 1 and 60")
+        if not 1 <= self.sync_max_batch_orders <= 100:
+            raise ValueError("SYNC_MAX_BATCH_ORDERS must be between 1 and 100")
+        if not 4096 <= self.sync_max_batch_bytes <= 2 * 1024 * 1024:
+            raise ValueError("SYNC_MAX_BATCH_BYTES must be between 4096 and 2097152")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -118,6 +133,18 @@ class Settings:
             ),
             max_upload_bytes=_env_int(
                 "MAX_UPLOAD_BYTES", 12 * 1024 * 1024, 1024
+            ),
+            sync_worker_tokens=tuple(
+                token.strip()
+                for token in os.getenv("SYNC_WORKER_TOKENS", "").split(",")
+                if token.strip()
+            ),
+            sync_rate_limit_per_hour=_env_int(
+                "SYNC_RATE_LIMIT_PER_HOUR", 6, 1
+            ),
+            sync_max_batch_orders=_env_int("SYNC_MAX_BATCH_ORDERS", 100, 1),
+            sync_max_batch_bytes=_env_int(
+                "SYNC_MAX_BATCH_BYTES", 256 * 1024, 4096
             ),
         )
         settings.validate()

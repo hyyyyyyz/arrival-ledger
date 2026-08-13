@@ -1,0 +1,380 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sqlite3
+from datetime import datetime, timezone
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+SYNC_SCHEMA_VERSION = 1
+SYNC_SOURCE = "WINDOWS_BROWSER"
+SYNC_PLATFORMS = ("pdd", "1688")
+SYNC_ORDER_STATUSES = (
+    "PENDING",
+    "PAID",
+    "SHIPPED",
+    "COMPLETED",
+    "REFUNDED",
+    "CANCELLED",
+    "UNKNOWN",
+)
+
+
+class SyncOrderItemIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_key: str | None = Field(default=None, max_length=64)
+    title: str = Field(min_length=1, max_length=300)
+    sku_text: str | None = Field(default=None, max_length=200)
+    quantity: int = Field(ge=1, le=999999)
+    unit_price: str | None = Field(default=None, max_length=32)
+
+
+class SyncPackageIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    courier: str | None = Field(default=None, max_length=64)
+    tracking_no: str = Field(min_length=1, max_length=64)
+    status: str | None = Field(default=None, max_length=64)
+
+    @field_validator("tracking_no")
+    @classmethod
+    def tracking_no_has_alnum(cls, value: str) -> str:
+        if not re.search(r"[A-Za-z0-9]", value):
+            raise ValueError("tracking_no must contain at least one letter or digit")
+        return value
+
+
+class SyncOrderIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    platform_order_id: str = Field(min_length=1, max_length=64)
+    ordered_at: datetime | None = None
+    status: Literal[
+        "PENDING",
+        "PAID",
+        "SHIPPED",
+        "COMPLETED",
+        "REFUNDED",
+        "CANCELLED",
+        "UNKNOWN",
+    ]
+    shop_name: str | None = Field(default=None, max_length=128)
+    items: list[SyncOrderItemIn] = Field(min_length=1, max_length=50)
+    packages: list[SyncPackageIn] = Field(default_factory=list, max_length=20)
+    observed_at: datetime
+
+    @field_validator("ordered_at", "observed_at")
+    @classmethod
+    def require_aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("must include a timezone offset")
+        return value
+
+
+class SyncBatchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1]
+    batch_id: str = Field(min_length=1, max_length=64)
+    worker_id: str = Field(min_length=1, max_length=64)
+    platform: Literal["pdd", "1688"]
+    platform_account_key: str = Field(min_length=1, max_length=64)
+    started_at: datetime
+    finished_at: datetime
+    cursor_before: str | None = Field(default=None, max_length=512)
+    cursor_after: str | None = Field(default=None, max_length=512)
+    mode: Literal["commit"]
+    orders: list[SyncOrderIn] = Field(min_length=1, max_length=100)
+
+    @field_validator("started_at", "finished_at")
+    @classmethod
+    def require_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("must include a timezone offset")
+        return value
+
+
+class SyncBatchResponse(BaseModel):
+    batch_id: str
+    created: int
+    updated: int
+    skipped: int
+    errors: list[str]
+    cursor_accepted: bool
+
+
+def normalize_tracking_no(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", value).upper()
+
+
+def normalize_courier(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().upper()
+
+
+def batch_counts_json(created: int, updated: int, skipped: int, errors: int) -> str:
+    return json.dumps(
+        {"created": created, "updated": updated, "skipped": skipped, "errors": errors},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def parse_batch_counts(raw: str) -> dict[str, int]:
+    return json.loads(raw)
+
+
+def canonical_payload_digest(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def db_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def ingest_sync_batch(
+    connection: sqlite3.Connection,
+    payload: SyncBatchIn,
+    payload_sha256: str,
+    token_digest: str,
+    now: str,
+) -> dict[str, int]:
+    created = 0
+    updated = 0
+    skipped = 0
+
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        account_id = _upsert_platform_account_in_tx(connection, payload, now)
+        for order in payload.orders:
+            created, updated, skipped = _upsert_order(
+                connection,
+                account_id,
+                order,
+                now,
+                created,
+                updated,
+                skipped,
+            )
+        counts = {"created": created, "updated": updated, "skipped": skipped, "errors": 0}
+        connection.execute(
+            """
+            INSERT INTO sync_batches(
+                batch_id, worker_id, platform, account_key, token_digest,
+                payload_sha256, status, counts_json, cursor_before, cursor_after,
+                error_code, error_message, started_at, finished_at, received_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'OK', ?, ?, ?, NULL, NULL, ?, ?, ?)
+            """,
+            (
+                payload.batch_id,
+                payload.worker_id,
+                payload.platform,
+                payload.platform_account_key,
+                token_digest,
+                payload_sha256,
+                batch_counts_json(created, updated, skipped, 0),
+                payload.cursor_before,
+                payload.cursor_after,
+                db_timestamp(payload.started_at),
+                db_timestamp(payload.finished_at),
+                now,
+            ),
+        )
+        connection.commit()
+        return counts
+    except BaseException as exc:
+        try:
+            connection.rollback()
+        except sqlite3.Error:
+            pass
+        try:
+            connection.execute(
+                """
+                INSERT INTO sync_batches(
+                    batch_id, worker_id, platform, account_key, token_digest,
+                    payload_sha256, status, counts_json, cursor_before, cursor_after,
+                    error_code, error_message, started_at, finished_at, received_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'ERROR', ?, ?, ?, 'INGEST_FAILED', ?, ?, ?, ?)
+                """,
+                (
+                    payload.batch_id,
+                    payload.worker_id,
+                    payload.platform,
+                    payload.platform_account_key,
+                    token_digest,
+                    payload_sha256,
+                    batch_counts_json(0, 0, 0, 1),
+                    payload.cursor_before,
+                    payload.cursor_after,
+                    str(exc)[:500],
+                    db_timestamp(payload.started_at),
+                    db_timestamp(payload.finished_at),
+                    now,
+                ),
+            )
+            connection.commit()
+        except sqlite3.Error:
+            pass
+        raise
+
+
+def _upsert_platform_account_in_tx(
+    connection: sqlite3.Connection, payload: SyncBatchIn, now: str
+) -> int:
+    row = connection.execute(
+        "SELECT id FROM platform_accounts WHERE platform = ? AND account_key = ?",
+        (payload.platform, payload.platform_account_key),
+    ).fetchone()
+    if row is not None:
+        return row["id"]
+    cursor = connection.execute(
+        """
+        INSERT INTO platform_accounts(platform, account_key, source, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (payload.platform, payload.platform_account_key, SYNC_SOURCE, now, now),
+    )
+    return cursor.lastrowid
+
+
+def _upsert_order(
+    connection: sqlite3.Connection,
+    account_id: int,
+    order: SyncOrderIn,
+    now: str,
+    created: int,
+    updated: int,
+    skipped: int,
+) -> tuple[int, int, int]:
+    ordered_at = db_timestamp(order.ordered_at) if order.ordered_at is not None else None
+    existing = connection.execute(
+        """
+        SELECT id, ordered_at, order_status, shop_name
+        FROM purchase_orders
+        WHERE platform_account_id = ? AND platform_order_id = ?
+        """,
+        (account_id, order.platform_order_id),
+    ).fetchone()
+
+    changed = False
+    counted = False
+    if existing is None:
+        cursor = connection.execute(
+            """
+            INSERT INTO purchase_orders(
+                platform_account_id, platform_order_id, ordered_at, order_status,
+                shop_name, source, last_seen_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account_id,
+                order.platform_order_id,
+                ordered_at,
+                order.status,
+                order.shop_name,
+                SYNC_SOURCE,
+                now,
+                now,
+                now,
+            ),
+        )
+        order_id = cursor.lastrowid
+        created += 1
+        changed = True
+        counted = True
+    else:
+        order_id = existing["id"]
+        if (
+            existing["ordered_at"] != ordered_at
+            or existing["order_status"] != order.status
+            or existing["shop_name"] != order.shop_name
+        ):
+            connection.execute(
+                """
+                UPDATE purchase_orders
+                SET ordered_at = ?, order_status = ?, shop_name = ?,
+                    last_seen_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (ordered_at, order.status, order.shop_name, now, now, order_id),
+            )
+            updated += 1
+            changed = True
+            counted = True
+
+    for item in order.items:
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO order_items(order_id, item_key, title, sku_text, quantity, unit_price)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                order_id,
+                item.item_key,
+                item.title,
+                item.sku_text,
+                str(item.quantity),
+                item.unit_price,
+            ),
+        )
+        if cursor.rowcount == 1:
+            changed = True
+
+    for package in order.packages:
+        courier_normalized = normalize_courier(package.courier or "")
+        tracking_normalized = normalize_tracking_no(package.tracking_no)
+        package_row = connection.execute(
+            """
+            SELECT id FROM packages
+            WHERE courier_normalized = ? AND tracking_no_normalized = ?
+            """,
+            (courier_normalized, tracking_normalized),
+        ).fetchone()
+        if package_row is None:
+            cursor = connection.execute(
+                """
+                INSERT INTO packages(
+                    courier, courier_normalized, tracking_no, tracking_no_normalized,
+                    package_status, source, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    package.courier,
+                    courier_normalized,
+                    package.tracking_no,
+                    tracking_normalized,
+                    package.status,
+                    SYNC_SOURCE,
+                    now,
+                    now,
+                ),
+            )
+            package_id = cursor.lastrowid
+        else:
+            package_id = package_row["id"]
+        link_cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO package_order_links(package_id, order_id, order_item_id, created_at)
+            VALUES (?, ?, NULL, ?)
+            """,
+            (package_id, order_id, now),
+        )
+        if link_cursor.rowcount == 1:
+            changed = True
+
+    if changed and not counted:
+        connection.execute(
+            """
+            UPDATE purchase_orders SET last_seen_at = ?, updated_at = ? WHERE id = ?
+            """,
+            (now, now, order_id),
+        )
+        updated += 1
+    if not changed and counted is False:
+        skipped += 1
+    return created, updated, skipped

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import os
 import re
 import sqlite3
@@ -26,6 +27,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
+from pydantic import ValidationError
 
 from .config import Settings
 from .database import Database
@@ -42,6 +44,13 @@ from .security import (
     new_session_token,
     session_token_digest,
     verify_password,
+)
+from .sync_ingest import (
+    SyncBatchIn,
+    SyncBatchResponse,
+    canonical_payload_digest,
+    ingest_sync_batch,
+    parse_batch_counts,
 )
 
 
@@ -384,6 +393,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             bootstrap_username=settings.bootstrap_admin_username,
             bootstrap_password=settings.bootstrap_admin_password,
             bootstrap_display_name=settings.bootstrap_admin_display_name,
+            session_secret=settings.session_secret,
+            sync_worker_tokens=settings.sync_worker_tokens,
             now=db_timestamp(utc_now()),
         )
         application.state.settings = settings
@@ -737,6 +748,124 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             media_type=row["photo_content_type"],
             filename=row["photo_original_name"] or photo_path.name,
             content_disposition_type="inline",
+        )
+
+    @application.post(
+        "/api/sync/v1/batches", response_model=SyncBatchResponse
+    )
+    async def sync_batches(request: Request) -> SyncBatchResponse:
+        settings = _settings(request)
+        database = _database(request)
+
+        if not settings.sync_worker_tokens:
+            raise HTTPException(
+                status_code=503,
+                detail="sync ingest is not configured on this server",
+            )
+
+        authorization = request.headers.get("authorization", "").strip()
+        match = re.fullmatch(r"[Bb]earer\s+(\S+)", authorization)
+        if match is None:
+            raise HTTPException(status_code=401, detail="invalid worker token")
+        token_digest = session_token_digest(settings.session_secret, match.group(1))
+        with database.connect() as connection:
+            token_row = connection.execute(
+                "SELECT id, revoked_at FROM sync_worker_tokens WHERE token_digest = ?",
+                (token_digest,),
+            ).fetchone()
+        if token_row is None:
+            raise HTTPException(status_code=401, detail="invalid worker token")
+        if token_row["revoked_at"] is not None:
+            raise HTTPException(status_code=403, detail="worker token revoked")
+
+        raw_body = await request.body()
+        if len(raw_body) > settings.sync_max_batch_bytes:
+            raise HTTPException(status_code=413, detail="batch exceeds size limit")
+        try:
+            parsed = json.loads(raw_body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise HTTPException(status_code=422, detail="batch must be valid JSON") from exc
+        try:
+            payload = SyncBatchIn.model_validate(parsed)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=exc.errors(include_url=False, include_context=False, include_input=False),
+            ) from exc
+
+        payload_sha256 = canonical_payload_digest(
+            json.dumps(parsed, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode(
+                "utf-8"
+            )
+        )
+        with database.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT payload_sha256, status, counts_json, cursor_after
+                FROM sync_batches WHERE batch_id = ?
+                """,
+                (payload.batch_id,),
+            ).fetchone()
+        if existing is not None:
+            if existing["payload_sha256"] != payload_sha256:
+                raise HTTPException(
+                    status_code=409,
+                    detail="batch_id was already used with different content",
+                )
+            counts = parse_batch_counts(existing["counts_json"])
+            return SyncBatchResponse(
+                batch_id=payload.batch_id,
+                created=counts.get("created", 0),
+                updated=counts.get("updated", 0),
+                skipped=counts.get("skipped", 0),
+                errors=[],
+                cursor_accepted=True,
+            )
+
+        now = utc_now()
+        cutoff = db_timestamp(now - timedelta(hours=1))
+        with database.connect() as connection:
+            rate_row = connection.execute(
+                """
+                SELECT COUNT(*) AS count, MIN(received_at) AS oldest
+                FROM sync_batches
+                WHERE token_digest = ? AND received_at >= ?
+                """,
+                (token_digest, cutoff),
+            ).fetchone()
+        if rate_row["count"] >= settings.sync_rate_limit_per_hour:
+            retry_after = 3600
+            if rate_row["oldest"] is not None:
+                oldest = datetime.fromisoformat(
+                    rate_row["oldest"].replace("Z", "+00:00")
+                )
+                retry_after = max(60, int((oldest + timedelta(hours=1) - now).total_seconds()))
+            raise HTTPException(
+                status_code=429,
+                detail="sync rate limit exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        try:
+            with database.connect() as connection:
+                counts = ingest_sync_batch(
+                    connection,
+                    payload,
+                    payload_sha256,
+                    token_digest,
+                    db_timestamp(now),
+                )
+        except BaseException:
+            raise HTTPException(
+                status_code=500, detail="batch ingest failed"
+            )
+        return SyncBatchResponse(
+            batch_id=payload.batch_id,
+            created=counts["created"],
+            updated=counts["updated"],
+            skipped=counts["skipped"],
+            errors=[],
+            cursor_accepted=True,
         )
 
     return application

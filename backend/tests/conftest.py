@@ -20,7 +20,16 @@ def settings(tmp_path):
         bootstrap_admin_display_name="测试管理员",
         cookie_secure=False,
         max_upload_bytes=1024 * 1024,
+        sync_worker_tokens=("test-sync-worker-token-0001",),
+        sync_rate_limit_per_hour=6,
+        sync_max_batch_orders=100,
+        sync_max_batch_bytes=1024 * 1024,
     )
+
+
+@pytest.fixture
+def sync_headers() -> dict[str, str]:
+    return {"Authorization": "Bearer test-sync-worker-token-0001"}
 
 
 @pytest.fixture
