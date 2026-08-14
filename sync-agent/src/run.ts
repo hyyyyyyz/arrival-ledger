@@ -478,6 +478,19 @@ async function runCommit(options: RunOptions): Promise<RunOutcome> {
       report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "SNAPSHOT_INVALID", startedAt, emptyCounts(), []),
     };
   }
+  if (snapshot.orders.length === 0) {
+    logger.error({
+      command: "sync-once",
+      platform,
+      batch_id: snapshot.batch_id,
+      message: "snapshot contains no orders; nothing to upload, re-run dry-run",
+      error_code: "EMPTY_SNAPSHOT",
+    });
+    return {
+      exitCode: 1,
+      report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "EMPTY_SNAPSHOT", startedAt, emptyCounts(), [], options.snapshotPath),
+    };
+  }
   const batch = snapshotToBatch(snapshot);
   if (batch === null) {
     logger.error({ command: "sync-once", platform, message: "snapshot payload is invalid", error_code: "SNAPSHOT_INVALID" });

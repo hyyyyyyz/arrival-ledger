@@ -515,6 +515,87 @@ describe("runSyncOnce commit", () => {
     expect(outcome.report.error_code).toBe("RATE_LIMITED");
   });
 
+  it("refuses a snapshot from a different platform or account", async () => {
+    const cwd = tempCwd();
+    const path = await dryRunSnapshot(cwd, { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" });
+    const outcome = await runSyncOnce(
+      buildOptions(
+        cwd,
+        { platform: "pdd", mode: "commit", confirm: true, snapshotPath: path },
+        { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" },
+      ),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.error_code).toBe("SNAPSHOT_INVALID");
+  });
+
+  it("refuses to commit an empty snapshot", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const outcome = await runSyncOnce(
+      buildOptions(cwd, {
+        adapter: fakeAdapter({
+          collectVisibleOrders: async () => ({ orders: [], empty: true, rows_seen: 0, recognized: 0, unparsed: [] }),
+        }),
+      }),
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.report.snapshot_path).not.toBeNull();
+    const commitOutcome = await runSyncOnce(
+      buildOptions(
+        cwd,
+        { mode: "commit", confirm: true, snapshotPath: outcome.report.snapshot_path as string },
+        { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" },
+      ),
+    );
+    expect(commitOutcome.exitCode).toBe(1);
+    expect(commitOutcome.report.error_code).toBe("EMPTY_SNAPSHOT");
+  });
+
+  it("stops with the block state when captcha appears during detail reading", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    let block = false;
+    const adapter = fakeAdapter({
+      collectVisibleOrders: async () => ({
+        orders: [],
+        empty: false,
+        rows_seen: 1,
+        recognized: 0,
+        unparsed: [{ locator: {} as never, missing: ["order_id"] as const, hint: "no order id" }],
+      }),
+      readOrderDetail: async () => {
+        block = true;
+        return null;
+      },
+      detectBlock: async () =>
+        block
+          ? { blocked: true, kind: "captcha", detail: "captcha on detail page" }
+          : { blocked: false, kind: "unknown", detail: "none" },
+    });
+    const outcome = await runSyncOnce(buildOptions(cwd, { adapter }));
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.status).toBe("CAPTCHA_OR_BLOCKED");
+  });
+
+  it("never touches the cursor when a tampered snapshot is rejected", async () => {
+    const cwd = tempCwd();
+    const path = await dryRunSnapshot(cwd, { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" });
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { payload_json: string };
+    parsed.payload_json = parsed.payload_json.replace("测试商品", "被篡改商品");
+    writeFileSync(path, JSON.stringify(parsed, null, 2), "utf8");
+    const outcome = await runSyncOnce(
+      buildOptions(
+        cwd,
+        { mode: "commit", confirm: true, snapshotPath: path },
+        { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" },
+      ),
+    );
+    expect(outcome.exitCode).toBe(1);
+    const { loadCursor } = await import("../src/state/cursor.js");
+    expect(loadCursor(join(cwd, "state"), "1688", "1688-main")).toBeNull();
+  });
+
   it("holds the platform+account lock while running", async () => {
     const cwd = tempCwd();
     mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });

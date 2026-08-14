@@ -110,21 +110,28 @@ export function verifySnapshot(snapshot: Snapshot): SnapshotVerifyResult {
   if (digest !== snapshot.payload_sha256) {
     return { ok: false, reason: "payload hash mismatch; the snapshot was modified" };
   }
-  const batch = snapshotToBatch(snapshot);
-  if (batch === null) {
-    return { ok: false, reason: "payload is not a valid batch; re-run dry-run" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(snapshot.payload_json) as unknown;
+  } catch {
+    return { ok: false, reason: "payload is not valid JSON; re-run dry-run" };
   }
-  if (JSON.stringify(batch) !== snapshot.payload_json) {
-    return { ok: false, reason: "payload round-trip mismatch; the snapshot was modified" };
+  if (typeof parsed !== "object" || parsed === null) {
+    return { ok: false, reason: "payload is not a batch object; re-run dry-run" };
   }
+  const record = parsed as Record<string, unknown>;
   if (
-    batch.batch_id !== snapshot.batch_id ||
-    batch.platform !== snapshot.platform ||
-    batch.platform_account_key !== snapshot.platform_account_key ||
-    batch.schema_version !== snapshot.schema_version ||
-    snapshot.mode !== "commit"
+    record["schema_version"] !== snapshot.schema_version ||
+    record["batch_id"] !== snapshot.batch_id ||
+    record["platform"] !== snapshot.platform ||
+    record["platform_account_key"] !== snapshot.platform_account_key ||
+    record["mode"] !== "commit" ||
+    !Array.isArray(record["orders"])
   ) {
     return { ok: false, reason: "snapshot envelope does not match its payload; re-run dry-run" };
+  }
+  if (JSON.stringify(parsed) !== snapshot.payload_json) {
+    return { ok: false, reason: "payload round-trip mismatch; the snapshot was modified" };
   }
   return { ok: true, reason: null };
 }
