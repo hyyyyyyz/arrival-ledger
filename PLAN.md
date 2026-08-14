@@ -21,7 +21,7 @@
 |---|---|---:|---|
 | 仓库局域网 | 微信 H5，访问 http://192.168.1.5:8766 | 否 | `.5` 已部署并通过服务端健康检查，待真机完整验收 |
 | 外网/异地 | HTTPS 临时 Quick Tunnel（无域名） | 是 | `.5` 已启用临时隧道并通过公网健康检查；等待手机登录/拍照验收 |
-| 平台订单采集 | 闲置 Windows 上的两个独立 Chrome profile + `sync-agent` | 平台登录只留在 Windows | MVP 正在设计，先手动 dry-run |
+| 平台订单采集 | 闲置 Windows 上的两个独立 Chrome profile + `sync-agent` | 平台登录只留在 Windows | 自动化实现完成，Windows 真机验收待执行 |
 
 服务器是纯 Server，不需要安装桌面环境。Windows 电脑只承担“保持 PDD/1688 浏览器登录并同步订单”的工作；Mac 不参与采集，也不需要一直开着。
 

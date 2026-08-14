@@ -9,7 +9,7 @@
 ```powershell
 # Windows 上（不要求开发环境，只需要 Node 20 LTS 与 git）
 cd C:\ArrivalLedger
-git clone --branch feat/browser-sync-mvp https://github.com/hyyyyyz/arrival-ledger.git app
+git clone --branch feat/browser-sync-mvp https://https://github.com/hyyyyyyz/arrival-ledger.git app
 cd app\sync-agent
 npm ci
 npx playwright install chromium
@@ -118,7 +118,8 @@ npm run sync-once -- --platform 1688 --mode commit --from-report .\state\snapsho
 - 不上传密码、Cookie、profile、截图、HTML、网络日志；
 - 不绕过验证码、滑块、风控；出现即熔断，人工处理；
 - 不自动下单、支付、退款、确认收货；
-- 报告、日志中的手机号/地址/长数字串已被自动打码；发现未打码内容立即停止并报告。
+- 只有运行日志（`logs\sync-agent.jsonl`）会自动脱敏；`state\report-*.json` 与 `state\snapshot-*.json`
+  包含**真实订单号和运单号**，属于敏感业务文件，严禁分享、截图外发或提交 Git；发现泄漏立即停止并报告。
 
 ## 7. 完成后的交接内容
 

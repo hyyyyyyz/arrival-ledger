@@ -45,7 +45,7 @@
 - 局域网免登录（可信 Wi-Fi）与公网 HTTPS 认证两种模式，公网启用前必须关闭免登录；
 - 照片、数据库只在自家服务器，不保存收件人电话和完整地址；
 - 平台密码、Cookie、登录态只留在 Windows 本机，永不上传、不进日志、不进 Git；
-- 同步接口使用独立 worker token（服务器只存摘要，可撤销/轮换）。
+- 同步接口使用独立 worker token：明文只存在于服务器 `.env`（`SYNC_WORKER_TOKENS`）与 Windows 本机 `.env.local`，数据库只记录 token 摘要，可撤销/轮换。
 
 ## 系统架构
 
@@ -71,7 +71,7 @@ Node 20 + TypeScript + Playwright（同步端）。
 需要 Docker + Compose，目标机为 Ubuntu（详细部署见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)）：
 
 ```bash
-git clone https://github.com/hyyyyyz/arrival-ledger.git
+git clone https://https://github.com/hyyyyyyz/arrival-ledger.git
 cd arrival-ledger
 cp .env.example .env          # chmod 600 .env，替换 SESSION_SECRET 和管理员密码
 sudo docker compose config --quiet
