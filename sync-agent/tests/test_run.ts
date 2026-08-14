@@ -12,6 +12,7 @@ import type { SyncBrowser } from "../src/browser/context.js";
 import { loadConfig } from "../src/config.js";
 import type { RawOrder } from "../src/extract/order.js";
 import { JsonLogger } from "../src/log.js";
+import { readSnapshot, verifySnapshot } from "../src/snapshot.js";
 
 const createdDirs: string[] = [];
 
@@ -89,42 +90,27 @@ function buildOptions(
   };
 }
 
-describe("runSyncOnce", () => {
-  it("dry-run collects orders and never uploads", async () => {
+async function dryRunSnapshot(cwd: string, env: Record<string, string> = {}): Promise<string> {
+  mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+  const outcome = await runSyncOnce(buildOptions(cwd, { mode: "dry-run" }, env));
+  expect(outcome.exitCode).toBe(0);
+  expect(outcome.report.snapshot_path).not.toBeNull();
+  return outcome.report.snapshot_path as string;
+}
+
+describe("runSyncOnce dry-run", () => {
+  it("dry-run collects orders, never uploads, and persists a verified snapshot", async () => {
     const cwd = tempCwd();
-    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
-    const outcome = await runSyncOnce(buildOptions(cwd));
-    expect(outcome.exitCode).toBe(0);
-    expect(outcome.report.mode).toBe("dry-run");
-    expect(outcome.report.counts.seen).toBe(1);
-    expect(outcome.report.counts.valid).toBe(1);
-    expect(outcome.report.status).toBe("OK");
+    const path = await dryRunSnapshot(cwd);
+    const snapshot = readSnapshot(path);
+    expect(snapshot).not.toBeNull();
+    expect(verifySnapshot(snapshot!)).toEqual({ ok: true, reason: null });
+    expect(snapshot!.orders).toHaveLength(1);
   });
 
   it("fails closed when the profile dir is missing", async () => {
     const cwd = tempCwd();
     const outcome = await runSyncOnce(buildOptions(cwd));
-    expect(outcome.exitCode).toBe(1);
-    expect(outcome.report.error_code).toBe("CONFIG");
-  });
-
-  it("commit without confirmation aborts before upload", async () => {
-    const cwd = tempCwd();
-    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
-    const outcome = await runSyncOnce(
-      buildOptions(cwd, { mode: "commit", confirm: false }, { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" }),
-    );
-    expect(outcome.exitCode).toBe(1);
-    expect(outcome.report.error_code).toBe("CONFIRM_REQUIRED");
-    expect(outcome.report.counts.uploaded).toBe(0);
-  });
-
-  it("commit without a worker key is disabled", async () => {
-    const cwd = tempCwd();
-    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
-    const outcome = await runSyncOnce(
-      buildOptions(cwd, { mode: "commit", confirm: true }),
-    );
     expect(outcome.exitCode).toBe(1);
     expect(outcome.report.error_code).toBe("CONFIG");
   });
@@ -205,9 +191,87 @@ describe("runSyncOnce", () => {
     expect(outcome.report.warnings.join(" ")).toContain("empty");
   });
 
-  it("refuses a second commit within the minimum interval", async () => {
+  it("writes a report that is detailed enough for human review", async () => {
     const cwd = tempCwd();
     mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const logger = new JsonLogger({ logDir: null });
+    const spy = vi.spyOn(logger, "info");
+    await runSyncOnce(buildOptions(cwd, { logger }));
+    spy.mockRestore();
+    const reports = await import("node:fs/promises");
+    const entries = await reports.readdir(join(cwd, "state"));
+    const reportFile = entries.find((name) => name.startsWith("report-"));
+    expect(reportFile).toBeDefined();
+    const report = JSON.parse(
+      readFileSync(join(cwd, "state", reportFile as string), "utf8"),
+    ) as { orders: Array<Record<string, unknown>> };
+    expect(report.orders[0]?.["shop_name"]).toBe("测试店铺");
+    const item = (report.orders[0]?.["items"] as Array<Record<string, unknown>>)[0];
+    expect(item?.["title"]).toBe("测试商品");
+    expect(item?.["quantity"]).toBe(2);
+    const pkg = (report.orders[0]?.["packages"] as Array<Record<string, unknown>>)[0];
+    expect(pkg?.["courier"]).toBe("中通");
+    expect(pkg?.["tracking_no"]).toBe("ZTO-20260813-0001");
+  });
+});
+
+describe("runSyncOnce commit", () => {
+  it("requires a snapshot; commit never re-opens the browser", async () => {
+    const cwd = tempCwd();
+    const outcome = await runSyncOnce(
+      buildOptions(cwd, { mode: "commit", confirm: true }, { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" }),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.error_code).toBe("CONFIG");
+  });
+
+  it("refuses a missing snapshot file", async () => {
+    const cwd = tempCwd();
+    const outcome = await runSyncOnce(
+      buildOptions(
+        cwd,
+        { mode: "commit", confirm: true, snapshotPath: join(cwd, "nope.json") },
+        { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" },
+      ),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.error_code).toBe("SNAPSHOT_INVALID");
+  });
+
+  it("refuses a tampered snapshot and uploads nothing", async () => {
+    const cwd = tempCwd();
+    const path = await dryRunSnapshot(cwd, { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" });
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { payload_json: string };
+    parsed.payload_json = parsed.payload_json.replace("测试商品", "被篡改商品");
+    writeFileSync(path, JSON.stringify(parsed, null, 2), "utf8");
+    const outcome = await runSyncOnce(
+      buildOptions(
+        cwd,
+        { mode: "commit", confirm: true, snapshotPath: path },
+        { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" },
+      ),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.error_code).toBe("SNAPSHOT_INVALID");
+  });
+
+  it("requires --yes confirmation", async () => {
+    const cwd = tempCwd();
+    const path = await dryRunSnapshot(cwd, { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" });
+    const outcome = await runSyncOnce(
+      buildOptions(
+        cwd,
+        { mode: "commit", confirm: false, snapshotPath: path },
+        { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" },
+      ),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.error_code).toBe("CONFIRM_REQUIRED");
+  });
+
+  it("refuses a second commit within the minimum interval", async () => {
+    const cwd = tempCwd();
+    const path = await dryRunSnapshot(cwd);
     mkdirSync(join(cwd, "state"), { recursive: true });
     writeFileSync(
       join(cwd, "state", "cursor-1688-1688-main.json"),
@@ -225,7 +289,11 @@ describe("runSyncOnce", () => {
       "utf8",
     );
     const outcome = await runSyncOnce(
-      buildOptions(cwd, { mode: "commit", confirm: true }, { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" }),
+      buildOptions(
+        cwd,
+        { mode: "commit", confirm: true, snapshotPath: path },
+        { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" },
+      ),
     );
     expect(outcome.exitCode).toBe(1);
     expect(outcome.report.error_code).toBe("RATE_LIMITED");
@@ -250,18 +318,5 @@ describe("runSyncOnce", () => {
     ref.release?.();
     const outcome = await runPromise;
     expect(outcome.exitCode).toBe(0);
-  });
-});
-
-describe("run report files", () => {
-  it("writes a sanitized local report for dry-run", async () => {
-    const cwd = tempCwd();
-    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
-    const logger = new JsonLogger({ logDir: null });
-    const spy = vi.spyOn(logger, "info");
-    await runSyncOnce(buildOptions(cwd, { logger }));
-    const reportCall = spy.mock.calls.find((call) => String(call[0].message).includes("report written"));
-    expect(reportCall).toBeDefined();
-    spy.mockRestore();
   });
 });

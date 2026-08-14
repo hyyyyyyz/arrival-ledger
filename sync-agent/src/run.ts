@@ -24,6 +24,14 @@ import {
   type SyncBatch,
   type UnifiedOrder,
 } from "./models.js";
+import {
+  buildSnapshot,
+  readSnapshot,
+  snapshotToBatch,
+  verifySnapshot,
+  writeSnapshot,
+  type Snapshot,
+} from "./snapshot.js";
 import { acquireLock, describeHolder } from "./state/lock.js";
 import { loadCursor, updateCursor } from "./state/cursor.js";
 import { postBatch, TransportError } from "./transport.js";
@@ -38,6 +46,7 @@ export interface RunOptions {
   logger: JsonLogger;
   launcher?: BrowserLauncher;
   adapter?: PlatformAdapter;
+  snapshotPath?: string;
 }
 
 export interface RunOutcome {
@@ -57,6 +66,7 @@ function buildReport(
   startedAt: string,
   counts: BatchCounts,
   warnings: string[],
+  snapshotPath: string | null = null,
 ): RunReport {
   return {
     command,
@@ -69,6 +79,7 @@ function buildReport(
     finished_at: nowIso(),
     counts,
     warnings,
+    snapshot_path: snapshotPath,
   };
 }
 
@@ -82,8 +93,20 @@ function writeReportFile(
   const summary = orders.map((order) => ({
     platform_order_id: order.platform_order_id,
     status: order.status,
-    items: order.items.length,
-    packages: order.packages.map((item) => item.tracking_no),
+    shop_name: order.shop_name,
+    ordered_at: order.ordered_at,
+    items: order.items.map((item) => ({
+      item_key: item.item_key,
+      title: item.title,
+      sku_text: item.sku_text,
+      quantity: item.quantity,
+      unit_price: item.unit_price,
+    })),
+    packages: order.packages.map((item) => ({
+      courier: item.courier,
+      tracking_no: item.tracking_no,
+      status: item.status,
+    })),
   }));
   const payload = { report, orders: summary };
   const target = join(
@@ -99,43 +122,39 @@ function writeReportFile(
   }
 }
 
+const emptyCounts = (): BatchCounts => ({
+  seen: 0,
+  valid: 0,
+  skipped: 0,
+  uploaded: 0,
+  created: 0,
+  updated: 0,
+  errors: 0,
+});
+
 export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
-  const { config, platform, mode, confirm, logger } = options;
+  if (options.mode === "commit") {
+    return runCommit(options);
+  }
+  return runDryRun(options);
+}
+
+async function runDryRun(options: RunOptions): Promise<RunOutcome> {
+  const { config, platform, logger } = options;
   const accountKey = config.account_keys[platform];
   const startedAt = nowIso();
-  const emptyCounts = (): BatchCounts => ({
-    seen: 0,
-    valid: 0,
-    skipped: 0,
-    uploaded: 0,
-    created: 0,
-    updated: 0,
-    errors: 0,
-  });
 
   const profileDir = config.profile_dirs[platform];
   if (!existsSync(profileDir)) {
     logger.error({
       command: "sync-once",
       platform,
-      message: `profile dir does not exist: ${profileDir}; run the browser once to create it (login-check)`,
+      message: `profile dir does not exist: ${profileDir}; run login-check first`,
       error_code: "CONFIG",
     });
     return {
       exitCode: 1,
-      report: buildReport("sync-once", platform, mode, null, "DISABLED", "CONFIG", startedAt, emptyCounts(), []),
-    };
-  }
-  if (mode === "commit" && config.worker_key.length === 0) {
-    logger.error({
-      command: "sync-once",
-      platform,
-      message: "worker key is not configured; commit is disabled",
-      error_code: "CONFIG",
-    });
-    return {
-      exitCode: 1,
-      report: buildReport("sync-once", platform, mode, null, "DISABLED", "CONFIG", startedAt, emptyCounts(), []),
+      report: buildReport("sync-once", platform, "dry-run", null, "DISABLED", "CONFIG", startedAt, emptyCounts(), []),
     };
   }
 
@@ -149,27 +168,8 @@ export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
     });
     return {
       exitCode: 1,
-      report: buildReport("sync-once", platform, mode, null, "DISABLED", "LOCKED", startedAt, emptyCounts(), []),
+      report: buildReport("sync-once", platform, "dry-run", null, "DISABLED", "LOCKED", startedAt, emptyCounts(), []),
     };
-  }
-
-  const cursor = loadCursor(config.state_dir, platform, accountKey);
-  if (mode === "commit" && config.min_interval_minutes > 0 && cursor?.last_sync_at !== null && cursor?.last_sync_at !== undefined) {
-    const last = new Date(cursor.last_sync_at).getTime();
-    const elapsedMinutes = (Date.now() - last) / 60_000;
-    if (elapsedMinutes < config.min_interval_minutes) {
-      lock.release();
-      logger.warn({
-        command: "sync-once",
-        platform,
-        message: `last sync was ${Math.floor(elapsedMinutes)} min ago; minimum interval is ${config.min_interval_minutes} min`,
-        error_code: "RATE_LIMITED",
-      });
-      return {
-        exitCode: 1,
-        report: buildReport("sync-once", platform, mode, null, "OK", "RATE_LIMITED", startedAt, emptyCounts(), []),
-      };
-    }
   }
 
   const adapter = options.adapter ?? getAdapter(platform);
@@ -178,7 +178,10 @@ export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
   try {
     browser = await launcher(profileDir);
     const page = browser.context.pages()[0] ?? (await browser.context.newPage());
-    await adapter.openOrders(page, { max_pages: config.max_pages, max_records: config.max_records });
+    await adapter.openOrders(page, {
+      max_pages: config.max_pages,
+      max_records: config.max_records,
+    });
 
     const state = await checkPageState(page, adapter);
     if (state.status !== "OK") {
@@ -193,7 +196,7 @@ export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
         message: state.detail,
         error_code: state.status,
       });
-      const report = buildReport("sync-once", platform, mode, null, state.status, state.status, startedAt, emptyCounts(), []);
+      const report = buildReport("sync-once", platform, "dry-run", null, state.status, state.status, startedAt, emptyCounts(), []);
       writeReportFile(config, platform, report, [], logger);
       return { exitCode: 1, report };
     }
@@ -212,7 +215,7 @@ export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
         updateCursor(config.state_dir, platform, accountKey, {
           last_status: "SCHEMA_CHANGED",
           last_sync_at: nowIso(),
-          consecutive_failures: cursor !== null ? cursor.consecutive_failures + 1 : 1,
+          consecutive_failures: (loadCursor(config.state_dir, platform, accountKey)?.consecutive_failures ?? 0) + 1,
         });
         logger.error({
           command: "sync-once",
@@ -221,7 +224,7 @@ export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
           message: `page ${pages + 1}: ${list.rows_seen} order rows visible but none could be parsed`,
           error_code: "SCHEMA_CHANGED",
         });
-        const report = buildReport("sync-once", platform, mode, null, "SCHEMA_CHANGED", "SCHEMA_CHANGED", startedAt, emptyCounts(), []);
+        const report = buildReport("sync-once", platform, "dry-run", null, "SCHEMA_CHANGED", "SCHEMA_CHANGED", startedAt, emptyCounts(), []);
         writeReportFile(config, platform, report, [], logger);
         return { exitCode: 1, report };
       }
@@ -229,11 +232,29 @@ export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
         sawEmptyList = true;
         break;
       }
-      rawOrders.push(...list.orders);
+      const remaining = config.max_records - rawOrders.length;
+      rawOrders.push(...list.orders.slice(0, remaining));
       pages += 1;
       if (rawOrders.length >= config.max_records || pages >= config.max_pages) break;
       const advanced = await adapter.advancePage(page);
       if (!advanced) break;
+      const recheck = await checkPageState(page, adapter);
+      if (recheck.status !== "OK") {
+        updateCursor(config.state_dir, platform, accountKey, {
+          last_status: recheck.status,
+          last_sync_at: nowIso(),
+        });
+        logger.error({
+          command: "sync-once",
+          platform,
+          status: recheck.status,
+          message: `after page ${pages}: ${recheck.detail}`,
+          error_code: recheck.status,
+        });
+        const report = buildReport("sync-once", platform, "dry-run", null, recheck.status, recheck.status, startedAt, emptyCounts(), warnings);
+        writeReportFile(config, platform, report, [], logger);
+        return { exitCode: 1, report };
+      }
       if (config.page_delay_ms > 0) {
         await new Promise((resolve) => setTimeout(resolve, config.page_delay_ms));
       }
@@ -256,7 +277,7 @@ export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
       updateCursor(config.state_dir, platform, accountKey, {
         last_status: "SCHEMA_CHANGED",
         last_sync_at: nowIso(),
-        consecutive_failures: cursor !== null ? cursor.consecutive_failures + 1 : 1,
+        consecutive_failures: (loadCursor(config.state_dir, platform, accountKey)?.consecutive_failures ?? 0) + 1,
       });
       logger.error({
         command: "sync-once",
@@ -269,7 +290,7 @@ export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
       const report = buildReport(
         "sync-once",
         platform,
-        mode,
+        "dry-run",
         null,
         "SCHEMA_CHANGED",
         "SCHEMA_CHANGED",
@@ -295,37 +316,6 @@ export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
     };
 
     const batchId = randomUUID();
-    if (mode === "dry-run") {
-      logger.info({
-        command: "sync-once",
-        platform,
-        batch_id: batchId,
-        message: "dry-run complete; nothing was uploaded",
-        counts: { seen: counts.seen, valid: counts.valid, rows_seen: rowsSeen, rows_recognized: rowsRecognized, pages },
-      });
-      const report = buildReport("sync-once", platform, mode, batchId, "OK", null, startedAt, counts, warnings);
-      writeReportFile(config, platform, report, orders, logger);
-      return { exitCode: 0, report };
-    }
-
-    if (orders.length === 0) {
-      const report = buildReport("sync-once", platform, mode, batchId, "OK", null, startedAt, counts, warnings);
-      writeReportFile(config, platform, report, [], logger);
-      return { exitCode: 0, report };
-    }
-    if (!confirm) {
-      logger.error({
-        command: "sync-once",
-        platform,
-        batch_id: batchId,
-        message: "commit requires an explicit --yes confirmation after reviewing the dry-run report",
-        error_code: "CONFIRM_REQUIRED",
-      });
-      const report = buildReport("sync-once", platform, mode, batchId, "DISABLED", "CONFIRM_REQUIRED", startedAt, counts, warnings);
-      writeReportFile(config, platform, report, orders, logger);
-      return { exitCode: 1, report };
-    }
-
     const finishedAt = nowIso();
     const batch: SyncBatch = {
       schema_version: SCHEMA_VERSION,
@@ -335,12 +325,154 @@ export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
       platform_account_key: accountKey,
       started_at: startedAt,
       finished_at: finishedAt,
-      cursor_before: cursor?.last_cursor ?? null,
+      cursor_before: loadCursor(config.state_dir, platform, accountKey)?.last_cursor ?? null,
       cursor_after: finishedAt,
       mode: "commit",
       orders,
     };
+    const snapshot: Snapshot = buildSnapshot(batch);
+    const snapshotPath = writeSnapshot(config.state_dir, snapshot);
 
+    logger.info({
+      command: "sync-once",
+      platform,
+      batch_id: batchId,
+      message: `dry-run complete; snapshot saved to ${snapshotPath}`,
+      counts: { seen: counts.seen, valid: counts.valid, rows_seen: rowsSeen, rows_recognized: rowsRecognized, pages },
+    });
+    const report = buildReport("sync-once", platform, "dry-run", batchId, "OK", null, startedAt, counts, warnings, snapshotPath);
+    writeReportFile(config, platform, report, orders, logger);
+    return { exitCode: 0, report };
+  } finally {
+    if (browser !== null) {
+      await browser.close().catch(() => undefined);
+    }
+    lock.release();
+  }
+}
+
+async function runCommit(options: RunOptions): Promise<RunOutcome> {
+  const { config, platform, confirm, logger } = options;
+  const accountKey = config.account_keys[platform];
+  const startedAt = nowIso();
+
+  if (options.snapshotPath === undefined || options.snapshotPath.trim().length === 0) {
+    logger.error({
+      command: "sync-once",
+      platform,
+      message: "commit requires a dry-run snapshot (--from-report); commit never re-opens the browser",
+      error_code: "CONFIG",
+    });
+    return {
+      exitCode: 1,
+      report: buildReport("sync-once", platform, "commit", null, "DISABLED", "CONFIG", startedAt, emptyCounts(), []),
+    };
+  }
+  const snapshot = readSnapshot(options.snapshotPath);
+  if (snapshot === null) {
+    logger.error({
+      command: "sync-once",
+      platform,
+      message: `snapshot not found or unreadable: ${options.snapshotPath}`,
+      error_code: "SNAPSHOT_INVALID",
+    });
+    return {
+      exitCode: 1,
+      report: buildReport("sync-once", platform, "commit", null, "DISABLED", "SNAPSHOT_INVALID", startedAt, emptyCounts(), []),
+    };
+  }
+  const verification = verifySnapshot(snapshot);
+  if (!verification.ok) {
+    logger.error({
+      command: "sync-once",
+      platform,
+      message: `${verification.reason ?? "snapshot verification failed"}; re-run dry-run`,
+      error_code: "SNAPSHOT_INVALID",
+    });
+    return {
+      exitCode: 1,
+      report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "SNAPSHOT_INVALID", startedAt, emptyCounts(), []),
+    };
+  }
+  if (snapshot.platform !== platform || snapshot.platform_account_key !== accountKey) {
+    logger.error({
+      command: "sync-once",
+      platform,
+      message: `snapshot is for ${snapshot.platform}:${snapshot.platform_account_key}, not ${platform}:${accountKey}`,
+      error_code: "SNAPSHOT_INVALID",
+    });
+    return {
+      exitCode: 1,
+      report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "SNAPSHOT_INVALID", startedAt, emptyCounts(), []),
+    };
+  }
+  const batch = snapshotToBatch(snapshot);
+  if (batch === null) {
+    logger.error({ command: "sync-once", platform, message: "snapshot payload is invalid", error_code: "SNAPSHOT_INVALID" });
+    return {
+      exitCode: 1,
+      report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "SNAPSHOT_INVALID", startedAt, emptyCounts(), []),
+    };
+  }
+  if (!confirm) {
+    logger.error({
+      command: "sync-once",
+      platform,
+      batch_id: snapshot.batch_id,
+      message: "commit requires an explicit --yes confirmation after reviewing the dry-run report",
+      error_code: "CONFIRM_REQUIRED",
+    });
+    const counts = { ...emptyCounts(), seen: batch.orders.length, valid: batch.orders.length };
+    return {
+      exitCode: 1,
+      report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "CONFIRM_REQUIRED", startedAt, counts, [], options.snapshotPath),
+    };
+  }
+  if (config.worker_key.length === 0) {
+    logger.error({ command: "sync-once", platform, message: "worker key is not configured; commit is disabled", error_code: "CONFIG" });
+    return {
+      exitCode: 1,
+      report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "CONFIG", startedAt, emptyCounts(), [], options.snapshotPath),
+    };
+  }
+
+  const lock = acquireLock(config.state_dir, platform, accountKey, config.worker_id);
+  if (!lock.held) {
+    logger.error({
+      command: "sync-once",
+      platform,
+      message: `another sync is running for ${platform}:${accountKey} (${describeHolder(lock.holder)})`,
+      error_code: "LOCKED",
+    });
+    return {
+      exitCode: 1,
+      report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "LOCKED", startedAt, emptyCounts(), [], options.snapshotPath),
+    };
+  }
+  try {
+    const cursor = loadCursor(config.state_dir, platform, accountKey);
+    if (config.min_interval_minutes > 0 && cursor?.last_sync_at) {
+      const elapsedMinutes = (Date.now() - new Date(cursor.last_sync_at).getTime()) / 60_000;
+      if (elapsedMinutes < config.min_interval_minutes) {
+        logger.warn({
+          command: "sync-once",
+          platform,
+          message: `last sync was ${Math.floor(elapsedMinutes)} min ago; minimum interval is ${config.min_interval_minutes} min`,
+          error_code: "RATE_LIMITED",
+        });
+        const counts = { ...emptyCounts(), seen: batch.orders.length, valid: batch.orders.length };
+        return {
+          exitCode: 1,
+          report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "OK", "RATE_LIMITED", startedAt, counts, [], options.snapshotPath),
+        };
+      }
+    }
+
+    const counts = {
+      ...emptyCounts(),
+      seen: batch.orders.length,
+      valid: batch.orders.length,
+    };
     try {
       const response = await postBatch(
         {
@@ -353,50 +485,50 @@ export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
         last_status: "OK",
         last_success_at: nowIso(),
         last_sync_at: nowIso(),
-        last_cursor: finishedAt,
-        last_batch_id: batchId,
+        last_cursor: batch.cursor_after,
+        last_batch_id: snapshot.batch_id,
         consecutive_failures: 0,
       });
       logger.info({
         command: "sync-once",
         platform,
-        batch_id: batchId,
+        batch_id: snapshot.batch_id,
         status: "OK",
-        message: "batch accepted by server",
+        message: "snapshot batch accepted by server",
         counts: {
           seen: counts.seen,
           valid: counts.valid,
-          uploaded: orders.length,
+          uploaded: batch.orders.length,
           created: response.created,
           updated: response.updated,
           skipped: response.skipped,
-          pages,
         },
       });
       const report = buildReport(
         "sync-once",
         platform,
-        mode,
-        batchId,
+        "commit",
+        snapshot.batch_id,
         "OK",
         null,
         startedAt,
-        { ...counts, uploaded: orders.length, created: response.created, updated: response.updated },
-        warnings,
+        { ...counts, uploaded: batch.orders.length, created: response.created, updated: response.updated },
+        [],
+        options.snapshotPath,
       );
-      writeReportFile(config, platform, report, orders, logger);
+      writeReportFile(config, platform, report, batch.orders, logger);
       return { exitCode: 0, report };
     } catch (error) {
       const transport = error instanceof TransportError ? error : null;
       updateCursor(config.state_dir, platform, accountKey, {
         last_status: "NETWORK_ERROR",
         last_sync_at: nowIso(),
-        consecutive_failures: cursor !== null ? cursor.consecutive_failures + 1 : 1,
+        consecutive_failures: (cursor?.consecutive_failures ?? 0) + 1,
       });
       logger.error({
         command: "sync-once",
         platform,
-        batch_id: batchId,
+        batch_id: snapshot.batch_id,
         status: "NETWORK_ERROR",
         error_code: transport?.kind ?? "NETWORK_ERROR",
         message: transport?.message ?? (error as Error).message,
@@ -405,21 +537,19 @@ export async function runSyncOnce(options: RunOptions): Promise<RunOutcome> {
       const report = buildReport(
         "sync-once",
         platform,
-        mode,
-        batchId,
+        "commit",
+        snapshot.batch_id,
         "NETWORK_ERROR",
         transport?.kind ?? "NETWORK_ERROR",
         startedAt,
         counts,
-        warnings,
+        [],
+        options.snapshotPath,
       );
-      writeReportFile(config, platform, report, orders, logger);
+      writeReportFile(config, platform, report, batch.orders, logger);
       return { exitCode: 1, report };
     }
   } finally {
-    if (browser !== null) {
-      await browser.close().catch(() => undefined);
-    }
     lock.release();
   }
 }

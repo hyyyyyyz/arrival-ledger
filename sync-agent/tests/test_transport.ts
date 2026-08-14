@@ -114,6 +114,27 @@ describe("postBatch", () => {
     await expect(postBatch({ ...options, backoff_ms: 1 }, validBatch(), fetchImpl)).rejects.toMatchObject({ kind: "bad_response" });
   });
 
+  it("rejects a 200 that confirms a different batch_id", async () => {
+    const fetchImpl = vi.fn(
+      async () => okResponse({ batch_id: "some-other-batch" }),
+    ) as unknown as typeof fetch;
+    await expect(postBatch({ ...options, backoff_ms: 1 }, validBatch(), fetchImpl)).rejects.toMatchObject({ kind: "bad_response" });
+  });
+
+  it("rejects a 200 with cursor_accepted=false", async () => {
+    const fetchImpl = vi.fn(
+      async () => okResponse({ cursor_accepted: false }),
+    ) as unknown as typeof fetch;
+    await expect(postBatch({ ...options, backoff_ms: 1 }, validBatch(), fetchImpl)).rejects.toMatchObject({ kind: "bad_response" });
+  });
+
+  it("rejects a 200 with non-empty errors", async () => {
+    const fetchImpl = vi.fn(
+      async () => okResponse({ errors: ["partial ingest"] }),
+    ) as unknown as typeof fetch;
+    await expect(postBatch({ ...options, backoff_ms: 1 }, validBatch(), fetchImpl)).rejects.toMatchObject({ kind: "bad_response" });
+  });
+
   it("never sends a dry_run batch", async () => {
     const fetchImpl = vi.fn(async () => okResponse()) as unknown as typeof fetch;
     const batch = { ...validBatch(), mode: "dry_run" } as unknown as SyncBatch;

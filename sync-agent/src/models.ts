@@ -121,6 +121,7 @@ export interface RunReport {
   finished_at: string;
   counts: BatchCounts;
   warnings: string[];
+  snapshot_path: string | null;
 }
 
 export interface ValidationIssue {

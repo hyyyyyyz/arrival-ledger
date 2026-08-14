@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,7 @@ import { JsonLogger } from "../src/log.js";
 import type { BrowserLauncher } from "../src/run.js";
 import { runSyncOnce } from "../src/run.js";
 import { postBatch } from "../src/transport.js";
+import { readSnapshot } from "../src/snapshot.js";
 import type { SyncBatch } from "../src/models.js";
 
 const createdDirs: string[] = [];
@@ -182,36 +183,54 @@ function e2eConfig(cwd: string, url: string) {
   }).config;
 }
 
+async function e2eDryRun(cwd: string, url: string): Promise<string> {
+  const config = e2eConfig(cwd, url);
+  const outcome = await runSyncOnce({
+    config,
+    platform: "1688",
+    mode: "dry-run",
+    confirm: false,
+    logger: new JsonLogger({ logDir: null }),
+    adapter: fakeAdapter(),
+    launcher: fakeLauncher(),
+  });
+  expect(outcome.exitCode).toBe(0);
+  expect(outcome.report.snapshot_path).not.toBeNull();
+  return outcome.report.snapshot_path as string;
+}
+
 describe("sync-agent against a contract-compliant mock server", () => {
-  it("commit uploads a batch and advances the cursor", async () => {
+  it("commit uploads exactly the snapshot bytes and advances the cursor", async () => {
     const cwd = tempCwd();
     mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
     const { state } = await startMockServer();
+    const snapshotPath = await e2eDryRun(cwd, state.url);
+    const snapshot = readSnapshot(snapshotPath);
+    expect(snapshot).not.toBeNull();
+
     const config = e2eConfig(cwd, state.url);
-    const logger = new JsonLogger({ logDir: null });
     const outcome = await runSyncOnce({
       config,
       platform: "1688",
       mode: "commit",
       confirm: true,
-      logger,
-      adapter: fakeAdapter(),
-      launcher: fakeLauncher(),
+      logger: new JsonLogger({ logDir: null }),
+      snapshotPath,
     });
     expect(outcome.exitCode).toBe(0);
     expect(outcome.report.counts.uploaded).toBe(1);
     expect(state.requests).toBe(1);
     expect(state.seenHeaders[0]?.authorization).toBe("Bearer e2e-worker-key-0001");
-    expect(state.seenHeaders[0]?.idempotency).toBe(outcome.report.batch_id);
+    expect(state.seenHeaders[0]?.idempotency).toBe(snapshot!.batch_id);
+    const stored = state.batches.get(snapshot!.batch_id);
+    expect(stored).toBeDefined();
+    expect(stored!.payload).toBe(snapshot!.payload_sha256);
 
     const cursor = JSON.parse(
-      (await import("node:fs")).readFileSync(
-        join(cwd, "state", "cursor-1688-1688-main.json"),
-        "utf8",
-      ),
+      readFileSync(join(cwd, "state", "cursor-1688-1688-main.json"), "utf8"),
     ) as { last_status: string; last_batch_id: string | null };
     expect(cursor.last_status).toBe("OK");
-    expect(cursor.last_batch_id).toBe(outcome.report.batch_id);
+    expect(cursor.last_batch_id).toBe(snapshot!.batch_id);
   });
 
   it("replays an identical batch id with the original counts", async () => {
@@ -229,19 +248,18 @@ describe("sync-agent against a contract-compliant mock server", () => {
       cursor_before: null,
       cursor_after: null,
       mode: "commit",
-      orders: [],
+      orders: [
+        {
+          platform_order_id: "x",
+          ordered_at: null,
+          status: "UNKNOWN",
+          shop_name: null,
+          items: [{ item_key: null, title: "x", sku_text: null, quantity: 1, unit_price: null }],
+          packages: [],
+          observed_at: new Date().toISOString(),
+        },
+      ],
     };
-    batch.orders = [
-      {
-        platform_order_id: "x",
-        ordered_at: null,
-        status: "UNKNOWN",
-        shop_name: null,
-        items: [{ item_key: null, title: "x", sku_text: null, quantity: 1, unit_price: null }],
-        packages: [],
-        observed_at: new Date().toISOString(),
-      },
-    ];
     const first = await postBatch(
       { api_base_url: config.api_base_url, worker_key: config.worker_key },
       batch,
@@ -290,10 +308,11 @@ describe("sync-agent against a contract-compliant mock server", () => {
     expect(state.requests).toBe(2);
   });
 
-  it("stops without retry on 401", async () => {
+  it("stops without retry on 401 and does not advance the cursor", async () => {
     const cwd = tempCwd();
     mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
     const { state } = await startMockServer();
+    const snapshotPath = await e2eDryRun(cwd, state.url);
     state.failNextWith = 401;
     const config = e2eConfig(cwd, state.url);
     const outcome = await runSyncOnce({
@@ -302,18 +321,23 @@ describe("sync-agent against a contract-compliant mock server", () => {
       mode: "commit",
       confirm: true,
       logger: new JsonLogger({ logDir: null }),
-      adapter: fakeAdapter(),
-      launcher: fakeLauncher(),
+      snapshotPath,
     });
     expect(outcome.exitCode).toBe(1);
     expect(outcome.report.error_code).toBe("auth");
     expect(state.requests).toBe(1);
+    const cursor = JSON.parse(
+      readFileSync(join(cwd, "state", "cursor-1688-1688-main.json"), "utf8"),
+    ) as { last_status: string; last_batch_id: string | null };
+    expect(cursor.last_status).toBe("NETWORK_ERROR");
+    expect(cursor.last_batch_id).toBeNull();
   });
 
   it("gives up on 429 with a long Retry-After", async () => {
     const cwd = tempCwd();
     mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
     const { state } = await startMockServer();
+    const snapshotPath = await e2eDryRun(cwd, state.url);
     state.stickyFailWith = 429;
     const config = e2eConfig(cwd, state.url);
     const outcome = await runSyncOnce({
@@ -322,11 +346,32 @@ describe("sync-agent against a contract-compliant mock server", () => {
       mode: "commit",
       confirm: true,
       logger: new JsonLogger({ logDir: null }),
-      adapter: fakeAdapter(),
-      launcher: fakeLauncher(),
+      snapshotPath,
     });
     expect(outcome.exitCode).toBe(1);
     expect(outcome.report.error_code).toBe("rate_limited");
     expect(state.requests).toBe(1);
+  });
+
+  it("refuses a tampered snapshot before any network call", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const { state } = await startMockServer();
+    const snapshotPath = await e2eDryRun(cwd, state.url);
+    const parsed = JSON.parse(readFileSync(snapshotPath, "utf8")) as { payload_json: string };
+    parsed.payload_json = parsed.payload_json.replace("测试商品", "被篡改商品");
+    writeFileSync(snapshotPath, JSON.stringify(parsed, null, 2), "utf8");
+    const config = e2eConfig(cwd, state.url);
+    const outcome = await runSyncOnce({
+      config,
+      platform: "1688",
+      mode: "commit",
+      confirm: true,
+      logger: new JsonLogger({ logDir: null }),
+      snapshotPath,
+    });
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.error_code).toBe("SNAPSHOT_INVALID");
+    expect(state.requests).toBe(0);
   });
 });

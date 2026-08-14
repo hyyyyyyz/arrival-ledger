@@ -22,7 +22,8 @@ const HELP = `arrival-ledger sync-agent (browser sync MVP)
 Usage:
   sync-agent doctor [--offline] [--platform <pdd|1688>]
   sync-agent login-check --platform <pdd|1688>
-  sync-agent sync-once --platform <pdd|1688> --mode <dry-run|commit> [--yes]
+  sync-agent sync-once --platform <pdd|1688> --mode dry-run
+  sync-agent sync-once --platform <pdd|1688> --mode commit --from-report <snapshot> --yes
 
 Commands:
   doctor       Check local configuration, state, locks and (unless --offline)
@@ -30,14 +31,16 @@ Commands:
   login-check  Open the visible browser on the platform order list and report
                login/captcha state. It never fills passwords or solves
                captchas; log in manually in the visible window.
-  sync-once    Read visible orders once. dry-run only prints a local report;
-               commit uploads the SAME record set and requires --yes.
+  sync-once    dry-run reads visible orders once and saves a private local
+               snapshot; commit uploads EXACTLY the snapshot bytes and never
+               re-opens the browser. commit requires --yes.
 
 Flags:
-  --offline    doctor: skip the Chromium check
-  --platform   one of: pdd, 1688
-  --mode       dry-run | commit
-  --yes        confirm commit after reviewing the dry-run report
+  --offline       doctor: skip the Chromium check
+  --platform      one of: pdd, 1688
+  --mode          dry-run | commit
+  --from-report   path to the dry-run snapshot (required for commit)
+  --yes           confirm commit after reviewing the dry-run report
 `;
 
 function parsePlatformFlag(values: { platform?: string } | undefined): Platform | null {
@@ -252,13 +255,18 @@ async function runLoginCheck(platform: Platform): Promise<number> {
   }
 }
 
-async function runSyncOnceCommand(platform: Platform, mode: "dry-run" | "commit", confirm: boolean): Promise<number> {
+async function runSyncOnceCommand(
+  platform: Platform,
+  mode: "dry-run" | "commit",
+  confirm: boolean,
+  snapshotPath: string | undefined,
+): Promise<number> {
   const { config, issues } = loadConfig();
   const configExit = requireValidConfig(issues);
   if (configExit !== null) return configExit;
 
   const logger = new JsonLogger({ logDir: config.log_dir });
-  const outcome = await runSyncOnce({ config, platform, mode, confirm, logger });
+  const outcome = await runSyncOnce({ config, platform, mode, confirm, logger, snapshotPath });
   return outcome.exitCode;
 }
 
@@ -272,6 +280,7 @@ async function main(): Promise<number> {
       offline: { type: "boolean", default: false },
       platform: { type: "string" },
       mode: { type: "string" },
+      "from-report": { type: "string" },
       yes: { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
@@ -309,7 +318,10 @@ async function main(): Promise<number> {
       if (values.mode === "commit" && !values.yes) {
         return fail("commit requires --yes after reviewing the dry-run report; nothing was uploaded");
       }
-      return runSyncOnceCommand(platform, values.mode, values.yes);
+      if (values.mode === "commit" && values["from-report"] === undefined) {
+        return fail("commit requires --from-report <snapshot>; commit never re-opens the browser");
+      }
+      return runSyncOnceCommand(platform, values.mode, values.yes, values["from-report"]);
     }
     default:
       return fail(`unknown command: ${command}\n\n${HELP}`);

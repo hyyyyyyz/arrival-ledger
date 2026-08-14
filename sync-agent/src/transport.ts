@@ -142,6 +142,24 @@ export async function postBatch(
         ) {
           throw new TransportError("bad_response", "server response shape is unexpected");
         }
+        if (parsed.batch_id !== batch.batch_id) {
+          throw new TransportError(
+            "bad_response",
+            `server confirmed a different batch_id (${parsed.batch_id}); cursor will not advance`,
+          );
+        }
+        if (parsed.cursor_accepted !== true) {
+          throw new TransportError(
+            "bad_response",
+            "server did not accept the cursor (cursor_accepted=false); cursor will not advance",
+          );
+        }
+        if (parsed.errors.length > 0) {
+          throw new TransportError(
+            "bad_response",
+            `server reported ${parsed.errors.length} errors; cursor will not advance`,
+          );
+        }
         return parsed as IngestResponse;
       }
       const error = mapStatus(response.status, retryAfter);
