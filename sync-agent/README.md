@@ -90,7 +90,7 @@ ARRIVAL_LOG_DIR=logs
 - 游标与锁按 `(platform, account_key)` 隔离；`*_ACCOUNT_KEY` 强制规范化为小写，且两个平台必须不同；
   切换账号时修改对应 `*_ACCOUNT_KEY` 即可，不会复用旧账号游标；
 - 配置值“设置了但非法”会直接报错退出（fail-closed），不会静默回退默认值；
-- PDD 与 1688 的 profile 目录必须不同；Windows 上默认 `C:/ArrivalLedger/profiles/<platform>`，其他平台为 `./profiles/<platform>`；
+- PDD 与 1688 的 profile 目录必须不同；未显式配置时，两平台默认使用当前 `sync-agent` 目录下的 `profiles/<platform>`；
 - worker key 只以明文保存在 Windows 本机受 ACL 保护的 `.env.local`，日志和输出中始终脱敏；
 - 公网隧道使用时 `ARRIVAL_API_BASE_URL` 必须为 `https://`。
 

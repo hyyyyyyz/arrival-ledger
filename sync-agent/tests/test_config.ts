@@ -42,7 +42,8 @@ describe("parseEnvFile", () => {
 
 describe("loadConfig", () => {
   it("applies defaults when no env file exists", () => {
-    const { config, issues } = loadConfig({ cwd: tempDir(), env: {} });
+    const dir = tempDir();
+    const { config, issues } = loadConfig({ cwd: dir, env: {} });
     expect(config.api_base_url).toBe("http://192.168.1.5:8766");
     expect(config.max_pages).toBe(5);
     expect(config.max_records).toBe(30);
@@ -51,8 +52,8 @@ describe("loadConfig", () => {
     expect(config.worker_id.length).toBeGreaterThan(0);
     expect(config.account_keys["pdd"]).toBe("pdd-main");
     expect(config.account_keys["1688"]).toBe("1688-main");
-    expect(config.profile_dirs["pdd"]).toBeTruthy();
-    expect(config.profile_dirs["1688"]).toBeTruthy();
+    expect(config.profile_dirs["pdd"]).toBe(join(dir, "profiles", "pdd"));
+    expect(config.profile_dirs["1688"]).toBe(join(dir, "profiles", "1688"));
     expect(config.order_list_urls["1688"]).toContain("1688.com");
     expect(issues).toEqual([]);
   });

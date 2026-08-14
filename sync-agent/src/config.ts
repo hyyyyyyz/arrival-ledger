@@ -37,9 +37,6 @@ export const DEFAULT_ORDER_LIST_URLS: Record<Platform, string> = {
 };
 
 export function defaultProfileDir(cwd: string, platform: Platform): string {
-  if (process.platform === "win32") {
-    return `C:/ArrivalLedger/profiles/${platform}`;
-  }
   return join(cwd, "profiles", platform);
 }
 
