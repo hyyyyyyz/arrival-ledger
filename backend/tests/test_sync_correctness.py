@@ -226,6 +226,112 @@ def test_unknown_then_known_courier_merges_one_physical_package(
         assert packages[0]["package_status"] == "SHIPPED"
 
 
+def test_fingerprint_items_are_reconciled_authoritatively(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    first = batch_payload("b-reconcile-0001")
+    first["orders"][0]["items"] = [
+        {"item_key": None, "title": "旧标题商品", "sku_text": "标准", "quantity": 1, "unit_price": None},
+        {"item_key": None, "title": "要被移除的商品", "sku_text": "标准", "quantity": 1, "unit_price": None},
+    ]
+    assert post_batch(client, first, sync_headers).status_code == 200
+    with client.app.state.database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) AS c FROM order_items").fetchone()["c"] == 2
+
+    second = batch_payload("b-reconcile-0002")
+    second["orders"][0]["items"] = [
+        {"item_key": None, "title": "改名后的商品", "sku_text": "标准", "quantity": 2, "unit_price": None},
+    ]
+    assert post_batch(client, second, sync_headers).status_code == 200
+    with client.app.state.database.connect() as connection:
+        rows = connection.execute("SELECT title, quantity FROM order_items ORDER BY id").fetchall()
+        assert [row["title"] for row in rows] == ["改名后的商品"]
+        assert [row["quantity"] for row in rows] == ["2"]
+
+
+def test_platform_keyed_items_are_not_deleted(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    first = batch_payload("b-reconcile-key-0001")
+    first["orders"][0]["items"] = [
+        {"item_key": "platform-item-1", "title": "平台商品", "sku_text": None, "quantity": 1, "unit_price": None},
+        {"item_key": None, "title": "指纹商品", "sku_text": None, "quantity": 1, "unit_price": None},
+    ]
+    assert post_batch(client, first, sync_headers).status_code == 200
+
+    second = batch_payload("b-reconcile-key-0002")
+    second["orders"][0]["items"] = [
+        {"item_key": "platform-item-1", "title": "平台商品", "sku_text": None, "quantity": 1, "unit_price": None},
+    ]
+    assert post_batch(client, second, sync_headers).status_code == 200
+    with client.app.state.database.connect() as connection:
+        rows = connection.execute(
+            "SELECT item_key, title FROM order_items ORDER BY id"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["item_key"] == "platform-item-1"
+
+
+def test_two_known_couriers_never_merge(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    first = batch_payload("b-courier-known-0001")
+    first["orders"][0]["packages"] = [
+        {"courier": "顺丰速运", "tracking_no": "8800123456789", "status": "SHIPPED"}
+    ]
+    assert post_batch(client, first, sync_headers).status_code == 200
+
+    second = batch_payload("b-courier-known-0002")
+    second["orders"][0]["packages"] = [
+        {"courier": "中通快递", "tracking_no": "8800123456789", "status": "SHIPPED"}
+    ]
+    assert post_batch(client, second, sync_headers).status_code == 200
+    with client.app.state.database.connect() as connection:
+        packages = connection.execute(
+            "SELECT courier_normalized FROM packages ORDER BY id"
+        ).fetchall()
+        assert len(packages) == 2
+        assert {row["courier_normalized"] for row in packages} == {"顺丰速运", "中通快递"}
+
+
+def test_single_item_orders_link_packages_to_the_item(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    payload = batch_payload("b-link-item-0001")
+    assert post_batch(client, payload, sync_headers).status_code == 200
+    with client.app.state.database.connect() as connection:
+        link = connection.execute(
+            """
+            SELECT package_order_links.order_item_id AS oi
+            FROM package_order_links
+            JOIN purchase_orders ON purchase_orders.id = package_order_links.order_id
+            """
+        ).fetchone()
+        assert link is not None
+        assert link["oi"] is not None
+
+
+def test_multi_item_orders_leave_links_order_level(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    payload = batch_payload("b-link-multi-item-0001")
+    payload["orders"][0]["items"] = [
+        {"item_key": "i-1", "title": "商品甲", "sku_text": None, "quantity": 1, "unit_price": None},
+        {"item_key": "i-2", "title": "商品乙", "sku_text": None, "quantity": 1, "unit_price": None},
+    ]
+    assert post_batch(client, payload, sync_headers).status_code == 200
+    with client.app.state.database.connect() as connection:
+        link = connection.execute(
+            """
+            SELECT package_order_links.order_item_id AS oi
+            FROM package_order_links
+            JOIN purchase_orders ON purchase_orders.id = package_order_links.order_id
+            """
+        ).fetchone()
+        assert link is not None
+        assert link["oi"] is None
+
+
 def test_known_then_unknown_courier_does_not_create_duplicate(
     client: TestClient, sync_headers: dict[str, str]
 ) -> None:

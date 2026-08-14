@@ -26,6 +26,7 @@ export interface OrderMatch {
   courier?: string | null
   tracking_no?: string | null
   items?: OrderMatchItem[]
+  confidence?: 'EXACT' | 'CANDIDATE' | string
 }
 
 export interface Receipt {

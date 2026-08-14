@@ -546,9 +546,14 @@ button.sync-item {
 }
 
 .match-hint,
-.match-pending {
+.match-pending,
+.match-candidate-hint {
   color: var(--amber);
   font-size: 12px;
+}
+
+.match-candidate-hint {
+  margin: 2px 0 0;
 }
 
 .capture-matches {

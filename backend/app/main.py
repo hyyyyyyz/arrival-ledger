@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import (
     Depends,
@@ -283,7 +283,11 @@ def _order_matches(
                     "quantity": row["item_quantity"],
                 }
             )
-    return list(grouped.values())
+    matches = list(grouped.values())
+    confidence: Literal["EXACT", "CANDIDATE"] = "EXACT" if len(matches) <= 1 else "CANDIDATE"
+    for match in matches:
+        match["confidence"] = confidence
+    return matches
 
 
 def _receipt_from_row(connection: sqlite3.Connection, row: sqlite3.Row) -> ReceiptOut:

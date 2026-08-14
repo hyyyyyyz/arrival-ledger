@@ -75,6 +75,21 @@ def test_cross_platform_tracking_matches_all_orders(
     assert len(matches) == 2
     platforms = {match["platform"] for match in matches}
     assert platforms == {"pdd", "1688"}
+    assert all(match["confidence"] == "CANDIDATE" for match in matches)
+
+
+def test_single_match_has_exact_confidence(
+    authenticated_client: TestClient, sync_headers: dict[str, str], jpeg_bytes: bytes
+) -> None:
+    payload = batch_payload("b-exact-match-0001")
+    assert post_batch(authenticated_client, payload, sync_headers).status_code == 200
+
+    receipt = upload_receipt(
+        authenticated_client, "SF515407643541", "receipt-exact-0001", jpeg_bytes
+    )
+    matches = receipt["order_matches"]
+    assert len(matches) == 1
+    assert matches[0]["confidence"] == "EXACT"
 
 
 def test_multi_item_order_match_lists_all_items(

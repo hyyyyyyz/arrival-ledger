@@ -243,10 +243,11 @@ onBeforeUnmount(() => {
 
         <div v-if="latest.matches && latest.matches.length" class="capture-matches">
           <p v-for="match in latest.matches" :key="`${match.platform}-${match.platform_order_id}`" class="match-line">
-            已匹配：{{ match.platform }} · {{ match.shop_name || '店铺未知' }}
+            {{ match.confidence === 'CANDIDATE' ? '候选匹配（请人工确认）：' : '已匹配：' }}{{ match.platform }} · {{ match.shop_name || '店铺未知' }}
             <template v-if="match.items && match.items.length">
               — {{ match.items.map((item) => item.title).join('、') }}
             </template>
+            <template v-if="match.items && match.items.length > 1">（整单商品候选）</template>
           </p>
         </div>
         <p v-else-if="latest.trackingNo" class="match-pending">待匹配：订单同步后会自动显示对应商品</p>

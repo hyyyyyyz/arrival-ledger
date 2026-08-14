@@ -338,8 +338,12 @@ def _upsert_order(
             changed = True
             counted = True
 
+    item_ids: list[int] = []
+    fingerprint_keys: list[str] = []
     for item in order.items:
         key = item_identity(item.item_key, item.title, item.sku_text)
+        if key.startswith("fp:"):
+            fingerprint_keys.append(key)
         existing_item = connection.execute(
             """
             SELECT id, title, sku_text, quantity, unit_price
@@ -348,7 +352,7 @@ def _upsert_order(
             (order_id, key),
         ).fetchone()
         if existing_item is None:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO order_items(order_id, item_key, title, sku_text, quantity, unit_price)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -362,8 +366,10 @@ def _upsert_order(
                     item.unit_price,
                 ),
             )
+            item_ids.append(cursor.lastrowid)
             changed = True
         else:
+            item_ids.append(existing_item["id"])
             quantity_text = str(item.quantity)
             if (
                 existing_item["title"] != item.title
@@ -380,6 +386,22 @@ def _upsert_order(
                     (item.title, item.sku_text, quantity_text, item.unit_price, existing_item["id"]),
                 )
                 changed = True
+
+    if fingerprint_keys:
+        placeholders = ",".join("?" for _ in fingerprint_keys)
+        connection.execute(
+            f"""
+            DELETE FROM order_items
+            WHERE order_id = ? AND item_key LIKE 'fp:%'
+              AND item_key NOT IN ({placeholders})
+            """,
+            (order_id, *fingerprint_keys),
+        )
+    else:
+        connection.execute(
+            "DELETE FROM order_items WHERE order_id = ? AND item_key LIKE 'fp:%'",
+            (order_id,),
+        )
 
     for package in order.packages:
         courier_normalized = normalize_courier(package.courier or "")
@@ -401,7 +423,13 @@ def _upsert_order(
                 (tracking_normalized,),
             ).fetchall()
             if len(candidates) == 1:
-                package_row = candidates[0]
+                candidate = candidates[0]
+                if (
+                    courier_normalized == ""
+                    or candidate["courier_normalized"] == ""
+                    or candidate["courier_normalized"] == courier_normalized
+                ):
+                    package_row = candidate
         if package_row is None:
             cursor = connection.execute(
                 """
@@ -451,12 +479,13 @@ def _upsert_order(
                     parameters,
                 )
                 changed = True
+        link_order_item_id = item_ids[0] if len(item_ids) == 1 else None
         link_cursor = connection.execute(
             """
             INSERT OR IGNORE INTO package_order_links(package_id, order_id, order_item_id, created_at)
-            VALUES (?, ?, NULL, ?)
+            VALUES (?, ?, ?, ?)
             """,
-            (package_id, order_id, now),
+            (package_id, order_id, link_order_item_id, now),
         )
         if link_cursor.rowcount == 1:
             changed = True

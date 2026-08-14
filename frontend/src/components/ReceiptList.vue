@@ -143,7 +143,7 @@ function submitServer(receipt: Receipt): void {
           <div v-if="receipt.order_matches && receipt.order_matches.length" class="order-matches">
             <div v-for="(match, index) in receipt.order_matches" :key="`${match.platform}-${match.platform_order_id}-${index}`" class="order-match">
               <p>
-                <span class="record-badge matched">已匹配订单</span>
+                <span class="record-badge matched">{{ match.confidence === 'CANDIDATE' ? '候选匹配' : '已匹配订单' }}</span>
                 {{ match.platform }} · {{ match.shop_name || '店铺未知' }}
               </p>
               <ul>
@@ -152,6 +152,8 @@ function submitServer(receipt: Receipt): void {
                   <template v-if="item.quantity"> ×{{ item.quantity }}</template>
                 </li>
               </ul>
+              <p v-if="match.confidence === 'CANDIDATE'" class="match-candidate-hint">多个订单共用该运单号，请人工确认</p>
+              <p v-else-if="match.items && match.items.length > 1" class="match-candidate-hint">整单商品候选：以拆包确认为准</p>
             </div>
           </div>
           <p v-else-if="receipt.tracking_no && !receipt.order_matches?.length" class="match-hint">

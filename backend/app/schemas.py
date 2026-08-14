@@ -49,6 +49,7 @@ class OrderMatchOut(BaseModel):
     courier: str | None
     tracking_no: str
     items: list[OrderMatchItemOut]
+    confidence: Literal["EXACT", "CANDIDATE"]
 
 
 class ReceiptOut(BaseModel):
