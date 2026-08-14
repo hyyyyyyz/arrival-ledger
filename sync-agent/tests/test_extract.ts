@@ -55,10 +55,16 @@ describe("buildUnifiedOrder", () => {
     })).toEqual([]);
   });
 
-  it("treats unknown status text as UNKNOWN with no issue", () => {
-    const result = buildUnifiedOrder(rawOrder({ status: "已付款待发货" }), "1688", "1688-main", STATUS_MAP);
-    expect(result.order?.status).toBe("UNKNOWN");
-    expect(result.issues).toEqual([]);
+  it("fails closed on unknown status text instead of guessing", () => {
+    const result = buildUnifiedOrder(rawOrder({ status: "奇异状态" }), "1688", "1688-main", STATUS_MAP);
+    expect(result.order).toBeNull();
+    expect(result.issues.join(" ")).toContain("unrecognized status");
+  });
+
+  it("fails closed on missing status", () => {
+    const result = buildUnifiedOrder(rawOrder({ status: null }), "1688", "1688-main", STATUS_MAP);
+    expect(result.order).toBeNull();
+    expect(result.issues.join(" ")).toContain("status is missing");
   });
 
   it("flags a missing platform_order_id", () => {

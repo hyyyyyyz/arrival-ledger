@@ -60,10 +60,12 @@ export function buildUnifiedOrder(
   const rawStatus = raw.status === null ? null : raw.status.trim();
   let status: OrderStatus;
   if (rawStatus === null || rawStatus.length === 0) {
+    issues.push(`${prefix}: status is missing`);
     status = "UNKNOWN";
   } else if (rawStatus in statusMap) {
     status = statusMap[rawStatus] ?? "UNKNOWN";
   } else {
+    issues.push(`${prefix}: unrecognized status text "${rawStatus.slice(0, 40)}"`);
     status = "UNKNOWN";
   }
 
