@@ -1,6 +1,7 @@
-# Windows 浏览器同步手工验收清单（D5）
+# Windows 浏览器同步手工验收清单
 
-状态：代码已就绪（`feat/browser-sync-mvp`），以下步骤必须在 **Windows 10/11 真机**上执行。
+状态：**自动化代码已完成（`feat/browser-sync-mvp`），Windows 真机验收待执行**。
+以下步骤必须在 **Windows 10/11 真机**上执行，全部通过前不要合并 main、不要启用定时任务。
 真实页面、真实订单、截图、登录态不得进入 Git、Issue 或聊天；测试报告只写数量与脱敏摘要。
 
 ## 0. 前置准备
@@ -50,8 +51,10 @@ npm run login-check -- --platform pdd
 npm run login-check -- --platform 1688
 ```
 
-- 浏览器窗口必须可见；本工具**绝不**自动输入密码、不处理短信/扫码/验证码；
-- 未登录时窗口会打开登录页，由你手工登录正确的采购账号；确认账号身份后再执行下一步；
+- 浏览器窗口必须可见（始终 headed，无隐藏运行模式）；本工具**绝不**自动输入密码、
+  不处理短信/扫码/验证码；
+- 未登录时窗口会打开登录页并保持打开，终端提示你手工完成登录后按 Enter，
+  程序重新检测登录状态，可反复执行直到成功（Ctrl+C 随时中止）；
 - 出现验证码/风控页面 → 输出 `CAPTCHA_OR_BLOCKED`，立即停止，不要尝试绕过。
 
 ## 3. 只读 dry-run（每个平台）
@@ -61,7 +64,10 @@ npm run sync-once -- --platform pdd --mode dry-run
 npm run sync-once -- --platform 1688 --mode dry-run
 ```
 
-- dry-run 不上传任何数据，只在 `state\report-*.json` 写本地报告；
+- dry-run 不上传任何数据，只写两个本地文件：
+  - `state\report-*.json`：供人工核对的完整报告（订单号、状态、店铺、每个商品的
+    标题/规格/数量/单价、每个包裹的快递与运单号）；
+  - `state\snapshot-*.json`：规范化记录的私有快照（含 payload hash），供 commit 使用；
 - 记录：读取订单数、解析成功数、字段缺失情况、用时、是否出现登录保护；
 - 页面结构与程序假设不一致 → 状态 `SCHEMA_CHANGED` 并停止，保留游标；需要按真实页面调整对应
   adapter 选择器并补充脱敏 fixture（改完必须重新通过 `npm test`）；
@@ -70,10 +76,13 @@ npm run sync-once -- --platform 1688 --mode dry-run
 ## 4. 确认后 commit（每个平台）
 
 ```powershell
-npm run sync-once -- --platform pdd --mode commit --yes
-npm run sync-once -- --platform 1688 --mode commit --yes
+npm run sync-once -- --platform pdd --mode commit --from-report .\state\snapshot-pdd-pdd-main-<batch_id>.json --yes
+npm run sync-once -- --platform 1688 --mode commit --from-report .\state\snapshot-1688-1688-main-<batch_id>.json --yes
 ```
 
+- commit **不会重新打开网页抓取**：它只上传 dry-run 快照的原始字节；
+  `<batch_id>` 与 dry-run 输出的 snapshot 文件名一致；
+- 快照被修改（内容或 hash 不一致）会被拒绝（`SNAPSHOT_INVALID`），必须重新 dry-run；
 - 必须在核对 dry-run 报告后执行；`--yes` 缺失会直接拒绝；
 - 同一平台 15 分钟内重复 commit 会被本地低频限制拦截（`SYNC_MIN_INTERVAL_MINUTES`）；
 - 重复提交同一批次内容不产生重复订单（服务器幂等 + 409 冲突保护）。

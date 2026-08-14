@@ -59,11 +59,14 @@ C:\ArrivalLedger\profiles\1688
 npm run doctor
 npm run login-check -- --platform pdd
 npm run login-check -- --platform 1688
-npm run sync-once -- --platform pdd --headed --mode dry-run
-npm run sync-once -- --platform 1688 --headed --mode dry-run
+npm run sync-once -- --platform pdd --mode dry-run
+npm run sync-once -- --platform 1688 --mode dry-run
+npm run sync-once -- --platform pdd --mode commit --from-report .\state\snapshot-pdd-pdd-main-<batch_id>.json --yes
 ```
 
-`sync-once` 运行时浏览器保持可见；用户能看到当前页面和进度。首次同步默认最近 90 天、最多 30 条，允许通过参数回补到 500 条。每个平台先手动跑通 20–30 条真实订单，再考虑 Task Scheduler。
+`sync-once` 运行时浏览器保持可见（始终 headed，无隐藏运行模式）；用户能看到当前页面和进度。
+首次同步默认最近 90 天、最多 30 条，允许通过参数回补到 500 条。每个平台先手动跑通 20–30 条
+真实订单，再考虑 Task Scheduler。
 
 本机配置只保存非敏感连接信息和路径，例如：
 
@@ -89,7 +92,10 @@ SYNC_PAGE_DELAY_MS=2500
 6. 服务器数据库/日志中不存在密码、Cookie、worker token、完整地址和原始 HTML（worker token 只以明文存在于 Windows 受 ACL 保护的本机配置）。
 7. 关闭 Windows 同步程序后，P0 收货页面仍可正常使用。
 
-`dry-run` 只读取、解析、校验并生成本地报告，不能写服务器；`commit` 必须使用同一份已展示给用户确认的规范化记录，不能在确认后重新无提示地扩大分页范围。用户输入明确的 `yes` 或等价确认后才允许 commit；取消、超时或报告变化都回到 dry-run。
+`dry-run` 只读取、解析、校验并把完整记录集保存为本地私有 snapshot（含 payload hash），不能写服务器；
+`commit` 必须通过 `--from-report <snapshot>` 读取该 snapshot 上传，**不能重新打开网页抓取**；
+snapshot 内容或 hash 变化时拒绝 commit，要求重新 dry-run。用户输入明确的 `yes` 或等价确认后才
+允许 commit；取消、超时或报告变化都回到 dry-run。
 
 ## 4. 目录与程序边界
 

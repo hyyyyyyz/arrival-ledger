@@ -88,7 +88,7 @@ deploy/scripts/verify.sh http://127.0.0.1:8766
 固定流程：
 
 ```text
-doctor → login-check → sync-once --mode dry-run → 用户确认 → sync-once --mode commit --yes
+doctor → login-check → sync-once --mode dry-run → 用户确认 → sync-once --mode commit --from-report <snapshot> --yes
 ```
 
 - 规格与边界：[`docs/BROWSER_SYNC_SPEC.md`](docs/BROWSER_SYNC_SPEC.md)
