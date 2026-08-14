@@ -458,10 +458,10 @@ sync_runs(
 - TypeScript 检查通过；
 - 生产构建通过；
 - 尚未完成真实 iPhone/Android 微信连续 30 件验收；
-- Windows 浏览器同步端（`sync-agent`）与内部批次接收接口代码已完成并全量测试（`feat/browser-sync-mvp`：后端 22 tests、同步端 113 tests），待 Windows 真机按 [`docs/SYNC_MANUAL_ACCEPTANCE.md`](docs/SYNC_MANUAL_ACCEPTANCE.md) 手工验收，尚未合并 main；
+- Windows 浏览器同步端（`sync-agent`）与内部批次接收接口代码已完成并全量测试（`feat/browser-sync-mvp`：后端 47 tests、同步端 183 tests、前端 4 tests），待 Windows 真机按 [`docs/SYNC_MANUAL_ACCEPTANCE.md`](docs/SYNC_MANUAL_ACCEPTANCE.md) 手工验收，尚未合并 main；
 - 尚未完成采购订单/CSV 导入模块；
 - 浏览器自动化文档、数据契约和 DeepSeek 交接规范已冻结；
-- D1–D4 代码交付完成（worker 骨架/离线 doctor、服务器批次接收、1688 与 PDD 适配器），真实平台采集与 D5 端到端验收待 Windows 真机执行；
+- D1–D5 自动化代码全部完成（worker 骨架/离线 doctor、服务器批次接收与迁移、1688 与 PDD 可见页面适配器、dry-run 快照与 commit、收货运单匹配闭环），真实平台采集与手工验收待 Windows 真机执行；
 - Git 回滚基线已建立并推送到 GitHub `hyyyyyyz/arrival-ledger`（提交 `d431654`）。
 
 ### 8.4 服务器迁移：192.168.1.4 → 192.168.1.5
@@ -701,6 +701,16 @@ sync_runs(
 7. 最后决定公网访问策略，并在公网前切换认证。
 
 ## 15. 变更记录
+
+### v1.2（2026-08-14）
+
+- 同步端与后端加固：可见元素白名单读取、明确订单详情链接导航、已发货订单强制详情补全、
+  snapshot 30 分钟 TTL 与游标一致性校验、指纹商品权威对账、known-vs-known 快递不合并、
+  多候选匹配标记 CANDIDATE、单商品订单包裹链接到具体商品行；
+- 配置安全下限：页间延迟 ≥1500ms、max_pages ≤5、min_interval ≥1 分钟、两平台 profile 目录必须不同、
+  account_key 小写化并检测碰撞；
+- 后端依赖升级（FastAPI 0.141.1 / starlette 1.6.0 / python-multipart 0.0.32 / httpx2 / pytest 9），
+  `pip-audit` 无已知漏洞；本地 venv 迁移到 Python 3.13（生产镜像仍为 3.12）。
 
 ### v1.1（2026-08-14）
 

@@ -105,7 +105,14 @@ npm run sync-once -- --platform 1688 --mode commit --from-report .\state\snapsho
 
 只有以上全部通过后，才允许评估 Windows Task Scheduler 低频定时（每天 1–2 次，另开任务）。
 
+## 5.5 本地报告的隐私边界
+
+- `state\report-*.json` 和 `state\snapshot-*.json` 包含**真实订单号与运单号**，
+  只允许在 Windows 本机人工核对；严禁分享到聊天、Issue、工单或提交 Git；
+- 交接内容只填写脱敏摘要（数量、完整率、状态），不粘贴报告原文。
+
 ## 6. 安全红线（任何一步违反都立即停止）
+
 
 - 不上传密码、Cookie、profile、截图、HTML、网络日志；
 - 不绕过验证码、滑块、风控；出现即熔断，人工处理；

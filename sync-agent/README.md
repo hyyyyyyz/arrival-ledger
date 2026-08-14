@@ -53,8 +53,7 @@ npm run login-check -- --platform 1688          # 打开可见浏览器检查登
 npm run login-check -- --platform pdd
 npm run sync-once -- --platform 1688 --mode dry-run
 npm run sync-once -- --platform pdd --mode dry-run
-npm run sync-once -- --platform pdd --mode commit \
-  --from-report .\state\snapshot-pdd-pdd-main-<batch_id>.json --yes
+npm run sync-once -- --platform pdd --mode commit --from-report .\state\snapshot-pdd-pdd-main-<batch_id>.json --yes
 ```
 
 检查与测试：
@@ -128,7 +127,14 @@ src/
 tests/            脱敏 fixture 与单元/适配器测试
 ```
 
+## 隐私警告
+
+- `state\report-*.json` 与 `state\snapshot-*.json` 包含**真实订单号、商品标题和运单号**；
+  这些文件只属于本机，严禁分享、截图外发或提交 Git（已被 .gitignore 排除）。
+- `logs\sync-agent.jsonl` 已自动脱敏，但报告文件是明文业务数据，处理时按真实订单对待。
+
 ## 安全红线
+
 
 - 密码、Cookie、登录态、profile 永远只留在 Windows 本机，不上传、不提交 Git、不写日志；
 - 日志采用 JSON Lines 并自动打码 Authorization/手机号/长数字串/敏感键名；
