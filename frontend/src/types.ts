@@ -13,6 +13,21 @@ export interface AuthSession {
 export type EvidenceStatus = 'PENDING' | 'READY' | 'FAILED'
 export type MatchStatus = 'MATCHED' | 'UNMATCHED'
 
+export interface OrderMatchItem {
+  title: string
+  sku_text?: string | null
+  quantity?: string | null
+}
+
+export interface OrderMatch {
+  platform: 'pdd' | '1688' | string
+  platform_order_id: string
+  shop_name?: string | null
+  courier?: string | null
+  tracking_no?: string | null
+  items?: OrderMatchItem[]
+}
+
 export interface Receipt {
   id: string | number
   client_event_id?: string
@@ -37,6 +52,7 @@ export interface Receipt {
   operator?: { display_name?: string | null } | null
   is_duplicate?: boolean
   duplicate_of?: Receipt | null
+  order_matches?: OrderMatch[]
 }
 
 export type BarcodeState = 'PROCESSING' | 'FOUND' | 'NOT_FOUND' | 'MANUAL'

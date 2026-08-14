@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import type { Receipt, UploadQueueItem, User } from '@/types'
+import type { OrderMatch, Receipt, UploadQueueItem, User } from '@/types'
 import { updateReceiptTracking } from '@/services/api'
 import { recognizeTrackingNo } from '@/services/barcode'
 import { compressImage } from '@/services/image'
@@ -26,6 +26,7 @@ interface CaptureResult {
   stage: 'ANALYZING' | 'QUEUED' | 'SYNCED' | 'ERROR'
   message: string
   sizeText: string
+  matches: OrderMatch[]
 }
 
 const input = ref<HTMLInputElement | null>(null)
@@ -88,6 +89,7 @@ async function handleFile(event: Event): Promise<void> {
       stage: 'ANALYZING',
       message: '照片已存本机，正在识别面单条码…',
       sizeText: `${compressed.width} × ${compressed.height} · ${formatBytes(compressed.compressedBytes)}`,
+      matches: [],
     }
     emit('changed')
 
@@ -159,6 +161,7 @@ async function reconcileSyncedReceipt(receipt: Receipt): Promise<void> {
   latest.value.serverReceiptId = receipt.id
   latest.value.stage = 'SYNCED'
   latest.value.duplicate = Boolean(receipt.is_duplicate)
+  latest.value.matches = receipt.order_matches || []
   let reconciliationMessage = ''
 
   if (desiredTracking && desiredTracking !== uploadedTracking) {
@@ -237,6 +240,16 @@ onBeforeUnmount(() => {
         <strong v-if="latest.trackingNo" class="tracking-number">{{ latest.trackingNo }}</strong>
         <strong v-else class="tracking-missing">暂未识别单号</strong>
         <p>{{ latest.message }}</p>
+
+        <div v-if="latest.matches && latest.matches.length" class="capture-matches">
+          <p v-for="match in latest.matches" :key="`${match.platform}-${match.platform_order_id}`" class="match-line">
+            已匹配：{{ match.platform }} · {{ match.shop_name || '店铺未知' }}
+            <template v-if="match.items && match.items.length">
+              — {{ match.items.map((item) => item.title).join('、') }}
+            </template>
+          </p>
+        </div>
+        <p v-else-if="latest.trackingNo" class="match-pending">待匹配：订单同步后会自动显示对应商品</p>
 
         <form class="tracking-form" @submit.prevent="saveManualTracking">
           <input

@@ -235,7 +235,58 @@ LEFT JOIN receipt_events duplicate ON duplicate.id = r.duplicate_of_receipt_id
 """
 
 
-def _receipt_from_row(row: sqlite3.Row) -> ReceiptOut:
+def _order_matches(
+    connection: sqlite3.Connection, tracking_no_normalized: str | None
+) -> list[dict]:
+    if not tracking_no_normalized:
+        return []
+    rows = connection.execute(
+        """
+        SELECT
+            pa.platform AS platform,
+            o.platform_order_id AS platform_order_id,
+            o.shop_name AS shop_name,
+            p.courier AS courier,
+            p.tracking_no AS tracking_no,
+            oi.title AS item_title,
+            oi.sku_text AS item_sku,
+            oi.quantity AS item_quantity
+        FROM packages p
+        JOIN package_order_links l ON l.package_id = p.id
+        JOIN purchase_orders o ON o.id = l.order_id
+        JOIN platform_accounts pa ON pa.id = o.platform_account_id
+        LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE p.tracking_no_normalized = ?
+        ORDER BY o.id, oi.id
+        """,
+        (tracking_no_normalized,),
+    ).fetchall()
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        key = f"{row['platform']}|{row['platform_order_id']}"
+        match = grouped.get(key)
+        if match is None:
+            match = {
+                "platform": row["platform"],
+                "platform_order_id": row["platform_order_id"],
+                "shop_name": row["shop_name"],
+                "courier": row["courier"],
+                "tracking_no": row["tracking_no"],
+                "items": [],
+            }
+            grouped[key] = match
+        if row["item_title"] is not None:
+            match["items"].append(
+                {
+                    "title": row["item_title"],
+                    "sku_text": row["item_sku"],
+                    "quantity": row["item_quantity"],
+                }
+            )
+    return list(grouped.values())
+
+
+def _receipt_from_row(connection: sqlite3.Connection, row: sqlite3.Row) -> ReceiptOut:
     photo_url = f"/api/receipts/{row['id']}/photo"
     duplicate_id = row["duplicate_of_receipt_id"]
     duplicate = None
@@ -271,6 +322,7 @@ def _receipt_from_row(row: sqlite3.Row) -> ReceiptOut:
             "sha256": row["photo_sha256"],
             "url": photo_url,
         },
+        order_matches=_order_matches(connection, row["tracking_no_normalized"]),
     )
 
 
@@ -561,10 +613,12 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         if existing is not None:
             await photo.close()
             response.status_code = 200
+            with database.connect() as connection:
+                replayed = _receipt_from_row(connection, existing)
             return ReceiptCreateResponse(
                 created=False,
                 idempotent_replay=True,
-                receipt=_receipt_from_row(existing),
+                receipt=replayed,
             )
 
         settings = _settings(request)
@@ -595,7 +649,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                     return ReceiptCreateResponse(
                         created=False,
                         idempotent_replay=True,
-                        receipt=_receipt_from_row(existing),
+                        receipt=_receipt_from_row(connection, existing),
                     )
 
                 os.replace(temporary_path, destination_path)
@@ -647,6 +701,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 receipt_id = cursor.lastrowid
                 connection.commit()
                 row = _fetch_receipt(connection, receipt_id=receipt_id)
+                receipt_out = _receipt_from_row(connection, row)
         except BaseException:
             temporary_path.unlink(missing_ok=True)
             if moved:
@@ -656,7 +711,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         return ReceiptCreateResponse(
             created=True,
             idempotent_replay=False,
-            receipt=_receipt_from_row(row),
+            receipt=receipt_out,
         )
 
     @application.get("/api/receipts", response_model=ReceiptListResponse)
@@ -676,8 +731,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 + " ORDER BY r.server_received_at DESC, r.id DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
+            items = [_receipt_from_row(connection, row) for row in rows]
         return ReceiptListResponse(
-            items=[_receipt_from_row(row) for row in rows],
+            items=items,
             total=total,
             limit=limit,
             offset=offset,
@@ -719,7 +775,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             recompute_tracking_duplicates(connection, normalized)
             connection.commit()
             row = _fetch_receipt(connection, receipt_id=receipt_id)
-        return _receipt_from_row(row)
+            receipt_out = _receipt_from_row(connection, row)
+        return receipt_out
 
     @application.get("/api/receipts/{receipt_id}/photo")
     def get_receipt_photo(

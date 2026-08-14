@@ -36,6 +36,21 @@ class DuplicateOfOut(BaseModel):
     photo_url: str
 
 
+class OrderMatchItemOut(BaseModel):
+    title: str
+    sku_text: str | None
+    quantity: str
+
+
+class OrderMatchOut(BaseModel):
+    platform: Literal["pdd", "1688"]
+    platform_order_id: str
+    shop_name: str | None
+    courier: str | None
+    tracking_no: str
+    items: list[OrderMatchItemOut]
+
+
 class ReceiptOut(BaseModel):
     id: int
     client_event_id: str
@@ -52,6 +67,7 @@ class ReceiptOut(BaseModel):
     duplicate_of: DuplicateOfOut | None = None
     operator: UserOut
     photo: PhotoOut
+    order_matches: list[OrderMatchOut] = []
 
 
 class ReceiptCreateResponse(BaseModel):

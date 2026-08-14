@@ -511,9 +511,54 @@ button.sync-item {
 }
 
 .result-synced .result-state,
-.record-badge.ready {
+.record-badge.ready,
+.record-badge.matched {
   color: var(--green-800);
   background: var(--green-100);
+}
+
+.order-matches {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.order-match {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #f1f5f9;
+  font-size: 12px;
+}
+
+.order-match p {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 2px;
+  font-weight: 640;
+}
+
+.order-match ul {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--text-secondary, #475569);
+}
+
+.match-hint,
+.match-pending {
+  color: var(--amber);
+  font-size: 12px;
+}
+
+.capture-matches {
+  margin: 6px 0 2px;
+  font-size: 12px;
+  color: var(--green-800);
+}
+
+.match-line {
+  margin: 2px 0;
 }
 
 .capture-result.duplicate .result-state,

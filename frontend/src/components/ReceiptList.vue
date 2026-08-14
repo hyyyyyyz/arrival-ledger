@@ -140,7 +140,24 @@ function submitServer(receipt: Receipt): void {
             <time>{{ formatDateTime(receiptTime(receipt)) }}</time>
           </div>
           <strong :class="{ muted: !receipt.tracking_no }">{{ receipt.tracking_no || '待补快递单号' }}</strong>
-          <p v-if="receipt.title_summary">{{ receipt.platform ? `${receipt.platform} · ` : '' }}{{ receipt.title_summary }}</p>
+          <div v-if="receipt.order_matches && receipt.order_matches.length" class="order-matches">
+            <div v-for="(match, index) in receipt.order_matches" :key="`${match.platform}-${match.platform_order_id}-${index}`" class="order-match">
+              <p>
+                <span class="record-badge matched">已匹配订单</span>
+                {{ match.platform }} · {{ match.shop_name || '店铺未知' }}
+              </p>
+              <ul>
+                <li v-for="item in match.items || []" :key="item.title">
+                  {{ item.title }}<template v-if="item.sku_text">（{{ item.sku_text }}）</template>
+                  <template v-if="item.quantity"> ×{{ item.quantity }}</template>
+                </li>
+              </ul>
+            </div>
+          </div>
+          <p v-else-if="receipt.tracking_no && !receipt.order_matches?.length" class="match-hint">
+            待匹配：订单同步后会自动显示对应商品
+          </p>
+          <p v-else-if="receipt.title_summary">{{ receipt.platform ? `${receipt.platform} · ` : '' }}{{ receipt.title_summary }}</p>
           <p v-else>{{ receipt.match_status === 'MATCHED' ? '已匹配采购订单' : '尚未匹配采购订单' }}</p>
           <p v-if="receipt.operator_display_name || receipt.operator?.display_name" class="operator-name">
             收货人：{{ receipt.operator_display_name || receipt.operator?.display_name }}
