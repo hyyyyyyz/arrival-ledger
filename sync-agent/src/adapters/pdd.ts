@@ -2,6 +2,12 @@ import type { Locator, Page } from "playwright";
 
 import { assertAllowedOrderListUrl } from "../browser/context.js";
 import {
+  findDetailLink,
+  openDetailTarget,
+  sameListUrl,
+  type DetailLinkRules,
+} from "../browser/detail.js";
+import {
   countVisibleMarkers,
   extractAllFieldValues,
   extractFieldValue,
@@ -185,6 +191,14 @@ async function extractPackages(card: Locator): Promise<{
   return { packages, unreadable };
 }
 
+export const PDD_DETAIL_RULES: DetailLinkRules = {
+  textPatterns: [/订单详情/, /查看订单/, /查看详情/],
+  hrefPatterns: [/order[-_]?detail/i, /detail/i],
+  excludeTextPatterns: [/^商品/, /宝贝/, /货品/, /链接$/],
+  excludeHrefPatterns: [/item|product|goods|sku|offer|login/i],
+  allowedHostSuffix: "yangkeduo.com",
+};
+
 export const pddAdapter: PlatformAdapter = {
   platform: "pdd",
   orderListUrl: "https://mobile.yangkeduo.com/orders.html",
@@ -273,6 +287,7 @@ export const pddAdapter: PlatformAdapter = {
           locator: card,
           missing: ["logistics"],
           hint: "tracking text exists but cannot be parsed",
+          order_id: platformOrderId,
         });
       }
     }
@@ -286,21 +301,42 @@ export const pddAdapter: PlatformAdapter = {
   },
 
   async readOrderDetail(page: Page, card: UnparsedCard): Promise<RawOrder | null> {
-    try {
-      const link = card.locator.locator("a").first();
-      if ((await link.count()) > 0) {
-        await link.click({ timeout: 5000 });
-      } else {
-        await card.locator.click({ timeout: 5000 });
+    const target = await findDetailLink(card.locator, page.url(), PDD_DETAIL_RULES);
+    if (target === null) return null;
+    const beforeUrl = page.url();
+    const opened = await openDetailTarget(page, target);
+    if (opened === null) return null;
+    const detailPage = opened.page;
+    const openedNewTab = opened.newTab;
+
+    const body = detailPage.locator("body");
+    const platformOrderId = await extractLabelValue(body, ORDER_ID_LABELS);
+    if (
+      platformOrderId === null ||
+      platformOrderId.length === 0 ||
+      !/\d/.test(platformOrderId)
+    ) {
+      if (openedNewTab) await detailPage.close().catch(() => undefined);
+      else {
+        await detailPage.goBack({ timeout: 5000 }).catch(() => undefined);
+        await detailPage.waitForLoadState("domcontentloaded").catch(() => undefined);
       }
-    } catch {
       return null;
     }
-    await page.waitForLoadState("domcontentloaded").catch(() => undefined);
-    await page.waitForTimeout(1000);
+    if (
+      card.order_id !== null &&
+      card.order_id !== undefined &&
+      card.order_id.length > 0 &&
+      platformOrderId.trim() !== card.order_id.trim()
+    ) {
+      if (openedNewTab) await detailPage.close().catch(() => undefined);
+      else {
+        await detailPage.goBack({ timeout: 5000 }).catch(() => undefined);
+        await detailPage.waitForLoadState("domcontentloaded").catch(() => undefined);
+      }
+      return null;
+    }
 
-    const body = page.locator("body");
-    const platformOrderId = await extractLabelValue(body, ORDER_ID_LABELS);
     const { packages } = await extractPackages(body);
     const detail: RawOrder = {
       platform_order_id: platformOrderId,
@@ -313,13 +349,20 @@ export const pddAdapter: PlatformAdapter = {
       source_page: 0,
     };
 
-    try {
-      await page.goBack({ timeout: 5000 });
-    } catch {
+    if (openedNewTab) {
+      await detailPage.close().catch(() => undefined);
+    } else {
+      try {
+        await page.goBack({ timeout: 5000 });
+      } catch {
+        return null;
+      }
+      await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+      await page.waitForTimeout(500);
+    }
+    if (!sameListUrl(beforeUrl, page.url())) {
       return null;
     }
-    await page.waitForLoadState("domcontentloaded").catch(() => undefined);
-    await page.waitForTimeout(1000);
     if ((await findCardLocators(page)).length === 0) {
       return null;
     }

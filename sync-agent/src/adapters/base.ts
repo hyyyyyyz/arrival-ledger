@@ -28,6 +28,7 @@ export interface UnparsedCard {
   locator: Locator;
   missing: Array<"order_id" | "logistics">;
   hint: string;
+  order_id?: string | null;
 }
 
 export interface OrderListState {

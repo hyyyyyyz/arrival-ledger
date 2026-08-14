@@ -1,6 +1,12 @@
 import type { Locator, Page } from "playwright";
 
 import { assertAllowedOrderListUrl } from "../browser/context.js";
+import {
+  findDetailLink,
+  openDetailTarget,
+  sameListUrl,
+  type DetailLinkRules,
+} from "../browser/detail.js";
 import { countVisibleMarkers, extractLabelValue } from "../browser/dom.js";
 import { cleanText } from "../extract/text.js";
 import {
@@ -155,6 +161,14 @@ function emptyItemList(): RawOrderItem[] {
   return [{ item_key: null, title: null, sku_text: null, quantity: null, unit_price: null }];
 }
 
+export const ALI1688_DETAIL_RULES: DetailLinkRules = {
+  textPatterns: [/订单详情/, /查看订单/, /查看详情/],
+  hrefPatterns: [/order[-_]?detail/i, /detail/i],
+  excludeTextPatterns: [/^商品/, /宝贝/, /货品/, /链接$/],
+  excludeHrefPatterns: [/item|product|goods|sku|offer|login/i],
+  allowedHostSuffix: "1688.com",
+};
+
 export const ali1688Adapter: PlatformAdapter = {
   platform: "1688",
   orderListUrl: "https://air.1688.com/app/ctf-page/trade-order-list/buyer-order-list.html",
@@ -289,6 +303,7 @@ export const ali1688Adapter: PlatformAdapter = {
           locator: row,
           missing: ["logistics"],
           hint: "tracking cell has unreadable content",
+          order_id: platformOrderId,
         });
       }
     }
@@ -302,21 +317,42 @@ export const ali1688Adapter: PlatformAdapter = {
   },
 
   async readOrderDetail(page: Page, card: UnparsedCard): Promise<RawOrder | null> {
-    try {
-      const link = card.locator.locator("a").first();
-      if ((await link.count()) > 0) {
-        await link.click({ timeout: 5000 });
-      } else {
-        await card.locator.click({ timeout: 5000 });
+    const target = await findDetailLink(card.locator, page.url(), ALI1688_DETAIL_RULES);
+    if (target === null) return null;
+    const beforeUrl = page.url();
+    const opened = await openDetailTarget(page, target);
+    if (opened === null) return null;
+    const detailPage = opened.page;
+    const openedNewTab = opened.newTab;
+
+    const body = detailPage.locator("body");
+    const platformOrderId = await extractLabelValue(body, ORDER_ID_LABELS);
+    if (
+      platformOrderId === null ||
+      platformOrderId.length === 0 ||
+      !/\d/.test(platformOrderId)
+    ) {
+      if (openedNewTab) await detailPage.close().catch(() => undefined);
+      else {
+        await detailPage.goBack({ timeout: 5000 }).catch(() => undefined);
+        await detailPage.waitForLoadState("domcontentloaded").catch(() => undefined);
       }
-    } catch {
       return null;
     }
-    await page.waitForLoadState("domcontentloaded").catch(() => undefined);
-    await page.waitForTimeout(1000);
+    if (
+      card.order_id !== null &&
+      card.order_id !== undefined &&
+      card.order_id.length > 0 &&
+      platformOrderId.trim() !== card.order_id.trim()
+    ) {
+      if (openedNewTab) await detailPage.close().catch(() => undefined);
+      else {
+        await detailPage.goBack({ timeout: 5000 }).catch(() => undefined);
+        await detailPage.waitForLoadState("domcontentloaded").catch(() => undefined);
+      }
+      return null;
+    }
 
-    const body = page.locator("body");
-    const platformOrderId = await extractLabelValue(body, ORDER_ID_LABELS);
     const title = await extractLabelValue(body, TITLE_LABELS);
     const courier = await extractLabelValue(body, COURIER_LABELS);
     const trackingRaw = await extractLabelValue(body, TRACKING_LABELS);
@@ -340,13 +376,20 @@ export const ali1688Adapter: PlatformAdapter = {
       source_page: 0,
     };
 
-    try {
-      await page.goBack({ timeout: 5000 });
-    } catch {
+    if (openedNewTab) {
+      await detailPage.close().catch(() => undefined);
+    } else {
+      try {
+        await page.goBack({ timeout: 5000 });
+      } catch {
+        return null;
+      }
+      await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+      await page.waitForTimeout(500);
+    }
+    if (!sameListUrl(beforeUrl, page.url())) {
       return null;
     }
-    await page.waitForLoadState("domcontentloaded").catch(() => undefined);
-    await page.waitForTimeout(1000);
     if ((await findRowLocators(page)).length === 0) {
       return null;
     }
