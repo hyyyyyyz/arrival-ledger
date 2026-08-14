@@ -9,6 +9,7 @@ import { ali1688Adapter } from "../src/adapters/ali1688.js";
 import { pddAdapter } from "../src/adapters/pdd.js";
 import type { UnparsedCard } from "../src/adapters/base.js";
 import { checkPageState } from "../src/browser/guards.js";
+import { sameListUrl } from "../src/browser/detail.js";
 
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 
@@ -137,6 +138,50 @@ describe("order detail navigation over visible DOM", () => {
     expect(page.context().pages().length).toBe(beforeCount);
   });
 
+  it("only clicks explicit order-detail links among refund/logistics/product links", async () => {
+    await open1688List("order-list-confusing-links.html");
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    expect(list.unparsed).toHaveLength(1);
+    const detail = await ali1688Adapter.readOrderDetail(page, list.unparsed[0]!);
+    expect(detail).not.toBeNull();
+    expect(detail?.platform_order_id).toBe("1688-260813-0002");
+    expect(detail?.items[0]?.title).toBe("测试商品丙");
+  });
+
+  it("handles detail links opened via JS window.open", async () => {
+    await openPddList("order-list-detail-windowopen.html");
+    const beforeCount = page.context().pages().length;
+    const list = await pddAdapter.collectVisibleOrders(page);
+    expect(list.unparsed).toHaveLength(1);
+    const detail = await pddAdapter.readOrderDetail(page, list.unparsed[0]!);
+    expect(detail).not.toBeNull();
+    expect(detail?.platform_order_id).toBe("260813-8800000002");
+    await page.waitForTimeout(400);
+    expect(page.context().pages().length).toBe(beforeCount);
+  });
+
+  it("fails when returning to the list no longer shows the original card", async () => {
+    await page.context().unrouteAll();
+    let listLoads = 0;
+    await page.context().route("**/buyer-order-list.html", async (route) => {
+      listLoads += 1;
+      const body =
+        listLoads === 1
+          ? await fixtureBody("1688/order-list-id-match.html")
+          : await fixtureBody("1688/empty-list.html");
+      await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body });
+    });
+    await page.context().route("**/detail.html", async (route) => {
+      await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await fixtureBody("1688/detail.html") });
+    });
+    await page.goto(ALI1688_LIST_URL);
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    const card = list.unparsed.find((entry) => entry.order_id === "1688-260813-0002");
+    expect(card).toBeDefined();
+    const detail = await ali1688Adapter.readOrderDetail(page, card!);
+    expect(detail).toBeNull();
+  });
+
   it("returns null when there is no detail link at all", async () => {
     const fresh = await browser.newPage();
     try {
@@ -155,5 +200,16 @@ describe("order detail navigation over visible DOM", () => {
     } finally {
       await fresh.close();
     }
+  });
+});
+
+describe("sameListUrl", () => {
+  const base = "https://air.1688.com/app/ctf-page/trade-order-list/buyer-order-list.html";
+  it("requires origin, pathname, query and hash to match", () => {
+    expect(sameListUrl(base, base)).toBe(true);
+    expect(sameListUrl(`${base}?page=2`, `${base}?page=1`)).toBe(false);
+    expect(sameListUrl(`${base}?page=2&status=shipped`, `${base}?page=2&status=paid`)).toBe(false);
+    expect(sameListUrl(`${base}#x`, `${base}#y`)).toBe(false);
+    expect(sameListUrl(base, "https://mobile.yangkeduo.com/orders.html")).toBe(false);
   });
 });

@@ -23,9 +23,23 @@ export function sameListUrl(before: string, after: string): boolean {
   try {
     const a = new URL(before);
     const b = new URL(after);
-    return a.origin === b.origin && a.pathname === b.pathname;
+    return (
+      a.origin === b.origin &&
+      a.pathname === b.pathname &&
+      a.search === b.search &&
+      a.hash === b.hash
+    );
   } catch {
     return before === after;
+  }
+}
+
+export function isOfficialHttpsUrl(url: string, hostSuffix: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && officialHost(parsed.hostname, hostSuffix);
+  } catch {
+    return false;
   }
 }
 
@@ -33,26 +47,30 @@ export async function openDetailTarget(
   page: Page,
   target: DetailTarget,
 ): Promise<{ page: Page; newTab: boolean } | null> {
+  const newPagePromise = page
+    .context()
+    .waitForEvent("page", { timeout: 4000 })
+    .catch(() => null);
+  try {
+    await target.link.click({ timeout: 5000 });
+  } catch {
+    return null;
+  }
   if (target.opensNewTab) {
-    const newPagePromise = page
-      .context()
-      .waitForEvent("page", { timeout: 8000 })
-      .catch(() => null);
-    try {
-      await target.link.click({ timeout: 5000 });
-    } catch {
-      return null;
-    }
     const newPage = await newPagePromise;
     if (newPage === null) return null;
     await newPage.waitForLoadState("domcontentloaded").catch(() => undefined);
     await newPage.waitForTimeout(500);
     return { page: newPage, newTab: true };
   }
-  try {
-    await target.link.click({ timeout: 5000 });
-  } catch {
-    return null;
+  const newPage = await Promise.race([
+    newPagePromise,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 800)),
+  ]);
+  if (newPage !== null) {
+    await newPage.waitForLoadState("domcontentloaded").catch(() => undefined);
+    await newPage.waitForTimeout(500);
+    return { page: newPage, newTab: true };
   }
   await page.waitForLoadState("domcontentloaded").catch(() => undefined);
   await page.waitForTimeout(500);
@@ -80,20 +98,35 @@ export async function findDetailLink(
     const text = (await link.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
     const rawHref = (await link.getAttribute("href").catch(() => null)) ?? null;
     const target = (await link.getAttribute("target").catch(() => null)) ?? null;
-    if (rawHref === null) continue;
+    const effectiveHref =
+      rawHref !== null && !rawHref.toLowerCase().startsWith("javascript:")
+        ? rawHref
+        : null;
     if (rules.excludeTextPatterns.some((pattern) => pattern.test(text))) continue;
-    if (rules.excludeHrefPatterns.some((pattern) => pattern.test(rawHref))) continue;
+    if (effectiveHref !== null && rules.excludeHrefPatterns.some((pattern) => pattern.test(effectiveHref))) continue;
+    if (effectiveHref === null) {
+      if (rules.textPatterns.some((pattern) => pattern.test(text))) {
+        candidates.push({
+          link,
+          text,
+          href: null,
+          opensNewTab: false,
+          score: 2,
+        });
+      }
+      continue;
+    }
     let resolved: string;
     try {
-      resolved = new URL(rawHref, pageUrl).href;
+      resolved = new URL(effectiveHref, pageUrl).href;
     } catch {
       continue;
     }
     if (!officialHost(new URL(resolved).hostname, rules.allowedHostSuffix)) continue;
     let score = 0;
     if (rules.textPatterns.some((pattern) => pattern.test(text))) score += 2;
-    if (rules.hrefPatterns.some((pattern) => pattern.test(rawHref))) score += 1;
-    if (score === 0) continue;
+    if (rules.hrefPatterns.some((pattern) => pattern.test(effectiveHref))) score += 1;
+    if (score === 0 || (score === 1 && text.length === 0)) continue;
     candidates.push({
       link,
       text,
