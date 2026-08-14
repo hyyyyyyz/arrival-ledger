@@ -14,10 +14,10 @@ import {
 
 describe("unwrapExcelString", () => {
   it("unwraps Excel string wrappers", () => {
-    expect(unwrapExcelString('="464689789940513"')).toBe("464689789940513");
+    expect(unwrapExcelString('="888888888888888888"')).toBe("888888888888888888");
   });
   it("keeps plain values unchanged", () => {
-    expect(unwrapExcelString("  464689789940513  ")).toBe("464689789940513");
+    expect(unwrapExcelString("  888888888888888888  ")).toBe("888888888888888888");
   });
 });
 

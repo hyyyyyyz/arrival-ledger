@@ -25,7 +25,7 @@ describe("redactText", () => {
     expect(redactText("card 6222021234567890123 end")).not.toContain("6222021234567890123");
   });
   it("leaves tracking numbers readable", () => {
-    const text = "tracking SF5154076435411 ok";
+    const text = "tracking SF1234567890000 ok";
     expect(redactText(text)).toBe(text);
   });
 });
@@ -37,13 +37,13 @@ describe("redactJson", () => {
       token: "top-secret-token",
       worker_key: "arrival-worker-secret",
       address: "北京市朝阳区测试路 1 号",
-      tracking_no: "SF5154076435411",
+      tracking_no: "SF1234567890000",
     });
     expect(output["token"]).toBe(REDACTED);
     expect(output["worker_key"]).toBe(REDACTED);
     expect(output["address"]).toBe(REDACTED);
     expect(output["platform"]).toBe("pdd");
-    expect(output["tracking_no"]).toBe("SF5154076435411");
+    expect(output["tracking_no"]).toBe("SF1234567890000");
   });
 
   it("redacts nested objects and arrays", () => {
