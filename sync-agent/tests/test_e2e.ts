@@ -180,7 +180,7 @@ function e2eConfig(cwd: string, url: string) {
     env: {
       ARRIVAL_API_BASE_URL: url,
       ARRIVAL_SYNC_WORKER_KEY: "e2e-worker-key-0001",
-      SYNC_MIN_INTERVAL_MINUTES: "0",
+      SYNC_MIN_INTERVAL_MINUTES: "1",
     },
   }).config;
 }

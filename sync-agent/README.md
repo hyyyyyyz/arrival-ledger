@@ -85,10 +85,13 @@ ARRIVAL_STATE_DIR=state
 ARRIVAL_LOG_DIR=logs
 ```
 
-- 默认值：`SYNC_MAX_PAGES=5`、`SYNC_MAX_RECORDS=30`（上限 500）、`SYNC_PAGE_DELAY_MS=2500`、`SYNC_MIN_INTERVAL_MINUTES=15`（0 表示不限制）；
-- 游标与锁按 `(platform, account_key)` 隔离；切换账号时修改对应 `*_ACCOUNT_KEY` 即可，不会复用旧账号游标；
+- 安全下限/上限：`SYNC_PAGE_DELAY_MS` 最小 1500（不可关闭）、`SYNC_MAX_PAGES` 1–5、
+  `SYNC_MIN_INTERVAL_MINUTES` 最小 1（定时同步不允许 0）；默认值：`SYNC_MAX_PAGES=5`、
+  `SYNC_MAX_RECORDS=30`（上限 500）、`SYNC_PAGE_DELAY_MS=2500`、`SYNC_MIN_INTERVAL_MINUTES=15`；
+- 游标与锁按 `(platform, account_key)` 隔离；`*_ACCOUNT_KEY` 强制规范化为小写，且两个平台必须不同；
+  切换账号时修改对应 `*_ACCOUNT_KEY` 即可，不会复用旧账号游标；
 - 配置值“设置了但非法”会直接报错退出（fail-closed），不会静默回退默认值；
-- Windows 上默认 profile 目录为 `C:/ArrivalLedger/profiles/<platform>`，其他平台为 `./profiles/<platform>`；
+- PDD 与 1688 的 profile 目录必须不同；Windows 上默认 `C:/ArrivalLedger/profiles/<platform>`，其他平台为 `./profiles/<platform>`；
 - worker key 只以明文保存在 Windows 本机受 ACL 保护的 `.env.local`，日志和输出中始终脱敏；
 - 公网隧道使用时 `ARRIVAL_API_BASE_URL` 必须为 `https://`。
 

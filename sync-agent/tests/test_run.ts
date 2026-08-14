@@ -255,7 +255,7 @@ describe("runSyncOnce pagination safety", () => {
           : { blocked: false, kind: "unknown", detail: "none" },
     });
     const outcome = await runSyncOnce(
-      buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "0" }),
+      buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "1500" }),
     );
     expect(outcome.exitCode).toBe(1);
     expect(outcome.report.status).toBe("CAPTCHA_OR_BLOCKED");
@@ -278,7 +278,7 @@ describe("runSyncOnce pagination safety", () => {
       },
     });
     const outcome = await runSyncOnce(
-      buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "0" }),
+      buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "1500" }),
     );
     expect(outcome.exitCode).toBe(0);
     expect(outcome.report.counts.seen).toBe(1);
@@ -307,7 +307,7 @@ describe("runSyncOnce pagination safety", () => {
       readOrderDetail: async () => null,
     });
     const outcome = await runSyncOnce(
-      buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "0" }),
+      buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "1500" }),
     );
     expect(outcome.exitCode).toBe(1);
     expect(outcome.report.status).toBe("SCHEMA_CHANGED");
@@ -388,7 +388,7 @@ describe("runSyncOnce pagination safety", () => {
       },
     });
     const outcome = await runSyncOnce(
-      buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "0" }),
+      buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "1500" }),
     );
     expect(outcome.exitCode).toBe(0);
     expect(outcome.report.counts.seen).toBe(1);

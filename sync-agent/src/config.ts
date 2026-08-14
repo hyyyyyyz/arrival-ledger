@@ -116,18 +116,25 @@ export function loadConfig(
   }
 
   const account_keys: Record<Platform, string> = {
-    pdd: (env["PDD_ACCOUNT_KEY"] ?? defaultAccountKey("pdd")).trim(),
-    "1688": (env["ALI1688_ACCOUNT_KEY"] ?? defaultAccountKey("1688")).trim(),
+    pdd: (env["PDD_ACCOUNT_KEY"] ?? defaultAccountKey("pdd")).trim().toLowerCase(),
+    "1688": (env["ALI1688_ACCOUNT_KEY"] ?? defaultAccountKey("1688")).trim().toLowerCase(),
   };
   for (const platform of PLATFORMS) {
     const field = platform === "pdd" ? "PDD_ACCOUNT_KEY" : "ALI1688_ACCOUNT_KEY";
     if (!ACCOUNT_KEY_PATTERN.test(account_keys[platform])) {
       issues.push({
         field,
-        message: "must match /^[A-Za-z0-9_-]{1,64}$/",
+        message: "must match /^[A-Za-z0-9_-]{1,64}$/ (normalized to lowercase)",
         severity: "FAIL",
       });
     }
+  }
+  if (account_keys["pdd"] === account_keys["1688"]) {
+    issues.push({
+      field: "PDD_ACCOUNT_KEY/ALI1688_ACCOUNT_KEY",
+      message: "account keys must be different for the two platforms",
+      severity: "FAIL",
+    });
   }
 
   const order_list_urls: Record<Platform, string> = {
@@ -151,7 +158,7 @@ export function loadConfig(
     worker_id: (env["ARRIVAL_WORKER_ID"] ?? defaultWorkerId()).trim(),
     state_dir: resolve(cwd, env["ARRIVAL_STATE_DIR"] ?? DEFAULT_STATE_DIR),
     log_dir: resolve(cwd, env["ARRIVAL_LOG_DIR"] ?? DEFAULT_LOG_DIR),
-    max_pages: asInt(env["SYNC_MAX_PAGES"], 5, 1, 100, "SYNC_MAX_PAGES", issues),
+    max_pages: asInt(env["SYNC_MAX_PAGES"], 5, 1, 5, "SYNC_MAX_PAGES", issues),
     max_records: asInt(
       env["SYNC_MAX_RECORDS"],
       30,
@@ -163,7 +170,7 @@ export function loadConfig(
     page_delay_ms: asInt(
       env["SYNC_PAGE_DELAY_MS"],
       2500,
-      0,
+      1500,
       60_000,
       "SYNC_PAGE_DELAY_MS",
       issues,
@@ -171,7 +178,7 @@ export function loadConfig(
     min_interval_minutes: asInt(
       env["SYNC_MIN_INTERVAL_MINUTES"],
       15,
-      0,
+      1,
       1440,
       "SYNC_MIN_INTERVAL_MINUTES",
       issues,
@@ -189,6 +196,15 @@ export function loadConfig(
     if (config.profile_dirs[platform].length === 0) {
       issues.push({ field, message: "must not be empty", severity: "FAIL" });
     }
+  }
+  const normalizePath = (value: string): string =>
+    process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value);
+  if (normalizePath(config.profile_dirs["pdd"]) === normalizePath(config.profile_dirs["1688"])) {
+    issues.push({
+      field: "PDD_PROFILE_DIR/ALI1688_PROFILE_DIR",
+      message: "the two platforms must use different profile directories",
+      severity: "FAIL",
+    });
   }
   if (config.worker_id.length === 0 || config.worker_id.length > LIMITS.worker_id) {
     issues.push({

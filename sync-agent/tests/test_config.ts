@@ -63,7 +63,7 @@ describe("loadConfig", () => {
       join(dir, ".env.local"),
       [
         "SYNC_MAX_RECORDS=60",
-        "SYNC_PAGE_DELAY_MS=1000",
+        "SYNC_PAGE_DELAY_MS=2000",
         "SYNC_MIN_INTERVAL_MINUTES=30",
         "PDD_PROFILE_DIR=C:/ArrivalLedger/profiles/pdd",
         "PDD_ACCOUNT_KEY=pdd-buyer-1",
@@ -72,7 +72,7 @@ describe("loadConfig", () => {
     );
     const { config } = loadConfig({ cwd: dir, env: {} });
     expect(config.max_records).toBe(60);
-    expect(config.page_delay_ms).toBe(1000);
+    expect(config.page_delay_ms).toBe(2000);
     expect(config.min_interval_minutes).toBe(30);
     expect(config.profile_dirs["pdd"]).toBe("C:/ArrivalLedger/profiles/pdd");
     expect(config.account_keys["pdd"]).toBe("pdd-buyer-1");
@@ -112,6 +112,52 @@ describe("loadConfig", () => {
   it("requires https order list URLs", () => {
     const { issues } = loadConfig({ cwd: tempDir(), env: { ALI1688_ORDER_URL: "http://insecure" } });
     expect(issues.some((issue) => issue.field === "ALI1688_ORDER_URL" && issue.severity === "FAIL")).toBe(true);
+  });
+
+  it("enforces the safety floors and caps", () => {
+    const { config, issues } = loadConfig({
+      cwd: tempDir(),
+      env: {
+        SYNC_PAGE_DELAY_MS: "0",
+        SYNC_MAX_PAGES: "9",
+        SYNC_MIN_INTERVAL_MINUTES: "0",
+      },
+    });
+    expect(config.page_delay_ms).toBe(2500);
+    expect(config.max_pages).toBe(5);
+    expect(config.min_interval_minutes).toBe(15);
+    const fields = issues.map((issue) => issue.field);
+    expect(fields).toContain("SYNC_PAGE_DELAY_MS");
+    expect(fields).toContain("SYNC_MAX_PAGES");
+    expect(fields).toContain("SYNC_MIN_INTERVAL_MINUTES");
+  });
+
+  it("normalizes account keys to lowercase and rejects collisions", () => {
+    const { config } = loadConfig({
+      cwd: tempDir(),
+      env: { PDD_ACCOUNT_KEY: "PDD-Buyer", ALI1688_ACCOUNT_KEY: "ali-buyer" },
+    });
+    expect(config.account_keys["pdd"]).toBe("pdd-buyer");
+    expect(config.account_keys["1688"]).toBe("ali-buyer");
+
+    const collision = loadConfig({
+      cwd: tempDir(),
+      env: { PDD_ACCOUNT_KEY: "same-account", ALI1688_ACCOUNT_KEY: "SAME-ACCOUNT" },
+    });
+    expect(
+      collision.issues.some((issue) => issue.field.includes("PDD_ACCOUNT_KEY/ALI1688_ACCOUNT_KEY")),
+    ).toBe(true);
+  });
+
+  it("rejects identical profile directories", () => {
+    const { issues } = loadConfig({
+      cwd: tempDir(),
+      env: {
+        PDD_PROFILE_DIR: "/same/profile/dir",
+        ALI1688_PROFILE_DIR: "/same/profile/dir",
+      },
+    });
+    expect(issues.some((issue) => issue.field.includes("PDD_PROFILE_DIR/ALI1688_PROFILE_DIR"))).toBe(true);
   });
 
   it("configFailures filters FAIL severity only", () => {
