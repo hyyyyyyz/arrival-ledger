@@ -32,6 +32,11 @@ export interface RawOrder {
   packages: RawOrderPackage[];
   observed_at: string;
   source_page: number;
+  detail_source?: boolean;
+  detail_logistics?: {
+    area_found: boolean;
+    unparsed_rows: number;
+  };
 }
 
 export interface ExtractResult {
@@ -233,25 +238,30 @@ export function mergeRawOrdersByOrderId(
         if (!duplicate) items.push(item);
       }
     }
-    const packages = [...existing.packages];
-    for (const item of raw.packages) {
-      const trackingKey = normalizeTrackingNo(item.tracking_no ?? "");
-      const index = packages.findIndex(
-        (other) => normalizeTrackingNo(other.tracking_no ?? "") === trackingKey,
-      );
-      if (index >= 0) {
-        if (laterWins && item.courier !== null && item.courier.length > 0) {
-          packages[index] = item;
-        } else if (
-          packages[index]?.courier === null &&
-          item.courier !== null &&
-          item.courier.length > 0
-        ) {
-          packages[index] = { ...packages[index]!, courier: item.courier };
+    let packages: RawOrderPackage[];
+    if (laterWins && raw.detail_source === true) {
+      packages = [...raw.packages];
+    } else {
+      packages = [...existing.packages];
+      for (const item of raw.packages) {
+        const trackingKey = normalizeTrackingNo(item.tracking_no ?? "");
+        const index = packages.findIndex(
+          (other) => normalizeTrackingNo(other.tracking_no ?? "") === trackingKey,
+        );
+        if (index >= 0) {
+          if (laterWins && item.courier !== null && item.courier.length > 0) {
+            packages[index] = item;
+          } else if (
+            packages[index]?.courier === null &&
+            item.courier !== null &&
+            item.courier.length > 0
+          ) {
+            packages[index] = { ...packages[index]!, courier: item.courier };
+          }
+          continue;
         }
-        continue;
+        packages.push(item);
       }
-      packages.push(item);
     }
     const pick = (existingValue: string | null, rawValue: string | null): string | null =>
       laterWins ? (rawValue ?? existingValue) : (existingValue ?? rawValue);

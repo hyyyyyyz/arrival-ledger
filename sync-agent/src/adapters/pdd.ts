@@ -12,6 +12,7 @@ import {
   countVisible,
   countVisibleMarkers,
   extractAllFieldValues,
+  extractAllLabelValues,
   extractFieldValue,
   extractFieldValueStructuralFirst,
   extractLabelValue,
@@ -247,6 +248,29 @@ export const PDD_DETAIL_RULES: DetailLinkRules = {
   allowedHostSuffix: "yangkeduo.com",
 };
 
+async function evaluateDetailLogistics(
+  body: Locator,
+  packages: RawOrderPackage[],
+): Promise<{ area_found: boolean; unparsed_rows: number }> {
+  const containers = await innermostContainers(body, PDD_PACKAGE_CONTAINER_SELECTORS);
+  const labeledTrackings = await extractAllLabelValues(body, TRACKING_LABELS);
+  const area_found = containers.length > 0 || labeledTrackings.length > 0;
+  let unparsed_rows = 0;
+  for (const container of containers) {
+    const text = (await container.innerText().catch(() => "")).trim();
+    if (text.length === 0) continue;
+    const labeled = await extractLabelValue(container, TRACKING_LABELS);
+    if (labeled !== null) {
+      if (trackingFromLabeledText(labeled) === null) unparsed_rows += 1;
+      continue;
+    }
+    const split = splitLogisticsCell(text);
+    if (split.tracking === null) unparsed_rows += 1;
+  }
+  void packages;
+  return { area_found, unparsed_rows };
+}
+
 export const pddAdapter: PlatformAdapter = {
   platform: "pdd",
   orderListUrl: "https://mobile.yangkeduo.com/orders.html",
@@ -426,6 +450,7 @@ export const pddAdapter: PlatformAdapter = {
     }
 
     const { packages } = await extractPackages(body);
+    const logisticsMeta = await evaluateDetailLogistics(body, packages);
     const detail: RawOrder = {
       platform_order_id: platformOrderId,
       ordered_at: await extractLabelValue(body, TIME_LABELS),
@@ -435,6 +460,8 @@ export const pddAdapter: PlatformAdapter = {
       packages,
       observed_at: new Date().toISOString(),
       source_page: 0,
+      detail_source: true,
+      detail_logistics: logisticsMeta,
     };
 
     if (openedNewTab) {

@@ -104,3 +104,65 @@ describe("unknown order status fails closed end to end", () => {
     );
   });
 });
+
+describe("detail logistics completeness is not masked by list logistics", () => {
+  function shippedOneTrackingLauncher(detailFixture: string): BrowserLauncher {
+    return routedLauncher([
+      { glob: "**/buyer-order-list.html", fixture: "1688/order-list-shipped-one-tracking.html" },
+      { glob: "**/detail.html*", fixture: detailFixture },
+    ]);
+  }
+
+  it("a. fails when the list has a tracking but the detail has no logistics", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    await assertFailedClosed(cwd, "1688", shippedOneTrackingLauncher("1688/detail-no-logistics.html"));
+  });
+
+  it("b. succeeds with both detail packages when the detail parses fully", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const { config } = loadConfig({ cwd, env: {} });
+    const outcome = await runSyncOnce({
+      config,
+      platform: "1688",
+      mode: "dry-run",
+      confirm: false,
+      logger: new JsonLogger({ logDir: null }),
+      launcher: shippedOneTrackingLauncher("1688/detail.html"),
+    });
+    expect(outcome.exitCode).toBe(0);
+    const snapshot = JSON.parse(
+      readFileSync(outcome.report.snapshot_path as string, "utf8"),
+    ) as { orders: Array<{ packages: unknown[] }> };
+    expect(snapshot.orders[0]?.packages).toHaveLength(2);
+  });
+
+  it("c. fails when one of two detail logistics rows cannot be parsed", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    await assertFailedClosed(cwd, "1688", shippedOneTrackingLauncher("1688/detail-partial-logistics.html"));
+  });
+
+  it("d. failures write no snapshot and never advance the cursor", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const { config } = loadConfig({ cwd, env: {} });
+    const outcome = await runSyncOnce({
+      config,
+      platform: "1688",
+      mode: "dry-run",
+      confirm: false,
+      logger: new JsonLogger({ logDir: null }),
+      launcher: shippedOneTrackingLauncher("1688/detail-partial-logistics.html"),
+    });
+    expect(outcome.exitCode).toBe(1);
+    const stateDir = join(cwd, "state");
+    expect(readdirSync(stateDir).filter((name) => name.startsWith("snapshot-"))).toHaveLength(0);
+    const cursor = JSON.parse(
+      readFileSync(join(stateDir, "cursor-1688-1688-main.json"), "utf8"),
+    ) as { last_status: string; last_success_at: string | null };
+    expect(cursor.last_status).toBe("SCHEMA_CHANGED");
+    expect(cursor.last_success_at).toBeNull();
+  });
+});

@@ -279,6 +279,30 @@ async function extractDetailPackages(body: Locator): Promise<RawOrderPackage[]> 
   return packages;
 }
 
+async function evaluateDetailLogistics(
+  body: Locator,
+  groupSelectors: readonly string[],
+  packages: RawOrderPackage[],
+): Promise<{ area_found: boolean; unparsed_rows: number }> {
+  const containers = await innermostContainers(body, groupSelectors);
+  const labeledTrackings = await extractAllLabelValues(body, TRACKING_LABELS);
+  const area_found = containers.length > 0 || labeledTrackings.length > 0;
+  let unparsed_rows = 0;
+  for (const container of containers) {
+    const text = (await container.innerText().catch(() => "")).trim();
+    if (text.length === 0) continue;
+    const labeled = await extractLabelValue(container, TRACKING_LABELS);
+    if (labeled !== null) {
+      if (trackingFromLabeledText(labeled) === null) unparsed_rows += 1;
+      continue;
+    }
+    const split = splitLogisticsCell(text);
+    if (split.tracking === null) unparsed_rows += 1;
+  }
+  void packages;
+  return { area_found, unparsed_rows };
+}
+
 export const ali1688Adapter: PlatformAdapter = {
   platform: "1688",
   orderListUrl: "https://air.1688.com/app/ctf-page/trade-order-list/buyer-order-list.html",
@@ -585,15 +609,23 @@ export const ali1688Adapter: PlatformAdapter = {
       return null;
     }
 
+    const detailPackages = await extractDetailPackages(body);
+    const logisticsMeta = await evaluateDetailLogistics(
+      body,
+      ALI1688_DETAIL_PACKAGE_GROUP_SELECTORS,
+      detailPackages,
+    );
     const detail: RawOrder = {
       platform_order_id: platformOrderId,
       ordered_at: await extractLabelValue(body, TIME_LABELS),
       status: await extractLabelValue(body, STATUS_LABELS),
       shop_name: await extractLabelValue(body, SHOP_LABELS),
       items: detailItems,
-      packages: await extractDetailPackages(body),
+      packages: detailPackages,
       observed_at: new Date().toISOString(),
       source_page: 0,
+      detail_source: true,
+      detail_logistics: logisticsMeta,
     };
 
     if (openedNewTab) {

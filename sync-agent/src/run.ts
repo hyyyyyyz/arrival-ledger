@@ -270,6 +270,34 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
           writeReportFile(config, platform, report, [], logger);
           return { exitCode: 1, report };
         }
+        if (card.missing.includes("logistics")) {
+          const logistics = detail.detail_logistics;
+          let logisticsFailure: string | null = null;
+          if (logistics === undefined || !logistics.area_found) {
+            logisticsFailure = "detail page has no visible logistics area";
+          } else if (logistics.unparsed_rows > 0) {
+            logisticsFailure = `${logistics.unparsed_rows} logistics row(s) on the detail page could not be parsed`;
+          } else if (detail.packages.length === 0) {
+            logisticsFailure = "detail page logistics are empty";
+          }
+          if (logisticsFailure !== null) {
+            updateCursor(config.state_dir, platform, accountKey, {
+              last_status: "SCHEMA_CHANGED",
+              last_sync_at: nowIso(),
+              consecutive_failures: (loadCursor(config.state_dir, platform, accountKey)?.consecutive_failures ?? 0) + 1,
+            });
+            logger.error({
+              command: "sync-once",
+              platform,
+              status: "SCHEMA_CHANGED",
+              message: `${logisticsFailure}; order ${detail.platform_order_id}`,
+              error_code: "SCHEMA_CHANGED",
+            });
+            const report = buildReport("sync-once", platform, "dry-run", null, "SCHEMA_CHANGED", "SCHEMA_CHANGED", startedAt, emptyCounts(), warnings);
+            writeReportFile(config, platform, report, [], logger);
+            return { exitCode: 1, report };
+          }
+        }
         pageOrders.push(detail);
       }
       const mergedPage = mergeRawOrdersByOrderId(pageOrders, { laterWins: true });
