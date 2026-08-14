@@ -447,7 +447,7 @@ describe("runSyncOnce detail authority and completeness", () => {
       items: [{ item_key: null, title: "测试商品", sku_text: null, quantity: "2", unit_price: null }],
       packages: [{ courier: "中通快递", tracking_no: "ZTO-20260813-0001", status: null }],
       detail_source: true,
-      detail_logistics: { area_found: true, unparsed_rows: 0 },
+      detail_logistics: { area_found: true, rows_seen: 1, rows_parsed: 1, unparsed_rows: 0 },
     };
     const adapter = fakeAdapter({
       collectVisibleOrders: async () => ({

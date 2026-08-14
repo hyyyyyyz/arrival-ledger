@@ -35,6 +35,8 @@ export interface RawOrder {
   detail_source?: boolean;
   detail_logistics?: {
     area_found: boolean;
+    rows_seen: number;
+    rows_parsed: number;
     unparsed_rows: number;
   };
 }

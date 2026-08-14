@@ -11,14 +11,13 @@ import {
 import {
   countVisible,
   countVisibleMarkers,
-  extractAllFieldValues,
-  extractAllLabelValues,
   extractFieldValue,
   extractFieldValueStructuralFirst,
   extractLabelValue,
   innermostContainers,
   nearestPrecedingByClass,
 } from "../browser/dom.js";
+import { parseDetailLogistics, type LogisticsSelectors } from "../browser/logistics.js";
 import { cleanText } from "../extract/text.js";
 import {
   mergeRawOrdersByOrderId,
@@ -220,11 +219,18 @@ async function extractDetailItems(body: Locator): Promise<RawOrderItem[]> {
     items.push({
       item_key: null,
       title,
-      sku_text: await extractFieldValue(container, SKU_LABELS, ALI1688_DETAIL_SELECTORS.itemSku),
+      sku_text: await extractFieldValueStructuralFirst(container, SKU_LABELS, ALI1688_DETAIL_SELECTORS.itemSku),
       quantity:
-        (await extractFieldValue(container, QUANTITY_LABELS, ALI1688_DETAIL_SELECTORS.itemQuantity)) ??
-        "1",
-      unit_price: await extractFieldValue(container, PRICE_LABELS, ALI1688_DETAIL_SELECTORS.itemPrice),
+        (await extractFieldValueStructuralFirst(
+          container,
+          QUANTITY_LABELS,
+          ALI1688_DETAIL_SELECTORS.itemQuantity,
+        )) ?? "1",
+      unit_price: await extractFieldValueStructuralFirst(
+        container,
+        PRICE_LABELS,
+        ALI1688_DETAIL_SELECTORS.itemPrice,
+      ),
     });
   }
   if (items.length > 0) return items;
@@ -243,65 +249,11 @@ async function extractDetailItems(body: Locator): Promise<RawOrderItem[]> {
   ];
 }
 
-async function extractDetailPackages(body: Locator): Promise<RawOrderPackage[]> {
-  const packages: RawOrderPackage[] = [];
-  const seen = new Set<string>();
-  const add = (courier: string | null, tracking: string): void => {
-    const key = normalizeTrackingNo(tracking);
-    if (key.length === 0 || seen.has(key)) return;
-    seen.add(key);
-    packages.push({ courier, tracking_no: tracking, status: null });
-  };
-  const containers = await innermostContainers(body, ALI1688_DETAIL_PACKAGE_GROUP_SELECTORS);
-  for (const container of containers) {
-    const courier = await extractLabelValue(container, COURIER_LABELS);
-    const labeled = await extractLabelValue(container, TRACKING_LABELS);
-    if (labeled !== null) {
-      const tracking = trackingFromLabeledText(labeled);
-      if (tracking !== null) add(courier, tracking);
-      continue;
-    }
-    const containerText = await container.innerText().catch(() => "");
-    const split = splitLogisticsCell(containerText);
-    if (split.tracking !== null) add(courier ?? split.courier, split.tracking);
-  }
-  if (packages.length === 0) {
-    const candidates: string[] = await extractAllLabelValues(body, TRACKING_LABELS);
-    for (const value of await extractAllFieldValues(body, ALI1688_DETAIL_SELECTORS.trackingNo)) {
-      if (!candidates.includes(value)) candidates.push(value);
-    }
-    const singleCourier = await extractLabelValue(body, COURIER_LABELS);
-    for (const candidate of candidates) {
-      const parsed = trackingFromLabeledText(candidate);
-      if (parsed !== null) add(singleCourier, parsed);
-    }
-  }
-  return packages;
-}
-
-async function evaluateDetailLogistics(
-  body: Locator,
-  groupSelectors: readonly string[],
-  packages: RawOrderPackage[],
-): Promise<{ area_found: boolean; unparsed_rows: number }> {
-  const containers = await innermostContainers(body, groupSelectors);
-  const labeledTrackings = await extractAllLabelValues(body, TRACKING_LABELS);
-  const area_found = containers.length > 0 || labeledTrackings.length > 0;
-  let unparsed_rows = 0;
-  for (const container of containers) {
-    const text = (await container.innerText().catch(() => "")).trim();
-    if (text.length === 0) continue;
-    const labeled = await extractLabelValue(container, TRACKING_LABELS);
-    if (labeled !== null) {
-      if (trackingFromLabeledText(labeled) === null) unparsed_rows += 1;
-      continue;
-    }
-    const split = splitLogisticsCell(text);
-    if (split.tracking === null) unparsed_rows += 1;
-  }
-  void packages;
-  return { area_found, unparsed_rows };
-}
+export const ALI1688_LOGISTICS_SELECTORS: LogisticsSelectors = {
+  containerSelectors: ALI1688_DETAIL_PACKAGE_GROUP_SELECTORS,
+  courierLabels: COURIER_LABELS,
+  trackingLabels: TRACKING_LABELS,
+};
 
 export const ali1688Adapter: PlatformAdapter = {
   platform: "1688",
@@ -609,23 +561,23 @@ export const ali1688Adapter: PlatformAdapter = {
       return null;
     }
 
-    const detailPackages = await extractDetailPackages(body);
-    const logisticsMeta = await evaluateDetailLogistics(
-      body,
-      ALI1688_DETAIL_PACKAGE_GROUP_SELECTORS,
-      detailPackages,
-    );
+    const logistics = await parseDetailLogistics(body, ALI1688_LOGISTICS_SELECTORS);
     const detail: RawOrder = {
       platform_order_id: platformOrderId,
       ordered_at: await extractLabelValue(body, TIME_LABELS),
       status: await extractLabelValue(body, STATUS_LABELS),
       shop_name: await extractLabelValue(body, SHOP_LABELS),
       items: detailItems,
-      packages: detailPackages,
+      packages: logistics.packages,
       observed_at: new Date().toISOString(),
       source_page: 0,
       detail_source: true,
-      detail_logistics: logisticsMeta,
+      detail_logistics: {
+        area_found: logistics.area_found,
+        rows_seen: logistics.rows_seen,
+        rows_parsed: logistics.rows_parsed,
+        unparsed_rows: logistics.unparsed_rows,
+      },
     };
 
     if (openedNewTab) {

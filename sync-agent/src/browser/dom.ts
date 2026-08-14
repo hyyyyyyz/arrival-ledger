@@ -76,21 +76,49 @@ export async function extractAllLabelValues(
   container: Locator,
   labels: readonly string[],
 ): Promise<string[]> {
+  const markers = await extractAllLabelMarkers(container, labels);
   const values: string[] = [];
+  for (const marker of markers) {
+    const ownText = await marker.innerText().catch(() => "");
+    const stripped = stripLabelPrefixAtStart(ownText, labels);
+    const value = stripped.label_at_start ? stripped.value : ownText.trim();
+    if (value.length > 0 && !values.includes(value)) values.push(value);
+  }
+  return values;
+}
+
+export async function extractAllLabelMarkers(
+  container: Locator,
+  labels: readonly string[],
+): Promise<Locator[]> {
+  const markers: Locator[] = [];
   for (const label of labels) {
-    const markers = container.locator(`text=${label}`);
-    const count = await markers.count().catch(() => 0);
+    const found = container.locator(`text=${label}`);
+    const count = await found.count().catch(() => 0);
     for (let index = 0; index < count; index += 1) {
-      const marker = markers.nth(index);
-      if (!(await marker.isVisible({ timeout: 500 }).catch(() => false))) continue;
-      const ownText = await marker.innerText().catch(() => "");
-      const stripped = stripLabelPrefixAtStart(ownText, [label]);
-      if (stripped.label_at_start && stripped.value.length > 0) {
-        if (!values.includes(stripped.value)) values.push(stripped.value);
+      const marker = found.nth(index);
+      if (await marker.isVisible({ timeout: 500 }).catch(() => false)) {
+        markers.push(marker);
       }
     }
   }
-  return values;
+  return markers;
+}
+
+export async function nearestPrecedingLabelValue(
+  marker: Locator,
+  labels: readonly string[],
+): Promise<string | null> {
+  for (const label of labels) {
+    const previous = marker
+      .locator(`xpath=preceding-sibling::*[contains(string(.), '${label}')][1]`)
+      .first();
+    if ((await previous.count()) === 0) continue;
+    const text = await previous.innerText().catch(() => "");
+    const stripped = stripLabelPrefixAtStart(text, [label]);
+    if (stripped.label_at_start && stripped.value.length > 0) return stripped.value;
+  }
+  return null;
 }
 
 export async function extractFieldValueStructuralFirst(

@@ -12,13 +12,13 @@ import {
   countVisible,
   countVisibleMarkers,
   extractAllFieldValues,
-  extractAllLabelValues,
   extractFieldValue,
   extractFieldValueStructuralFirst,
   extractLabelValue,
   innermostContainers,
   nearestPrecedingByClass,
 } from "../browser/dom.js";
+import { parseDetailLogistics, type LogisticsSelectors } from "../browser/logistics.js";
 import {
   mergeRawOrdersByOrderId,
   type RawOrder,
@@ -240,6 +240,12 @@ async function extractPackages(card: Locator): Promise<{
   return { packages, unreadable };
 }
 
+export const PDD_LOGISTICS_SELECTORS: LogisticsSelectors = {
+  containerSelectors: PDD_PACKAGE_CONTAINER_SELECTORS,
+  courierLabels: COURIER_LABELS,
+  trackingLabels: TRACKING_LABELS,
+};
+
 export const PDD_DETAIL_RULES: DetailLinkRules = {
   textPatterns: [/订单详情/, /查看订单详情/, /查看订单/],
   hrefPatterns: [/order[-_]?detail/i],
@@ -247,29 +253,6 @@ export const PDD_DETAIL_RULES: DetailLinkRules = {
   excludeHrefPatterns: [/refund|after[-_ ]?sale|logistic|track|item|product|goods|sku|offer|login/i],
   allowedHostSuffix: "yangkeduo.com",
 };
-
-async function evaluateDetailLogistics(
-  body: Locator,
-  packages: RawOrderPackage[],
-): Promise<{ area_found: boolean; unparsed_rows: number }> {
-  const containers = await innermostContainers(body, PDD_PACKAGE_CONTAINER_SELECTORS);
-  const labeledTrackings = await extractAllLabelValues(body, TRACKING_LABELS);
-  const area_found = containers.length > 0 || labeledTrackings.length > 0;
-  let unparsed_rows = 0;
-  for (const container of containers) {
-    const text = (await container.innerText().catch(() => "")).trim();
-    if (text.length === 0) continue;
-    const labeled = await extractLabelValue(container, TRACKING_LABELS);
-    if (labeled !== null) {
-      if (trackingFromLabeledText(labeled) === null) unparsed_rows += 1;
-      continue;
-    }
-    const split = splitLogisticsCell(text);
-    if (split.tracking === null) unparsed_rows += 1;
-  }
-  void packages;
-  return { area_found, unparsed_rows };
-}
 
 export const pddAdapter: PlatformAdapter = {
   platform: "pdd",
@@ -449,19 +432,23 @@ export const pddAdapter: PlatformAdapter = {
       return null;
     }
 
-    const { packages } = await extractPackages(body);
-    const logisticsMeta = await evaluateDetailLogistics(body, packages);
+    const logistics = await parseDetailLogistics(body, PDD_LOGISTICS_SELECTORS);
     const detail: RawOrder = {
       platform_order_id: platformOrderId,
       ordered_at: await extractLabelValue(body, TIME_LABELS),
       status: await extractLabelValue(body, STATUS_LABELS),
       shop_name: await extractLabelValue(body, SHOP_LABELS),
       items: detailItems,
-      packages,
+      packages: logistics.packages,
       observed_at: new Date().toISOString(),
       source_page: 0,
       detail_source: true,
-      detail_logistics: logisticsMeta,
+      detail_logistics: {
+        area_found: logistics.area_found,
+        rows_seen: logistics.rows_seen,
+        rows_parsed: logistics.rows_parsed,
+        unparsed_rows: logistics.unparsed_rows,
+      },
     };
 
     if (openedNewTab) {

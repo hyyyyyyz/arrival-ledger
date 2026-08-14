@@ -166,3 +166,60 @@ describe("detail logistics completeness is not masked by list logistics", () => 
     expect(cursor.last_success_at).toBeNull();
   });
 });
+
+describe("wrapper-less detail logistics parsing", () => {
+  function pddShippedLauncher(detailFixture: string): BrowserLauncher {
+    return routedLauncher([
+      { glob: "**/orders.html", fixture: "pdd/order-list-shipped-one-tracking.html" },
+      { glob: "**/detail.html*", fixture: detailFixture },
+    ]);
+  }
+
+  function aliShippedLauncher(detailFixture: string): BrowserLauncher {
+    return routedLauncher([
+      { glob: "**/buyer-order-list.html", fixture: "1688/order-list-shipped-one-tracking.html" },
+      { glob: "**/detail.html*", fixture: detailFixture },
+    ]);
+  }
+
+  async function assertTwoPackages(cwd: string, platform: "pdd" | "1688", launcher: BrowserLauncher): Promise<void> {
+    const { config } = loadConfig({ cwd, env: {} });
+    const outcome = await runSyncOnce({
+      config,
+      platform,
+      mode: "dry-run",
+      confirm: false,
+      logger: new JsonLogger({ logDir: null }),
+      launcher,
+    });
+    expect(outcome.exitCode).toBe(0);
+    const snapshot = JSON.parse(
+      readFileSync(outcome.report.snapshot_path as string, "utf8"),
+    ) as { orders: Array<{ packages: unknown[] }> };
+    expect(snapshot.orders[0]?.packages).toHaveLength(2);
+  }
+
+  it("pdd: one valid + one broken wrapper-less logistics row fails closed", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "pdd"), { recursive: true });
+    await assertFailedClosed(cwd, "pdd", pddShippedLauncher("pdd/detail-plain-one-broken.html"));
+  });
+
+  it("pdd: two valid wrapper-less logistics rows succeed with both packages", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "pdd"), { recursive: true });
+    await assertTwoPackages(cwd, "pdd", pddShippedLauncher("pdd/detail-plain-two-valid.html"));
+  });
+
+  it("1688: one valid + one broken wrapper-less logistics row fails closed", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    await assertFailedClosed(cwd, "1688", aliShippedLauncher("1688/detail-plain-one-broken.html"));
+  });
+
+  it("1688: two valid wrapper-less logistics rows succeed with both packages", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    await assertTwoPackages(cwd, "1688", aliShippedLauncher("1688/detail-plain-two-valid.html"));
+  });
+});
