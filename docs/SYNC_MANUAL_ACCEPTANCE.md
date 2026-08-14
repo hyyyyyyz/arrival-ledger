@@ -9,7 +9,7 @@
 ```powershell
 # Windows 上（不要求开发环境，只需要 Node 20 LTS 与 git）
 cd C:\ArrivalLedger
-git clone --branch feat/browser-sync-mvp https://https://github.com/hyyyyyyz/arrival-ledger.git app
+git clone --branch feat/browser-sync-mvp https://github.com/hyyyyyyz/arrival-ledger.git app
 cd app\sync-agent
 npm ci
 npx playwright install chromium
@@ -132,6 +132,6 @@ login-check：OK / NEEDS_LOGIN / CAPTCHA_OR_BLOCKED
 dry-run：读取 N 条、解析 N 条、失败 N 条、用时 M 分钟
 字段完整率：订单号 %、商品 %、数量 %、店铺 %、快递 %、运单号 %
 commit：created / updated / skipped / errors
-重复运行：created 0、skipped N（幂等确认）
+重复运行：同一 batch 重放会返回首次 counts，以数据库行数不增加确认幂等；新 batch 才期待 skipped 增加
 异常：SCHEMA_CHANGED / 验证码 / 登录过期及处理方式
 ```

@@ -23,7 +23,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `MEDIA_DIR` | 凭证照片目录 | `/data/media` |
 | `MAX_UPLOAD_BYTES` | 单张照片最大字节数 | `12582912`（12 MiB） |
 | `SESSION_TTL_SECONDS` | 登录会话有效期 | `2592000`（30 天） |
-| `SYNC_WORKER_TOKENS` | Windows 同步端 worker token，逗号分隔、每个至少 16 字符；只存摘要，从列表移除即撤销。为空时同步接口返回 503 | 无（默认关闭同步） |
+| `SYNC_WORKER_TOKENS` | Windows 同步端 worker token，逗号分隔、每个至少 16 字符；**明文只保存在服务器 `.env` 与 Windows 本机 `.env.local`**，数据库仅存 HMAC 摘要，从列表移除即撤销。为空时同步接口返回 503 | 无（默认关闭同步） |
 | `SYNC_RATE_LIMIT_PER_HOUR` | 每个 token 每小时最多接受的批次数（1–60） | `6` |
 | `SYNC_MAX_BATCH_ORDERS` | 单批次最大订单数（1–100） | `100` |
 | `SYNC_MAX_BATCH_BYTES` | 单批次请求体最大字节数（4096–2097152） | `262144` |

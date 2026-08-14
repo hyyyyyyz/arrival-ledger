@@ -311,7 +311,7 @@ Idempotency-Key: <batch_id>
 ### 7.2 服务器安全要求
 
 - worker token 只允许访问同步批次接口，不能调用管理员登录、照片读取或删除接口；
-- token 数据库存摘要，不保存明文；支持撤销和轮换；
+- token 明文仅存在于服务器 `.env`（`SYNC_WORKER_TOKENS`）与 Windows 本机 `.env.local`；数据库只存 HMAC 摘要，支持撤销和轮换；
 - 限制请求体大小、批次订单数和请求频率；
 - 记录 `worker_id`、平台、批次、时间和结果，不记录 Authorization 原文；
 - 公网使用时必须 HTTPS；局域网 HTTP 只用于首次测试且不得把端口转发公网；

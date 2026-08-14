@@ -73,7 +73,8 @@ db/media/uploads 和私有 `.env`；目标机 `.env` 的 TRUSTED_HOSTS 改为 19
    如果密码含 `$`，在 Compose 的 `.env` 中写成 `$$`。
 
    启用 Windows 订单同步时，用 `openssl rand -hex 24` 生成 worker token 写入
-   `SYNC_WORKER_TOKENS`（逗号分隔、每个至少 16 字符）；服务器只保存摘要，从列表移除即撤销。
+   `SYNC_WORKER_TOKENS`（逗号分隔、每个至少 16 字符）；明文只保存在服务器 `.env` 与 Windows
+   本机 `.env.local`，数据库仅存 HMAC 摘要，从列表移除即撤销。
    未配置时同步接口返回 503。
 
 3. 静态检查并构建：

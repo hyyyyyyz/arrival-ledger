@@ -71,7 +71,7 @@ Node 20 + TypeScript + Playwright（同步端）。
 需要 Docker + Compose，目标机为 Ubuntu（详细部署见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)）：
 
 ```bash
-git clone https://https://github.com/hyyyyyyz/arrival-ledger.git
+git clone https://github.com/hyyyyyyz/arrival-ledger.git
 cd arrival-ledger
 cp .env.example .env          # chmod 600 .env，替换 SESSION_SECRET 和管理员密码
 sudo docker compose config --quiet

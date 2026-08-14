@@ -458,7 +458,7 @@ sync_runs(
 - TypeScript 检查通过；
 - 生产构建通过；
 - 尚未完成真实 iPhone/Android 微信连续 30 件验收；
-- Windows 浏览器同步端（`sync-agent`）与内部批次接收接口代码已完成并全量测试（`feat/browser-sync-mvp`：后端 49 tests、同步端 200 tests、前端 4 tests），待 Windows 真机按 [`docs/SYNC_MANUAL_ACCEPTANCE.md`](docs/SYNC_MANUAL_ACCEPTANCE.md) 手工验收，尚未合并 main；
+- Windows 浏览器同步端（`sync-agent`）与内部批次接收接口代码已完成并全量测试（`feat/browser-sync-mvp`：后端 49 tests、同步端 215 tests、前端 4 tests），待 Windows 真机按 [`docs/SYNC_MANUAL_ACCEPTANCE.md`](docs/SYNC_MANUAL_ACCEPTANCE.md) 手工验收，尚未合并 main；
 - 尚未完成采购订单/CSV 导入模块；
 - 浏览器自动化文档、数据契约和 DeepSeek 交接规范已冻结；
 - D1–D5 自动化代码全部完成（worker 骨架/离线 doctor、服务器批次接收与迁移、1688 与 PDD 可见页面适配器、dry-run 快照与 commit、收货运单匹配闭环），真实平台采集与手工验收待 Windows 真机执行；
@@ -701,6 +701,14 @@ sync_runs(
 7. 最后决定公网访问策略，并在公网前切换认证。
 
 ## 15. 变更记录
+
+### v1.3（2026-08-14）
+
+- 详情物流完整性改为单一解析流程：逐条检查所有可见运单号标签，不再依赖
+  package/logistics/tracking CSS wrapper；任一可见物流行无法解析即 SCHEMA_CHANGED；
+- 列表订单号缺失时 fail closed：详情必须能通过卡片或官方详情 URL 绑定稳定身份；
+- 未知/缺失订单状态不再静默转 UNKNOWN；已发货订单详情物流区为空/不完整即熔断；
+- 文档统一 GitHub 用户名 hyyyyyyz（6 个 y）、token 明文位置、幂等重放验收口径。
 
 ### v1.2（2026-08-14）
 
