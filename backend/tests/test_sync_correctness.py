@@ -294,7 +294,7 @@ def test_two_known_couriers_never_merge(
         assert {row["courier_normalized"] for row in packages} == {"顺丰速运", "中通快递"}
 
 
-def test_single_item_orders_link_packages_to_the_item(
+def test_package_links_stay_order_level_even_for_single_items(
     client: TestClient, sync_headers: dict[str, str]
 ) -> None:
     payload = batch_payload("b-link-item-0001")
@@ -308,7 +308,7 @@ def test_single_item_orders_link_packages_to_the_item(
             """
         ).fetchone()
         assert link is not None
-        assert link["oi"] is not None
+        assert link["oi"] is None
 
 
 def test_multi_item_orders_leave_links_order_level(
@@ -434,7 +434,110 @@ def test_migration_upgrades_old_database_and_keeps_receipts(
         migrations = connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in migrations] == [1, 2]
+        assert [row["version"] for row in migrations] == [1, 2, 3]
+
+
+def test_fp_item_title_sku_change_with_package_is_safe(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    first = batch_payload("b-fp-pkg-0001")
+    first["orders"][0]["items"] = [
+        {"item_key": None, "title": "杯子", "sku_text": "红色", "quantity": 1, "unit_price": None}
+    ]
+    assert post_batch(client, first, sync_headers).status_code == 200
+
+    second = batch_payload("b-fp-pkg-0002")
+    second["orders"][0]["items"] = [
+        {"item_key": None, "title": "杯子", "sku_text": "蓝色", "quantity": 1, "unit_price": None}
+    ]
+    response = post_batch(client, second, sync_headers)
+    assert response.status_code == 200
+    with client.app.state.database.connect() as connection:
+        items = connection.execute("SELECT sku_text FROM order_items").fetchall()
+        assert len(items) == 1
+        assert items[0]["sku_text"] == "蓝色"
+        links = connection.execute("SELECT order_item_id FROM package_order_links").fetchall()
+        assert len(links) == 1
+        assert links[0]["order_item_id"] is None
+
+
+def test_legacy_nonnull_links_are_nullified_and_deduped_on_upgrade(
+    tmp_path, client: TestClient
+) -> None:
+    old_path = tmp_path / "links" / "arrival.db"
+    old_path.parent.mkdir(parents=True)
+    raw = sqlite3.connect(old_path)
+    raw.row_factory = sqlite3.Row
+    _exec_script_in_tx(raw, SCHEMA)
+    raw.execute(
+        """
+        INSERT INTO users(id, username, display_name, role, password_hash, is_active, created_at)
+        VALUES (1, 'admin', '旧管理员', 'ADMIN', 'x', 1, '2026-08-01T00:00:00.000Z')
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO platform_accounts(id, platform, account_key, source, created_at, updated_at)
+        VALUES (1, 'pdd', 'pdd-main', 'WINDOWS_BROWSER', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z')
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO purchase_orders(
+            id, platform_account_id, platform_order_id, ordered_at, order_status,
+            shop_name, source, last_seen_at, created_at, updated_at
+        ) VALUES (1, 1, 'legacy-links-0001', NULL, 'UNKNOWN', NULL,
+                  'WINDOWS_BROWSER', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z')
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO order_items(id, order_id, item_key, title, sku_text, quantity, unit_price)
+        VALUES (1, 1, 'legacy-item-1', '旧商品', '标准', '2', NULL)
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO packages(id, courier, courier_normalized, tracking_no, tracking_no_normalized,
+                             package_status, source, created_at, updated_at)
+        VALUES (1, NULL, '', '8800123456789', '8800123456789', NULL,
+                'WINDOWS_BROWSER', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z')
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO package_order_links(package_id, order_id, order_item_id, created_at)
+        VALUES (1, 1, NULL, '2026-08-01T00:00:00.000Z')
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO package_order_links(package_id, order_id, order_item_id, created_at)
+        VALUES (1, 1, 1, '2026-08-01T00:00:00.000Z')
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    database = Database(old_path)
+    database.initialize(
+        bootstrap_username="admin",
+        bootstrap_password="correct horse battery staple",
+        bootstrap_display_name="管理员",
+        session_secret="test-session-secret-that-is-long-enough",
+        sync_worker_tokens=(),
+        now="2026-08-13T00:00:00.000Z",
+    )
+    with database.connect() as connection:
+        links = connection.execute(
+            "SELECT order_item_id FROM package_order_links"
+        ).fetchall()
+        assert len(links) == 1
+        assert links[0]["order_item_id"] is None
+        migrations = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert [row["version"] for row in migrations] == [1, 2, 3]
 
 
 def test_failed_migration_leaves_no_partial_schema(tmp_path) -> None:

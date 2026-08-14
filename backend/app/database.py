@@ -223,9 +223,35 @@ def _migration_item_identity(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_package_links_order_level(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        DELETE FROM package_order_links
+        WHERE order_item_id IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM package_order_links AS p2
+            WHERE p2.package_id = package_order_links.package_id
+              AND p2.order_id = package_order_links.order_id
+              AND p2.order_item_id IS NULL
+          )
+        """
+    )
+    connection.execute(
+        """
+        UPDATE package_order_links SET order_item_id = NULL
+        WHERE order_item_id IS NOT NULL
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial_schema", apply=_migration_initial_schema),
     Migration(version=2, name="item_identity", apply=_migration_item_identity),
+    Migration(
+        version=3,
+        name="package_links_order_level",
+        apply=_migration_package_links_order_level,
+    ),
 )
 
 

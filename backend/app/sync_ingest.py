@@ -338,7 +338,6 @@ def _upsert_order(
             changed = True
             counted = True
 
-    item_ids: list[int] = []
     fingerprint_keys: list[str] = []
     for item in order.items:
         key = item_identity(item.item_key, item.title, item.sku_text)
@@ -366,10 +365,8 @@ def _upsert_order(
                     item.unit_price,
                 ),
             )
-            item_ids.append(cursor.lastrowid)
             changed = True
         else:
-            item_ids.append(existing_item["id"])
             quantity_text = str(item.quantity)
             if (
                 existing_item["title"] != item.title
@@ -479,13 +476,12 @@ def _upsert_order(
                     parameters,
                 )
                 changed = True
-        link_order_item_id = item_ids[0] if len(item_ids) == 1 else None
         link_cursor = connection.execute(
             """
             INSERT OR IGNORE INTO package_order_links(package_id, order_id, order_item_id, created_at)
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, NULL, ?)
             """,
-            (package_id, order_id, link_order_item_id, now),
+            (package_id, order_id, now),
         )
         if link_cursor.rowcount == 1:
             changed = True
