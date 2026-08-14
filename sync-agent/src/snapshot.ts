@@ -23,6 +23,18 @@ export interface SnapshotVerifyResult {
   reason: string | null;
 }
 
+export const SNAPSHOT_TTL_MINUTES = 30;
+
+export function snapshotAgeMinutes(snapshot: Snapshot, now: Date = new Date()): number {
+  const createdAt = new Date(snapshot.created_at);
+  if (Number.isNaN(createdAt.getTime())) return Number.POSITIVE_INFINITY;
+  return (now.getTime() - createdAt.getTime()) / 60_000;
+}
+
+export function isSnapshotExpired(snapshot: Snapshot, now: Date = new Date()): boolean {
+  return snapshotAgeMinutes(snapshot, now) > SNAPSHOT_TTL_MINUTES;
+}
+
 export function snapshotFileName(
   stateDir: string,
   platform: Platform,

@@ -15,7 +15,8 @@
 - 内部批次传输客户端（`src/transport.ts`：401/403/409/422 不重试；429/5xx 有限退避；`Retry-After ≥ 60s` 直接放弃）；
 - `doctor --offline`、`login-check`、`sync-once --mode dry-run|commit --from-report`（`src/cli.ts`）；
 - 同步编排 `src/run.ts`：dry-run 不上传并落盘私有 snapshot；commit 只上传 snapshot 字节、
-  绝不重新打开网页；`--yes` 缺失或快照被篡改都会拒绝；空列表不覆盖服务器数据；低频限制（默认 15 分钟）；
+  绝不重新打开网页；`--yes` 缺失、快照完整性校验失败、超过 30 分钟 TTL、或快照 cursor_before
+  与当前游标不一致都会拒绝并要求重新 dry-run；空列表不覆盖服务器数据；低频限制（默认 15 分钟）；
 - 1688 买家订单页适配器（表头列映射 + 行内标签两种解析模式）；
 - 拼多多订单页适配器（卡片式结构：标签提取 + 结构化 class 兜底，`加载更多` 分页）；
 - 跨语言契约锁定：TS 序列化 golden fixture 与后端 pytest 直接互验（`tests/fixtures/batch_contract.json`）；
@@ -100,7 +101,7 @@ src/
   models.ts       统一订单与批次类型、校验
   normalize.ts    纯函数规范化
   transport.ts    到货管家内部批次接口客户端（响应校验、有限重试）
-  snapshot.ts     dry-run 私有快照（payload hash，防篡改）
+  snapshot.ts     dry-run 私有快照（payload hash 完整性校验，30 分钟 TTL）
   login_check.ts  手工登录等待与状态复检流程
   run.ts          dry-run / commit 编排、游标推进、低频限制
   log.ts          JSON Lines 日志（自动脱敏）

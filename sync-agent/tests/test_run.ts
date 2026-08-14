@@ -596,6 +596,83 @@ describe("runSyncOnce commit", () => {
     expect(loadCursor(join(cwd, "state"), "1688", "1688-main")).toBeNull();
   });
 
+  it("refuses an expired snapshot", async () => {
+    const cwd = tempCwd();
+    const path = await dryRunSnapshot(cwd, { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" });
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { created_at: string };
+    parsed.created_at = new Date(Date.now() - 31 * 60_000).toISOString();
+    writeFileSync(path, JSON.stringify(parsed, null, 2), "utf8");
+    const outcome = await runSyncOnce(
+      buildOptions(
+        cwd,
+        { mode: "commit", confirm: true, snapshotPath: path },
+        { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" },
+      ),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.error_code).toBe("EXPIRED_SNAPSHOT");
+  });
+
+  it("refuses a snapshot whose cursor_before no longer matches the current cursor", async () => {
+    const cwd = tempCwd();
+    const path = await dryRunSnapshot(cwd, { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" });
+    mkdirSync(join(cwd, "state"), { recursive: true });
+    writeFileSync(
+      join(cwd, "state", "cursor-1688-1688-main.json"),
+      JSON.stringify({
+        platform: "1688",
+        account_key: "1688-main",
+        last_success_at: null,
+        last_sync_at: null,
+        last_cursor: "2026-08-13T00:00:00.000Z",
+        last_batch_id: null,
+        last_status: "OK",
+        consecutive_failures: 0,
+        updated_at: new Date().toISOString(),
+      }),
+      "utf8",
+    );
+    const outcome = await runSyncOnce(
+      buildOptions(
+        cwd,
+        { mode: "commit", confirm: true, snapshotPath: path },
+        { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" },
+      ),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.error_code).toBe("CURSOR_MISMATCH");
+  });
+
+  it("accepts a snapshot whose cursor_before matches the current cursor", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "state"), { recursive: true });
+    writeFileSync(
+      join(cwd, "state", "cursor-1688-1688-main.json"),
+      JSON.stringify({
+        platform: "1688",
+        account_key: "1688-main",
+        last_success_at: null,
+        last_sync_at: null,
+        last_cursor: null,
+        last_batch_id: null,
+        last_status: "OK",
+        consecutive_failures: 0,
+        updated_at: new Date().toISOString(),
+      }),
+      "utf8",
+    );
+    const path = await dryRunSnapshot(cwd, { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" });
+    const outcome = await runSyncOnce(
+      buildOptions(
+        cwd,
+        { mode: "commit", confirm: false, snapshotPath: path },
+        { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" },
+      ),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.error_code).toBe("CONFIRM_REQUIRED");
+  });
+
   it("holds the platform+account lock while running", async () => {
     const cwd = tempCwd();
     mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });

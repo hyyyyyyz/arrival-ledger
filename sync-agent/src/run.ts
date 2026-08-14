@@ -27,7 +27,9 @@ import {
 } from "./models.js";
 import {
   buildSnapshot,
+  isSnapshotExpired,
   readSnapshot,
+  SNAPSHOT_TTL_MINUTES,
   snapshotToBatch,
   verifySnapshot,
   writeSnapshot,
@@ -491,6 +493,19 @@ async function runCommit(options: RunOptions): Promise<RunOutcome> {
       report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "EMPTY_SNAPSHOT", startedAt, emptyCounts(), [], options.snapshotPath),
     };
   }
+  if (isSnapshotExpired(snapshot)) {
+    logger.error({
+      command: "sync-once",
+      platform,
+      batch_id: snapshot.batch_id,
+      message: `snapshot is older than ${SNAPSHOT_TTL_MINUTES} minutes; re-run dry-run`,
+      error_code: "EXPIRED_SNAPSHOT",
+    });
+    return {
+      exitCode: 1,
+      report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "EXPIRED_SNAPSHOT", startedAt, emptyCounts(), [], options.snapshotPath),
+    };
+  }
   const batch = snapshotToBatch(snapshot);
   if (batch === null) {
     logger.error({ command: "sync-once", platform, message: "snapshot payload is invalid", error_code: "SNAPSHOT_INVALID" });
@@ -551,6 +566,22 @@ async function runCommit(options: RunOptions): Promise<RunOutcome> {
           report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "OK", "RATE_LIMITED", startedAt, counts, [], options.snapshotPath),
         };
       }
+    }
+    const currentCursor = cursor?.last_cursor ?? null;
+    const snapshotCursor = batch.cursor_before ?? null;
+    if (currentCursor !== snapshotCursor) {
+      logger.error({
+        command: "sync-once",
+        platform,
+        batch_id: snapshot.batch_id,
+        message: `snapshot cursor_before (${snapshotCursor ?? "null"}) does not match the current cursor (${currentCursor ?? "null"}); re-run dry-run`,
+        error_code: "CURSOR_MISMATCH",
+      });
+      const counts = { ...emptyCounts(), seen: batch.orders.length, valid: batch.orders.length };
+      return {
+        exitCode: 1,
+        report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "CURSOR_MISMATCH", startedAt, counts, [], options.snapshotPath),
+      };
     }
 
     const counts = {

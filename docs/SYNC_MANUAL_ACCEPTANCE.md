@@ -82,7 +82,10 @@ npm run sync-once -- --platform 1688 --mode commit --from-report .\state\snapsho
 
 - commit **不会重新打开网页抓取**：它只上传 dry-run 快照的原始字节；
   `<batch_id>` 与 dry-run 输出的 snapshot 文件名一致；
-- 快照被修改（内容或 hash 不一致）会被拒绝（`SNAPSHOT_INVALID`），必须重新 dry-run；
+- 快照的 payload hash 用于**完整性校验**（不是防篡改承诺）：内容或 hash 不一致会被拒绝
+  （`SNAPSHOT_INVALID`）；
+- 快照有效期为 **30 分钟**（`EXPIRED_SNAPSHOT`），且快照记录时的游标必须与当前账户游标
+  完全一致（`CURSOR_MISMATCH`），否则都必须重新 dry-run；
 - 必须在核对 dry-run 报告后执行；`--yes` 缺失会直接拒绝；
 - 同一平台 15 分钟内重复 commit 会被本地低频限制拦截（`SYNC_MIN_INTERVAL_MINUTES`）；
 - 重复提交同一批次内容不产生重复订单（服务器幂等 + 409 冲突保护）。
