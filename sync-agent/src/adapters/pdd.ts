@@ -98,11 +98,14 @@ async function findCardLocators(page: Page): Promise<Locator[]> {
   for (const selector of PDD_SELECTORS.orderCards) {
     const cards = page.locator(selector);
     const count = await cards.count().catch(() => 0);
-    if (count > 0) {
-      const list: Locator[] = [];
-      for (let index = 0; index < count; index += 1) list.push(cards.nth(index));
-      return list;
+    const visible: Locator[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const card = cards.nth(index);
+      if (await card.isVisible({ timeout: 500 }).catch(() => false)) {
+        visible.push(card);
+      }
     }
+    if (visible.length > 0) return visible;
   }
   return [];
 }

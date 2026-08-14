@@ -32,6 +32,7 @@ export async function extractLabelValue(
   for (const label of labels) {
     const marker = container.locator(`text=${label}`).first();
     if ((await marker.count()) === 0) continue;
+    if (!(await marker.isVisible({ timeout: 500 }).catch(() => false))) continue;
     const ownText = await marker.innerText().catch(() => "");
     const stripped = stripLabelPrefixAtStart(ownText, [label]);
     if (stripped.label_at_start) {
@@ -57,11 +58,16 @@ export async function extractFieldValue(
   const labeled = await extractLabelValue(container, labels);
   if (labeled !== null) return labeled;
   for (const selector of fallbackSelectors) {
-    const element = container.locator(selector).first();
-    if ((await element.count()) === 0) continue;
-    const text = await element.innerText().catch(() => "");
-    const trimmed = text.trim();
-    if (trimmed.length > 0) return trimmed;
+    const elements = container.locator(selector);
+    const count = await elements.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      if (!(await elements.nth(index).isVisible({ timeout: 500 }).catch(() => false))) {
+        continue;
+      }
+      const text = await elements.nth(index).innerText().catch(() => "");
+      const trimmed = text.trim();
+      if (trimmed.length > 0) return trimmed;
+    }
   }
   return null;
 }

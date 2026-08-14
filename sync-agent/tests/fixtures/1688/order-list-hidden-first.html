@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>1688 隐藏模板在前（脱敏测试 fixture）</title></head>
+<body>
+  <main class="buyer-order-list">
+    <table class="trade-order-list">
+      <thead>
+        <tr><th>订单号</th><th>商品名称</th><th>数量</th><th>供应商</th><th>下单时间</th><th>订单状态</th><th>物流</th></tr>
+      </thead>
+      <tbody>
+        <tr style="display:none">
+          <td><span class="order-id">1688-9999999999999</span></td>
+          <td><span class="item-title">隐藏订单商品</span></td>
+          <td><span class="item-quantity">1</span></td>
+          <td><span class="shop-name">隐藏店铺</span></td>
+          <td><span class="order-time">2026-08-01 00:00:00</span></td>
+          <td><span class="order-status">待付款</span></td>
+          <td><span class="logistics">隐藏快递 8888999999999</span></td>
+        </tr>
+        <tr style="display:none">
+          <td><span class="order-id">1688-9999999999998</span></td>
+          <td><span class="item-title">隐藏订单商品乙</span></td>
+          <td><span class="item-quantity">1</span></td>
+          <td><span class="shop-name">隐藏店铺</span></td>
+          <td><span class="order-time">2026-08-01 00:00:00</span></td>
+          <td><span class="order-status">待付款</span></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td><span class="order-id">1688-260813-0001</span></td>
+          <td><span class="item-title">可见商品甲</span></td>
+          <td><span class="item-quantity">2</span></td>
+          <td><span class="shop-name">可见供应商</span></td>
+          <td><span class="order-time">2026-08-12 10:30:00</span></td>
+          <td><span class="order-status">已发货</span></td>
+          <td><span class="logistics">中通快递 8800123456789</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>

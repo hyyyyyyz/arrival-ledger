@@ -128,6 +128,9 @@ async function cellText(row: Locator, index: number): Promise<string | null> {
   const cells = row.locator("td");
   const count = await cells.count();
   if (index >= count) return null;
+  if (!(await cells.nth(index).isVisible({ timeout: 500 }).catch(() => false))) {
+    return null;
+  }
   const text = await cells.nth(index).innerText().catch(() => "");
   return text.trim();
 }
@@ -136,11 +139,14 @@ async function findRowLocators(page: Page): Promise<Locator[]> {
   for (const selector of ALI1688_SELECTORS.orderRows) {
     const rows = page.locator(selector);
     const count = await rows.count().catch(() => 0);
-    if (count > 0) {
-      const list: Locator[] = [];
-      for (let index = 0; index < count; index += 1) list.push(rows.nth(index));
-      return list;
+    const visible: Locator[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const row = rows.nth(index);
+      if (await row.isVisible({ timeout: 500 }).catch(() => false)) {
+        visible.push(row);
+      }
     }
+    if (visible.length > 0) return visible;
   }
   return [];
 }

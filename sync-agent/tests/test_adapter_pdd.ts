@@ -103,6 +103,20 @@ describe("pdd adapter with sanitized fixtures", () => {
     expect(result.order?.packages).toHaveLength(2);
   });
 
+  it("ignores hidden order cards placed before real cards", async () => {
+    await openFixture("order-list-hidden-first.html");
+    const state = await checkPageState(page, pddAdapter);
+    expect(state.status).toBe("OK");
+    const list = await pddAdapter.collectVisibleOrders(page);
+    expect(list.rows_seen).toBe(1);
+    expect(list.orders).toHaveLength(1);
+    expect(list.orders[0]?.platform_order_id).toBe("260813-8800000001");
+    for (const order of list.orders) {
+      expect(order.platform_order_id).not.toContain("9999999999");
+      expect(order.items[0]?.title).not.toContain("隐藏");
+    }
+  });
+
   it("reports an empty list without treating it as schema change", async () => {
     await openFixture("empty-list.html");
     const list = await pddAdapter.collectVisibleOrders(page);

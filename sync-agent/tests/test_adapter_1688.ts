@@ -118,6 +118,20 @@ describe("ali1688 adapter with sanitized fixtures", () => {
     expect(list.recognized).toBe(0);
   });
 
+  it("ignores hidden order rows placed before real rows", async () => {
+    await openFixture("order-list-hidden-first.html");
+    const state = await checkPageState(page, ali1688Adapter);
+    expect(state.status).toBe("OK");
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    expect(list.rows_seen).toBe(1);
+    expect(list.orders).toHaveLength(1);
+    expect(list.orders[0]?.platform_order_id).toBe("1688-260813-0001");
+    for (const order of list.orders) {
+      expect(order.platform_order_id).not.toContain("9999999999");
+      expect(order.items[0]?.title).not.toContain("隐藏");
+    }
+  });
+
   it("merges multiple rows of the same order into one raw order", async () => {
     await openFixture("order-list-multirow.html");
     const list = await ali1688Adapter.collectVisibleOrders(page);
