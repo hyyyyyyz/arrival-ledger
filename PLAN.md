@@ -453,12 +453,12 @@ sync_runs(
 
 ### 8.3 最近本地验证
 
-- 后端：5 passed；
-- 前端：3 passed；
+- 后端：49 passed（含同步批次/迁移/匹配闭环）；
+- 前端：4 passed；
 - TypeScript 检查通过；
 - 生产构建通过；
 - 尚未完成真实 iPhone/Android 微信连续 30 件验收；
-- Windows 浏览器同步端（`sync-agent`）与内部批次接收接口代码已完成并全量测试（`feat/browser-sync-mvp`：后端 47 tests、同步端 183 tests、前端 4 tests），待 Windows 真机按 [`docs/SYNC_MANUAL_ACCEPTANCE.md`](docs/SYNC_MANUAL_ACCEPTANCE.md) 手工验收，尚未合并 main；
+- Windows 浏览器同步端（`sync-agent`）与内部批次接收接口代码已完成并全量测试（`feat/browser-sync-mvp`：后端 49 tests、同步端 200 tests、前端 4 tests），待 Windows 真机按 [`docs/SYNC_MANUAL_ACCEPTANCE.md`](docs/SYNC_MANUAL_ACCEPTANCE.md) 手工验收，尚未合并 main；
 - 尚未完成采购订单/CSV 导入模块；
 - 浏览器自动化文档、数据契约和 DeepSeek 交接规范已冻结；
 - D1–D5 自动化代码全部完成（worker 骨架/离线 doctor、服务器批次接收与迁移、1688 与 PDD 可见页面适配器、dry-run 快照与 commit、收货运单匹配闭环），真实平台采集与手工验收待 Windows 真机执行；

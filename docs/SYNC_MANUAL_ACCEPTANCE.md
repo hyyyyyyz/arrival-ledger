@@ -32,7 +32,8 @@ PDD_ACCOUNT_KEY=pdd-main
 ALI1688_ACCOUNT_KEY=1688-main
 ```
 
-> 服务器端安全约束：token 只存摘要；从 `SYNC_WORKER_TOKENS` 移除即撤销（重启后生效）；
+> 服务器端安全约束：worker token **明文只保存在服务器 `.env` 与 Windows 本机 `.env.local`**，
+> 数据库只保存摘要，任何日志/接口都不得出现明文；从 `SYNC_WORKER_TOKENS` 移除即撤销（重启后生效）；
 > 每个 token 每小时最多接受 6 个批次；单批 ≤100 订单、≤256 KiB。公网隧道使用时必须把
 > `ARRIVAL_API_BASE_URL` 换成 `https://*.trycloudflare.com`。
 
@@ -97,7 +98,7 @@ npm run sync-once -- --platform 1688 --mode commit --from-report .\state\snapsho
 | 独立 profile 手工登录 | 两平台均可通过 login-check | 平台/账号脱敏标识 |
 | 各 20–30 条真实订单 | dry-run 报告数量一致 | 订单数/页数 |
 | 字段完整率 | 订单号/商品/规格/数量/店铺/快递/运单 ≥95% | 逐字段统计 |
-| 重复同步 | 第二次 commit `skipped` 增加、`created` 为 0 | 服务端行数不变 |
+| 重复同步 | 服务端数据库行数不变（同一批次由服务器幂等重放，会返回原始 counts，不必等于 created=0；新批次则 skipped 增加） | 同步前后 DB 行数对比 |
 | 服务器无敏感数据 | DB 无 Cookie/密码/地址/电话 | 抽查 sync_batches/purchase_orders |
 | 登录过期/验证码 | 明确状态，不静默写错 | 记录状态与处理方式 |
 | dry-run 与 commit 集合一致 | commit 复用同一份记录集 | 报告对比 |
