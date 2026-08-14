@@ -117,6 +117,21 @@ describe("pdd adapter with sanitized fixtures", () => {
     }
   });
 
+  it("keeps same-title items with different or missing SKUs per row", async () => {
+    await openFixture("order-list-same-title-diff-sku.html");
+    const list = await pddAdapter.collectVisibleOrders(page);
+    expect(list.orders).toHaveLength(1);
+    const items = list.orders[0]?.items ?? [];
+    expect(items).toHaveLength(3);
+    expect(items.map((item) => item.title)).toEqual([
+      "同名测试商品",
+      "同名测试商品",
+      "同名测试商品",
+    ]);
+    expect(items.map((item) => item.sku_text)).toEqual(["颜色:灰", null, "颜色:红"]);
+    expect(items.map((item) => item.quantity)).toEqual(["x2", "x1", "x3"]);
+  });
+
   it("reports an empty list without treating it as schema change", async () => {
     await openFixture("empty-list.html");
     const list = await pddAdapter.collectVisibleOrders(page);

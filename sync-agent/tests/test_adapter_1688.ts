@@ -142,6 +142,17 @@ describe("ali1688 adapter with sanitized fixtures", () => {
     expect(shipped?.order_id).toBe("1688-260813-0001");
   });
 
+  it("parses multiple items per row without cross-item shifting", async () => {
+    await openFixture("order-list-single-row-multi-item.html");
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    expect(list.orders).toHaveLength(1);
+    const items = list.orders[0]?.items ?? [];
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => item.title)).toEqual(["同名测试商品", "同名测试商品"]);
+    expect(items.map((item) => item.sku_text)).toEqual(["M8", null]);
+    expect(items.map((item) => item.quantity)).toEqual(["2", "4"]);
+  });
+
   it("merges multiple rows of the same order into one raw order", async () => {
     await openFixture("order-list-multirow.html");
     const list = await ali1688Adapter.collectVisibleOrders(page);

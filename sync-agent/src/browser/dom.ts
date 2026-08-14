@@ -93,6 +93,58 @@ export async function extractAllLabelValues(
   return values;
 }
 
+export async function extractFieldValueStructuralFirst(
+  container: Locator,
+  labels: readonly string[],
+  fallbackSelectors: readonly string[],
+): Promise<string | null> {
+  for (const selector of fallbackSelectors) {
+    const elements = container.locator(selector);
+    const count = await elements.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      if (!(await elements.nth(index).isVisible({ timeout: 500 }).catch(() => false))) {
+        continue;
+      }
+      const text = await elements.nth(index).innerText().catch(() => "");
+      const trimmed = text.trim();
+      if (trimmed.length > 0) return trimmed;
+    }
+  }
+  return extractLabelValue(container, labels);
+}
+
+export async function nearestPrecedingByClass(
+  container: Locator,
+  classKeywords: readonly string[],
+): Promise<Locator | null> {
+  const conditions = classKeywords
+    .map((keyword) => `contains(@class, '${keyword}')`)
+    .join(" or ");
+  const candidate = container
+    .locator(`xpath=preceding-sibling::*[${conditions}][1]`)
+    .first();
+  if ((await candidate.count()) === 0) return null;
+  if (!(await candidate.isVisible({ timeout: 500 }).catch(() => false))) return null;
+  return candidate;
+}
+
+export async function innermostContainers(
+  container: Locator,
+  selectors: readonly string[],
+): Promise<Locator[]> {
+  const all = container.locator([...selectors].join(", "));
+  const count = await all.count().catch(() => 0);
+  const containers: Locator[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const candidate = all.nth(index);
+    if (!(await candidate.isVisible({ timeout: 500 }).catch(() => false))) continue;
+    const nested = await candidate.locator([...selectors].join(", ")).count().catch(() => 0);
+    if (nested > 0) continue;
+    containers.push(candidate);
+  }
+  return containers;
+}
+
 export async function extractAllFieldValues(
   container: Locator,
   fallbackSelectors: readonly string[],
@@ -107,7 +159,7 @@ export async function extractAllFieldValues(
       }
       const text = await elements.nth(index).innerText().catch(() => "");
       const trimmed = text.trim();
-      if (trimmed.length > 0 && !values.includes(trimmed)) values.push(trimmed);
+      if (trimmed.length > 0) values.push(trimmed);
     }
   }
   return values;

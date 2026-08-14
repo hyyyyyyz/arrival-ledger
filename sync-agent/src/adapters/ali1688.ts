@@ -13,7 +13,11 @@ import {
   countVisibleMarkers,
   extractAllFieldValues,
   extractAllLabelValues,
+  extractFieldValue,
+  extractFieldValueStructuralFirst,
   extractLabelValue,
+  innermostContainers,
+  nearestPrecedingByClass,
 } from "../browser/dom.js";
 import { cleanText } from "../extract/text.js";
 import {
@@ -184,52 +188,93 @@ export const ALI1688_DETAIL_SELECTORS = {
   trackingNo: ["[class*='tracking-no']", "[class*='tracking-number']"],
 } as const;
 
+export const ALI1688_ITEM_CONTAINER_SELECTORS = [
+  "[class*='item-line']",
+  "[class*='goods-item']",
+  "[class*='item-row']",
+] as const;
+
+export const ALI1688_DETAIL_ITEM_GROUP_SELECTORS = [
+  "[class*='item-group']",
+  "[class*='goods-item']",
+  "[class*='item-line']",
+] as const;
+
+export const ALI1688_PACKAGE_CONTAINER_SELECTORS = [
+  "[class*='logistics']",
+  "[class*='tracking']",
+  "[class*='package']",
+] as const;
+
+export const ALI1688_DETAIL_PACKAGE_GROUP_SELECTORS = [
+  "[class*='package-group']",
+  "[class*='logistics-group']",
+] as const;
+
 async function extractDetailItems(body: Locator): Promise<RawOrderItem[]> {
-  const titles = await extractAllFieldValues(body, ALI1688_DETAIL_SELECTORS.itemTitle);
-  if (titles.length === 0) {
-    const single = await extractLabelValue(body, TITLE_LABELS);
-    if (single === null) {
-      return [{ item_key: null, title: null, sku_text: null, quantity: null, unit_price: null }];
-    }
-    return [
-      {
-        item_key: null,
-        title: single,
-        sku_text: await extractLabelValue(body, SKU_LABELS),
-        quantity: (await extractLabelValue(body, QUANTITY_LABELS)) ?? "1",
-        unit_price: await extractLabelValue(body, PRICE_LABELS),
-      },
-    ];
+  const containers = await innermostContainers(body, ALI1688_DETAIL_ITEM_GROUP_SELECTORS);
+  const items: RawOrderItem[] = [];
+  for (const container of containers) {
+    const title = await extractFieldValue(container, TITLE_LABELS, ALI1688_DETAIL_SELECTORS.itemTitle);
+    if (title === null) continue;
+    items.push({
+      item_key: null,
+      title,
+      sku_text: await extractFieldValue(container, SKU_LABELS, ALI1688_DETAIL_SELECTORS.itemSku),
+      quantity:
+        (await extractFieldValue(container, QUANTITY_LABELS, ALI1688_DETAIL_SELECTORS.itemQuantity)) ??
+        "1",
+      unit_price: await extractFieldValue(container, PRICE_LABELS, ALI1688_DETAIL_SELECTORS.itemPrice),
+    });
   }
-  const skus = await extractAllFieldValues(body, ALI1688_DETAIL_SELECTORS.itemSku);
-  const quantities = await extractAllFieldValues(body, ALI1688_DETAIL_SELECTORS.itemQuantity);
-  const prices = await extractAllFieldValues(body, ALI1688_DETAIL_SELECTORS.itemPrice);
-  return titles.map((title, index) => ({
-    item_key: null,
-    title,
-    sku_text: skus[index] ?? null,
-    quantity: quantities[index] ?? "1",
-    unit_price: prices[index] ?? null,
-  }));
+  if (items.length > 0) return items;
+  const single = await extractLabelValue(body, TITLE_LABELS);
+  if (single === null) {
+    return [{ item_key: null, title: null, sku_text: null, quantity: null, unit_price: null }];
+  }
+  return [
+    {
+      item_key: null,
+      title: single,
+      sku_text: await extractLabelValue(body, SKU_LABELS),
+      quantity: (await extractLabelValue(body, QUANTITY_LABELS)) ?? "1",
+      unit_price: await extractLabelValue(body, PRICE_LABELS),
+    },
+  ];
 }
 
 async function extractDetailPackages(body: Locator): Promise<RawOrderPackage[]> {
-  const candidates: string[] = await extractAllLabelValues(body, TRACKING_LABELS);
-  for (const value of await extractAllFieldValues(body, ALI1688_DETAIL_SELECTORS.trackingNo)) {
-    if (!candidates.includes(value)) candidates.push(value);
-  }
-  const couriers = await extractAllLabelValues(body, COURIER_LABELS);
   const packages: RawOrderPackage[] = [];
   const seen = new Set<string>();
-  for (let index = 0; index < candidates.length; index += 1) {
-    const parsed = trackingFromLabeledText(candidates[index] ?? "");
-    if (parsed === null) continue;
-    const key = normalizeTrackingNo(parsed);
-    if (seen.has(key)) continue;
+  const add = (courier: string | null, tracking: string): void => {
+    const key = normalizeTrackingNo(tracking);
+    if (key.length === 0 || seen.has(key)) return;
     seen.add(key);
-    const courier =
-      couriers.length === candidates.length ? (couriers[index] ?? null) : null;
-    packages.push({ courier, tracking_no: parsed, status: null });
+    packages.push({ courier, tracking_no: tracking, status: null });
+  };
+  const containers = await innermostContainers(body, ALI1688_DETAIL_PACKAGE_GROUP_SELECTORS);
+  for (const container of containers) {
+    const courier = await extractLabelValue(container, COURIER_LABELS);
+    const labeled = await extractLabelValue(container, TRACKING_LABELS);
+    if (labeled !== null) {
+      const tracking = trackingFromLabeledText(labeled);
+      if (tracking !== null) add(courier, tracking);
+      continue;
+    }
+    const containerText = await container.innerText().catch(() => "");
+    const split = splitLogisticsCell(containerText);
+    if (split.tracking !== null) add(courier ?? split.courier, split.tracking);
+  }
+  if (packages.length === 0) {
+    const candidates: string[] = await extractAllLabelValues(body, TRACKING_LABELS);
+    for (const value of await extractAllFieldValues(body, ALI1688_DETAIL_SELECTORS.trackingNo)) {
+      if (!candidates.includes(value)) candidates.push(value);
+    }
+    const singleCourier = await extractLabelValue(body, COURIER_LABELS);
+    for (const candidate of candidates) {
+      const parsed = trackingFromLabeledText(candidate);
+      if (parsed !== null) add(singleCourier, parsed);
+    }
   }
   return packages;
 }
@@ -319,45 +364,128 @@ export const ali1688Adapter: PlatformAdapter = {
           ? extractLabelValue(row, labels)
           : cell(name);
 
-      let courier: string | null = await field("courier", COURIER_LABELS);
-      const trackingRaw: string | null = await field("tracking", TRACKING_LABELS);
-      let tracking = trackingRaw === null ? null : trackingFromLabeledText(trackingRaw);
+      const trackingColumnRaw: string | null = await field("tracking", TRACKING_LABELS);
       let logisticsUnreadable =
-        trackingRaw !== null && trackingRaw.trim().length > 0 && tracking === null;
-      if ((courier === null || tracking === null) && columns !== null && columns["logistics"] !== undefined) {
-        const logisticsText = await cellText(row, columns["logistics"]);
-        if (logisticsText !== null && logisticsText.length > 0) {
-          const split = splitLogisticsCell(logisticsText);
-          courier = courier ?? split.courier;
-          tracking = tracking ?? split.tracking;
-          if (
-            split.tracking === null &&
-            /运单号|物流单号|快递单号/.test(logisticsText) &&
-            !/无|暂无|-{1,2}\s*$/.test(logisticsText)
-          ) {
+        trackingColumnRaw !== null &&
+        trackingColumnRaw.trim().length > 0 &&
+        trackingFromLabeledText(trackingColumnRaw) === null;
+
+      const packages: RawOrderPackage[] = [];
+      const packageSeen = new Set<string>();
+      const packageContainers = await innermostContainers(row, ALI1688_PACKAGE_CONTAINER_SELECTORS);
+      for (const container of packageContainers) {
+        let containerCourier = await extractLabelValue(container, COURIER_LABELS);
+        const labeled = await extractLabelValue(container, TRACKING_LABELS);
+        if (labeled !== null) {
+          const parsed = trackingFromLabeledText(labeled);
+          if (parsed !== null) {
+            const key = normalizeTrackingNo(parsed);
+            if (!packageSeen.has(key)) {
+              if (containerCourier === null) {
+                const preceding = await nearestPrecedingByClass(container, ["courier", "logistics", "express"]);
+                if (preceding !== null) {
+                  containerCourier = (await preceding.innerText().catch(() => "")).trim() || null;
+                }
+              }
+              packageSeen.add(key);
+              packages.push({ courier: containerCourier, tracking_no: parsed, status: null });
+            }
+          } else {
             logisticsUnreadable = true;
+          }
+          continue;
+        }
+        const containerText = await container.innerText().catch(() => "");
+        const split = splitLogisticsCell(containerText);
+        if (split.tracking !== null) {
+          const key = normalizeTrackingNo(split.tracking);
+          if (!packageSeen.has(key)) {
+            if (containerCourier === null && split.courier === null) {
+              const preceding = await nearestPrecedingByClass(container, ["courier", "logistics", "express"]);
+              if (preceding !== null) {
+                containerCourier = (await preceding.innerText().catch(() => "")).trim() || null;
+              }
+            }
+            packageSeen.add(key);
+            packages.push({ courier: containerCourier ?? split.courier, tracking_no: split.tracking, status: null });
           }
         }
       }
+      if (packages.length === 0) {
+        const columnCourier: string | null = await field("courier", COURIER_LABELS);
+        const trackingRaw: string | null = await field("tracking", TRACKING_LABELS);
+        let tracking = trackingRaw === null ? null : trackingFromLabeledText(trackingRaw);
+        logisticsUnreadable =
+          logisticsUnreadable ||
+          (trackingRaw !== null && trackingRaw.trim().length > 0 && tracking === null);
+        if ((columnCourier === null || tracking === null) && columns !== null && columns["logistics"] !== undefined) {
+          const logisticsText = await cellText(row, columns["logistics"]);
+          if (logisticsText !== null && logisticsText.length > 0) {
+            const split = splitLogisticsCell(logisticsText);
+            const mergedCourier = columnCourier ?? split.courier;
+            tracking = tracking ?? split.tracking;
+            if (
+              split.tracking !== null &&
+              tracking !== null &&
+              !packageSeen.has(normalizeTrackingNo(tracking))
+            ) {
+              packageSeen.add(normalizeTrackingNo(tracking));
+              packages.push({ courier: mergedCourier, tracking_no: tracking, status: null });
+            }
+            if (
+              split.tracking === null &&
+              /运单号|物流单号|快递单号/.test(logisticsText) &&
+              !/无|暂无|-{1,2}\s*$/.test(logisticsText)
+            ) {
+              logisticsUnreadable = true;
+            }
+          }
+        } else if (tracking !== null && !packageSeen.has(normalizeTrackingNo(tracking))) {
+          packageSeen.add(normalizeTrackingNo(tracking));
+          packages.push({ courier: columnCourier, tracking_no: tracking, status: null });
+        }
+      }
 
-      const title = await field("title", TITLE_LABELS);
-      const items: RawOrderItem[] = [
-        {
+      const itemContainers = await innermostContainers(row, ALI1688_ITEM_CONTAINER_SELECTORS);
+      let items: RawOrderItem[] = [];
+      for (const container of itemContainers) {
+        const title = await extractFieldValue(container, TITLE_LABELS, ALI1688_DETAIL_SELECTORS.itemTitle);
+        if (title === null) continue;
+        items.push({
           item_key: null,
           title,
-          sku_text: await field("sku", SKU_LABELS),
-          quantity: (await field("quantity", QUANTITY_LABELS)) ?? "1",
-          unit_price: await field("price", PRICE_LABELS),
-        },
-      ];
-      const packages: RawOrderPackage[] =
-        tracking === null ? [] : [{ courier, tracking_no: tracking, status: null }];
+          sku_text: await extractFieldValueStructuralFirst(container, SKU_LABELS, ALI1688_DETAIL_SELECTORS.itemSku),
+          quantity:
+            (await extractFieldValueStructuralFirst(
+              container,
+              QUANTITY_LABELS,
+              ALI1688_DETAIL_SELECTORS.itemQuantity,
+            )) ?? "1",
+          unit_price: await extractFieldValueStructuralFirst(
+            container,
+            PRICE_LABELS,
+            ALI1688_DETAIL_SELECTORS.itemPrice,
+          ),
+        });
+      }
+      if (items.length === 0) {
+        const title = await field("title", TITLE_LABELS);
+        items = [
+          {
+            item_key: null,
+            title,
+            sku_text: await field("sku", SKU_LABELS),
+            quantity: (await field("quantity", QUANTITY_LABELS)) ?? "1",
+            unit_price: await field("price", PRICE_LABELS),
+          },
+        ];
+      }
       const raw: RawOrder = {
         platform_order_id: platformOrderId,
         ordered_at: await field("time", TIME_LABELS),
         status: await field("status", STATUS_LABELS),
         shop_name: await field("shop", SHOP_LABELS),
-        items: title === null ? emptyItemList() : items,
+        items: items.every((item) => item.title === null) ? emptyItemList() : items,
         packages,
         observed_at: new Date().toISOString(),
         source_page: 0,

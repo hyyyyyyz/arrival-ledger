@@ -12,9 +12,11 @@ import {
   countVisible,
   countVisibleMarkers,
   extractAllFieldValues,
-  extractAllLabelValues,
   extractFieldValue,
+  extractFieldValueStructuralFirst,
   extractLabelValue,
+  innermostContainers,
+  nearestPrecedingByClass,
 } from "../browser/dom.js";
 import {
   mergeRawOrdersByOrderId,
@@ -119,12 +121,42 @@ async function findCardLocators(page: Page): Promise<Locator[]> {
   return [];
 }
 
+export const PDD_ITEM_CONTAINER_SELECTORS = [
+  "[class*='item-row']",
+  "[class*='goods-item']",
+  "[class*='item-line']",
+] as const;
+
+export const PDD_PACKAGE_CONTAINER_SELECTORS = [
+  "[class*='logistics']",
+  "[class*='tracking']",
+  "[class*='package']",
+] as const;
+
 async function extractItems(card: Locator): Promise<RawOrderItem[]> {
-  const titles = await extractAllFieldValues(card, PDD_SELECTORS.fieldSelectors.title);
-  const skus = await extractAllFieldValues(card, PDD_SELECTORS.fieldSelectors.sku);
-  const quantities = await extractAllFieldValues(card, PDD_SELECTORS.fieldSelectors.quantity);
-  const prices = await extractAllFieldValues(card, PDD_SELECTORS.fieldSelectors.price);
-  if (titles.length === 0) {
+  const containers = await innermostContainers(card, PDD_ITEM_CONTAINER_SELECTORS);
+  const items: RawOrderItem[] = [];
+  for (const container of containers) {
+    const title = await extractFieldValue(container, TITLE_LABELS, PDD_SELECTORS.fieldSelectors.title);
+    if (title === null) continue;
+    items.push({
+      item_key: null,
+      title,
+      sku_text: await extractFieldValueStructuralFirst(container, SKU_LABELS, PDD_SELECTORS.fieldSelectors.sku),
+      quantity:
+        (await extractFieldValueStructuralFirst(
+          container,
+          QUANTITY_LABELS,
+          PDD_SELECTORS.fieldSelectors.quantity,
+        )) ?? "1",
+      unit_price: await extractFieldValueStructuralFirst(
+        container,
+        PRICE_LABELS,
+        PDD_SELECTORS.fieldSelectors.price,
+      ),
+    });
+  }
+  if (items.length === 0) {
     const title = await extractLabelValue(card, TITLE_LABELS);
     if (title === null) {
       return [
@@ -147,13 +179,7 @@ async function extractItems(card: Locator): Promise<RawOrderItem[]> {
       },
     ];
   }
-  return titles.map((title, index) => ({
-    item_key: null,
-    title,
-    sku_text: skus[index] ?? null,
-    quantity: quantities[index] ?? "1",
-    unit_price: prices[index] ?? null,
-  }));
+  return items;
 }
 
 async function extractPackages(card: Locator): Promise<{
@@ -170,6 +196,28 @@ async function extractPackages(card: Locator): Promise<{
     packages.push({ courier, tracking_no: tracking, status: null });
   };
 
+  const containers = await innermostContainers(card, PDD_PACKAGE_CONTAINER_SELECTORS);
+  for (const container of containers) {
+    let courier = await extractLabelValue(container, COURIER_LABELS);
+    const labeled = await extractLabelValue(container, TRACKING_LABELS);
+    if (labeled !== null) {
+      const tracking = trackingFromLabeledText(labeled);
+      if (tracking !== null) {
+        if (courier === null) {
+          const preceding = await nearestPrecedingByClass(container, ["courier", "logistics", "express"]);
+          if (preceding !== null) courier = (await preceding.innerText().catch(() => "")).trim() || null;
+        }
+        add(courier, tracking);
+      } else {
+        unreadable = true;
+      }
+      continue;
+    }
+    const containerText = await container.innerText().catch(() => "");
+    const split = splitLogisticsCell(containerText);
+    if (split.tracking !== null) add(courier ?? split.courier, split.tracking);
+  }
+
   const trackingTexts = await extractAllFieldValues(card, [
     "[class*='tracking-no']",
     "[class*='tracking-number']",
@@ -180,17 +228,13 @@ async function extractPackages(card: Locator): Promise<{
     if (tracking !== null) add(null, tracking);
     else unreadable = true;
   }
-  const labeledTrackings = await extractAllLabelValues(card, TRACKING_LABELS);
-  for (const text of labeledTrackings) {
-    const tracking = trackingFromLabeledText(text);
-    if (tracking !== null) add(null, tracking);
-    else unreadable = true;
-  }
-  const singleCourier = await extractLabelValue(card, COURIER_LABELS);
-  const logisticsTexts = await extractAllFieldValues(card, PDD_SELECTORS.fieldSelectors.logistics);
-  for (const text of logisticsTexts) {
-    const split = splitLogisticsCell(text);
-    if (split.tracking !== null) add(split.courier ?? singleCourier, split.tracking);
+  if (packages.length === 0) {
+    const cardLabeled = await extractLabelValue(card, TRACKING_LABELS);
+    if (cardLabeled !== null) {
+      const tracking = trackingFromLabeledText(cardLabeled);
+      if (tracking !== null) add(await extractLabelValue(card, COURIER_LABELS), tracking);
+      else unreadable = true;
+    }
   }
   return { packages, unreadable };
 }
