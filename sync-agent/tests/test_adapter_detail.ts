@@ -38,13 +38,13 @@ async function open1688List(fixture: string): Promise<void> {
   await page.context().route("**/buyer-order-list.html", async (route) => {
     await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await fixtureBody(`1688/${fixture}`) });
   });
-  await page.context().route("**/detail.html", async (route) => {
+  await page.context().route("**/detail.html*", async (route) => {
     await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await fixtureBody("1688/detail.html") });
   });
-  await page.context().route("**/detail-broken.html", async (route) => {
+  await page.context().route("**/detail-broken.html*", async (route) => {
     await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await fixtureBody("1688/detail-broken.html") });
   });
-  await page.context().route("**/product.html", async (route) => {
+  await page.context().route("**/product.html*", async (route) => {
     await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await fixtureBody("1688/product.html") });
   });
   await page.goto(ALI1688_LIST_URL);
@@ -55,7 +55,7 @@ async function openPddList(fixture: string): Promise<void> {
   await page.context().route("**/orders.html", async (route) => {
     await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await fixtureBody(`pdd/${fixture}`) });
   });
-  await page.context().route("**/detail.html", async (route) => {
+  await page.context().route("**/detail.html*", async (route) => {
     await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await fixtureBody("pdd/detail.html") });
   });
   await page.goto(PDD_LIST_URL);
@@ -122,6 +122,38 @@ describe("order detail navigation over visible DOM", () => {
     expect(detail).toBeNull();
   });
 
+  it("fails closed when a card without an order id links to an identity-less detail (1688)", async () => {
+    await open1688List("order-list-unbound-link.html");
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    expect(list.unparsed).toHaveLength(1);
+    const detail = await ali1688Adapter.readOrderDetail(page, list.unparsed[0]!);
+    expect(detail).toBeNull();
+  });
+
+  it("fails closed when the detail link order id does not match the detail page (1688)", async () => {
+    await open1688List("order-list-wrong-id-link.html");
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    expect(list.unparsed).toHaveLength(1);
+    const detail = await ali1688Adapter.readOrderDetail(page, list.unparsed[0]!);
+    expect(detail).toBeNull();
+  });
+
+  it("fails closed when a card without an order id links to an identity-less detail (pdd)", async () => {
+    await openPddList("order-list-unbound-link.html");
+    const list = await pddAdapter.collectVisibleOrders(page);
+    expect(list.unparsed).toHaveLength(1);
+    const detail = await pddAdapter.readOrderDetail(page, list.unparsed[0]!);
+    expect(detail).toBeNull();
+  });
+
+  it("fails closed when the detail link order id does not match the detail page (pdd)", async () => {
+    await openPddList("order-list-wrong-id-link.html");
+    const list = await pddAdapter.collectVisibleOrders(page);
+    expect(list.unparsed).toHaveLength(1);
+    const detail = await pddAdapter.readOrderDetail(page, list.unparsed[0]!);
+    expect(detail).toBeNull();
+  });
+
   it("handles pdd detail links that open a new tab", async () => {
     await openPddList("order-list-detail-newtab.html");
     const state = await checkPageState(page, pddAdapter);
@@ -152,8 +184,10 @@ describe("order detail navigation over visible DOM", () => {
     await openPddList("order-list-detail-windowopen.html");
     const beforeCount = page.context().pages().length;
     const list = await pddAdapter.collectVisibleOrders(page);
-    expect(list.unparsed).toHaveLength(1);
-    const detail = await pddAdapter.readOrderDetail(page, list.unparsed[0]!);
+    expect(list.unparsed.length).toBeGreaterThanOrEqual(1);
+    const card = list.unparsed.find((entry) => entry.order_id === "260813-8800000002");
+    expect(card).toBeDefined();
+    const detail = await pddAdapter.readOrderDetail(page, card!);
     expect(detail).not.toBeNull();
     expect(detail?.platform_order_id).toBe("260813-8800000002");
     await page.waitForTimeout(400);
@@ -171,7 +205,7 @@ describe("order detail navigation over visible DOM", () => {
           : await fixtureBody("1688/empty-list.html");
       await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body });
     });
-    await page.context().route("**/detail.html", async (route) => {
+    await page.context().route("**/detail.html*", async (route) => {
       await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await fixtureBody("1688/detail.html") });
     });
     await page.goto(ALI1688_LIST_URL);

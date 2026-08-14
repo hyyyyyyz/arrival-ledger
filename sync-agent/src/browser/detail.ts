@@ -12,6 +12,17 @@ export interface DetailTarget {
   link: Locator;
   href: string | null;
   opensNewTab: boolean;
+  order_id: string | null;
+}
+
+const ORDER_ID_IN_URL =
+  /(?:orderid|order_id|orderno|order_no|order-no|order)[=:\/]([A-Za-z0-9-]{4,64})/i;
+
+export function orderIdFromUrl(rawHref: string): string | null {
+  const match = ORDER_ID_IN_URL.exec(rawHref);
+  if (match === null) return null;
+  const candidate = match[1];
+  return candidate !== undefined && /\d/.test(candidate) ? candidate : null;
 }
 
 export function officialHost(host: string, suffix: string): boolean {
@@ -89,6 +100,7 @@ export async function findDetailLink(
     text: string;
     href: string | null;
     opensNewTab: boolean;
+    order_id: string | null;
     score: number;
   }> = [];
 
@@ -111,6 +123,7 @@ export async function findDetailLink(
           text,
           href: null,
           opensNewTab: false,
+          order_id: null,
           score: 2,
         });
       }
@@ -132,6 +145,7 @@ export async function findDetailLink(
       text,
       href: resolved,
       opensNewTab: (target ?? "").toLowerCase() === "_blank",
+      order_id: orderIdFromUrl(effectiveHref),
       score,
     });
   }
@@ -145,11 +159,16 @@ export async function findDetailLink(
     const text = (await button.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
     if (rules.excludeTextPatterns.some((pattern) => pattern.test(text))) continue;
     if (!rules.textPatterns.some((pattern) => pattern.test(text))) continue;
-    candidates.push({ link: button, text, href: null, opensNewTab: false, score: 2 });
+    candidates.push({ link: button, text, href: null, opensNewTab: false, order_id: null, score: 2 });
   }
 
   candidates.sort((a, b) => b.score - a.score);
   const chosen = candidates[0];
   if (chosen === undefined) return null;
-  return { link: chosen.link, href: chosen.href, opensNewTab: chosen.opensNewTab };
+  return {
+    link: chosen.link,
+    href: chosen.href,
+    opensNewTab: chosen.opensNewTab,
+    order_id: chosen.order_id,
+  };
 }

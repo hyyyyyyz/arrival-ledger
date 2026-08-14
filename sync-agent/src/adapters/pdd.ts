@@ -369,6 +369,13 @@ export const pddAdapter: PlatformAdapter = {
   async readOrderDetail(page: Page, card: UnparsedCard): Promise<RawOrder | null> {
     const target = await findDetailLink(card.locator, page.url(), PDD_DETAIL_RULES);
     if (target === null) return null;
+    const expectedOrderId =
+      card.order_id !== undefined && card.order_id !== null && card.order_id.length > 0
+        ? card.order_id.trim()
+        : target.order_id;
+    if (expectedOrderId === null || expectedOrderId.length === 0) {
+      return null;
+    }
     const beforeUrl = page.url();
     const opened = await openDetailTarget(page, target);
     if (opened === null) return null;
@@ -397,12 +404,7 @@ export const pddAdapter: PlatformAdapter = {
       }
       return null;
     }
-    if (
-      card.order_id !== null &&
-      card.order_id !== undefined &&
-      card.order_id.length > 0 &&
-      platformOrderId.trim() !== card.order_id.trim()
-    ) {
+    if (platformOrderId.trim() !== expectedOrderId) {
       if (openedNewTab) await detailPage.close().catch(() => undefined);
       else {
         await detailPage.goBack({ timeout: 5000 }).catch(() => undefined);
