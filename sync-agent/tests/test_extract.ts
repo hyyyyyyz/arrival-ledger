@@ -163,6 +163,41 @@ describe("mergeRawOrdersByOrderId", () => {
   });
 });
 
+describe("mergeRawOrdersByOrderId laterWins", () => {
+  it("detail values override list values for items and packages", () => {
+    const list = rawOrder();
+    const detail = rawOrder({
+      items: [{ item_key: null, title: "测试商品", sku_text: "标准", quantity: "2", unit_price: "9.99" }],
+      packages: [{ courier: "顺丰速运", tracking_no: "ZTO-20260813-0001", status: null }],
+    });
+    const merged = mergeRawOrdersByOrderId([list, detail], { laterWins: true });
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.items).toHaveLength(1);
+    expect(merged[0]?.items[0]?.quantity).toBe("2");
+    expect(merged[0]?.items[0]?.unit_price).toBe("9.99");
+    expect(merged[0]?.packages).toHaveLength(1);
+    expect(merged[0]?.packages[0]?.courier).toBe("顺丰速运");
+  });
+
+  it("detail fills null courier on the list package", () => {
+    const list = rawOrder({
+      packages: [{ courier: null, tracking_no: "8800123456789", status: null }],
+    });
+    const detail = rawOrder({
+      packages: [{ courier: "中通快递", tracking_no: "8800123456789", status: null }],
+    });
+    const merged = mergeRawOrdersByOrderId([list, detail], { laterWins: true });
+    expect(merged[0]?.packages[0]?.courier).toBe("中通快递");
+  });
+
+  it("non-detail mode keeps the first occurrence unchanged", () => {
+    const list = rawOrder();
+    const detail = rawOrder({ items: [{ item_key: null, title: "测试商品", sku_text: "标准", quantity: "5", unit_price: null }] });
+    const merged = mergeRawOrdersByOrderId([list, detail]);
+    expect(merged[0]?.items[0]?.quantity).toBe("2");
+  });
+});
+
 describe("dedupeOrders", () => {
   it("removes repeated order ids within a run", () => {
     const first = buildUnifiedOrder(rawOrder(), "1688", "1688-main", STATUS_MAP).order!;

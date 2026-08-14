@@ -273,10 +273,32 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
         }
         pageOrders.push(detail);
       }
-      const mergedPage = mergeRawOrdersByOrderId(pageOrders);
+      const mergedPage = mergeRawOrdersByOrderId(pageOrders, { laterWins: true });
       for (const raw of mergedPage) {
         if (raw.platform_order_id !== null && raw.platform_order_id.length > 0) {
           seenOrderIds.add(raw.platform_order_id.trim());
+        }
+        const statusText = raw.status === null ? "" : raw.status.trim();
+        const mapped = statusText.length === 0 ? null : adapter.statusMap[statusText];
+        if (
+          (mapped === "SHIPPED" || mapped === "COMPLETED") &&
+          raw.packages.length === 0
+        ) {
+          updateCursor(config.state_dir, platform, accountKey, {
+            last_status: "SCHEMA_CHANGED",
+            last_sync_at: nowIso(),
+            consecutive_failures: (loadCursor(config.state_dir, platform, accountKey)?.consecutive_failures ?? 0) + 1,
+          });
+          logger.error({
+            command: "sync-once",
+            platform,
+            status: "SCHEMA_CHANGED",
+            message: `shipped order ${raw.platform_order_id} has no complete logistics block after detail read`,
+            error_code: "SCHEMA_CHANGED",
+          });
+          const report = buildReport("sync-once", platform, "dry-run", null, "SCHEMA_CHANGED", "SCHEMA_CHANGED", startedAt, emptyCounts(), warnings);
+          writeReportFile(config, platform, report, [], logger);
+          return { exitCode: 1, report };
         }
       }
       rowsSeen += list.rows_seen;

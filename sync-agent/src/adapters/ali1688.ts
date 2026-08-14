@@ -503,11 +503,16 @@ export const ali1688Adapter: PlatformAdapter = {
         raw.status === null || raw.status.trim().length === 0
           ? null
           : ALI1688_STATUS_MAP[raw.status.trim()];
-      if (mappedStatus === "SHIPPED" || mappedStatus === "COMPLETED") {
+      if (
+        mappedStatus === "SHIPPED" ||
+        mappedStatus === "COMPLETED" ||
+        mappedStatus === undefined ||
+        mappedStatus === null
+      ) {
         unparsed.push({
           locator: row,
           missing: ["logistics"],
-          hint: "shipped order requires a full detail read for all packages",
+          hint: "shipped or unknown status requires a full detail read for all packages",
           order_id: platformOrderId,
         });
       }

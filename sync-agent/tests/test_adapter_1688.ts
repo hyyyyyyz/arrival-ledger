@@ -153,6 +153,24 @@ describe("ali1688 adapter with sanitized fixtures", () => {
     expect(items.map((item) => item.quantity)).toEqual(["2", "4"]);
   });
 
+  it("routes unknown status text to detail enrichment", async () => {
+    await page.setContent(
+      `<table class="trade-order-list"><thead><tr><th>订单号</th><th>商品名称</th><th>数量</th><th>订单状态</th><th>物流</th></tr></thead>
+       <tbody><tr>
+         <td><span class="order-id">1688-260813-0007</span></td>
+         <td><span class="item-title">未知状态商品</span></td>
+         <td><span class="item-quantity">1</span></td>
+         <td><span class="order-status">奇异状态</span></td>
+         <td></td>
+       </tr></tbody></table>`,
+    );
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    const unknown = list.unparsed.find(
+      (card) => card.order_id === "1688-260813-0007" && card.hint.includes("unknown"),
+    );
+    expect(unknown).toBeDefined();
+  });
+
   it("merges multiple rows of the same order into one raw order", async () => {
     await openFixture("order-list-multirow.html");
     const list = await ali1688Adapter.collectVisibleOrders(page);

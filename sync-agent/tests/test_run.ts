@@ -12,7 +12,7 @@ import type { SyncBrowser } from "../src/browser/context.js";
 import { loadConfig } from "../src/config.js";
 import type { RawOrder } from "../src/extract/order.js";
 import { JsonLogger } from "../src/log.js";
-import { readSnapshot, verifySnapshot } from "../src/snapshot.js";
+import { readSnapshot, snapshotToBatch, verifySnapshot } from "../src/snapshot.js";
 
 const createdDirs: string[] = [];
 
@@ -428,6 +428,66 @@ describe("runSyncOnce pagination safety", () => {
       buildOptions(cwd, { adapter }, { ALI1688_ORDER_URL: "https://air.1688.com/app/orders" }),
     );
     expect(opened).toEqual(["https://air.1688.com/app/orders"]);
+  });
+});
+
+describe("runSyncOnce detail authority and completeness", () => {
+  it("merges detail as the authoritative source", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const listOrder: RawOrder = {
+      ...rawOrder(),
+      status: "已发货",
+      items: [{ item_key: null, title: "测试商品", sku_text: null, quantity: "1", unit_price: null }],
+      packages: [{ courier: null, tracking_no: "ZTO-20260813-0001", status: null }],
+    };
+    const detailOrder: RawOrder = {
+      ...rawOrder(),
+      status: "已发货",
+      items: [{ item_key: null, title: "测试商品", sku_text: null, quantity: "2", unit_price: null }],
+      packages: [{ courier: "中通快递", tracking_no: "ZTO-20260813-0001", status: null }],
+    };
+    const adapter = fakeAdapter({
+      collectVisibleOrders: async () => ({
+        orders: [listOrder],
+        empty: false,
+        rows_seen: 1,
+        recognized: 1,
+        unparsed: [
+          {
+            locator: {} as never,
+            missing: ["logistics"] as const,
+            hint: "shipped order requires a full detail read",
+            order_id: "1688-260813-0001",
+          },
+        ],
+      }),
+      readOrderDetail: async () => detailOrder,
+    });
+    const outcome = await runSyncOnce(buildOptions(cwd, { adapter }));
+    expect(outcome.exitCode).toBe(0);
+    const snapshot = readSnapshot(outcome.report.snapshot_path as string);
+    const batch = snapshotToBatch(snapshot!);
+    expect(batch?.orders[0]?.items[0]?.quantity).toBe(2);
+    expect(batch?.orders[0]?.packages[0]?.courier).toBe("中通快递");
+  });
+
+  it("stops with SCHEMA_CHANGED when a shipped order has no packages after detail", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const shippedNoPackages: RawOrder = { ...rawOrder(), status: "已发货", packages: [] };
+    const adapter = fakeAdapter({
+      collectVisibleOrders: async () => ({
+        orders: [shippedNoPackages],
+        empty: false,
+        rows_seen: 1,
+        recognized: 1,
+        unparsed: [],
+      }),
+    });
+    const outcome = await runSyncOnce(buildOptions(cwd, { adapter }));
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.status).toBe("SCHEMA_CHANGED");
   });
 });
 

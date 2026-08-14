@@ -189,7 +189,11 @@ function isPlaceholderItem(item: RawOrderItem): boolean {
   return item.title === null && item.quantity === null && item.sku_text === null;
 }
 
-export function mergeRawOrdersByOrderId(orders: RawOrder[]): RawOrder[] {
+export function mergeRawOrdersByOrderId(
+  orders: RawOrder[],
+  options: { laterWins?: boolean } = {},
+): RawOrder[] {
+  const laterWins = options.laterWins ?? false;
   const merged = new Map<string, RawOrder>();
   for (const raw of orders) {
     if (raw.platform_order_id === null || raw.platform_order_id.length === 0) {
@@ -204,29 +208,56 @@ export function mergeRawOrdersByOrderId(orders: RawOrder[]): RawOrder[] {
       });
       continue;
     }
-    const items = [...existing.items];
-    for (const item of raw.items) {
-      if (isPlaceholderItem(item)) continue;
-      const duplicate = items.some(
-        (other) =>
-          orderIdMatchKey(other.title ?? "") === orderIdMatchKey(item.title ?? "") &&
-          (other.sku_text ?? "") === (item.sku_text ?? ""),
-      );
-      if (!duplicate) items.push(item);
+    const itemKeyFor = (item: RawOrderItem): string =>
+      `${orderIdMatchKey(item.title ?? "")}|${(item.sku_text ?? "").trim()}`;
+    let items: RawOrderItem[];
+    if (laterWins) {
+      items = [...existing.items];
+      for (const item of raw.items) {
+        if (isPlaceholderItem(item)) continue;
+        const itemKey = itemKeyFor(item);
+        const index = items.findIndex((other) => itemKeyFor(other) === itemKey);
+        if (index >= 0) {
+          items[index] = item;
+        } else {
+          items.push(item);
+        }
+      }
+    } else {
+      items = [...existing.items];
+      for (const item of raw.items) {
+        if (isPlaceholderItem(item)) continue;
+        const duplicate = items.some((other) => itemKeyFor(other) === itemKeyFor(item));
+        if (!duplicate) items.push(item);
+      }
     }
     const packages = [...existing.packages];
     for (const item of raw.packages) {
-      const duplicate = packages.some(
-        (other) =>
-          normalizeTrackingNo(other.tracking_no ?? "") === normalizeTrackingNo(item.tracking_no ?? ""),
+      const trackingKey = normalizeTrackingNo(item.tracking_no ?? "");
+      const index = packages.findIndex(
+        (other) => normalizeTrackingNo(other.tracking_no ?? "") === trackingKey,
       );
-      if (!duplicate) packages.push(item);
+      if (index >= 0) {
+        if (laterWins && item.courier !== null && item.courier.length > 0) {
+          packages[index] = item;
+        } else if (
+          packages[index]?.courier === null &&
+          item.courier !== null &&
+          item.courier.length > 0
+        ) {
+          packages[index] = { ...packages[index]!, courier: item.courier };
+        }
+        continue;
+      }
+      packages.push(item);
     }
+    const pick = (existingValue: string | null, rawValue: string | null): string | null =>
+      laterWins ? (rawValue ?? existingValue) : (existingValue ?? rawValue);
     merged.set(key, {
       platform_order_id: existing.platform_order_id,
-      ordered_at: existing.ordered_at ?? raw.ordered_at,
-      status: existing.status ?? raw.status,
-      shop_name: existing.shop_name ?? raw.shop_name,
+      ordered_at: pick(existing.ordered_at, raw.ordered_at),
+      status: pick(existing.status, raw.status),
+      shop_name: pick(existing.shop_name, raw.shop_name),
       items,
       packages,
       observed_at: existing.observed_at,
