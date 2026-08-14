@@ -19,10 +19,29 @@ const ORDER_ID_IN_URL =
   /(?:orderid|order_id|orderno|order_no|order-no|order)[=:\/]([A-Za-z0-9-]{4,64})/i;
 
 export function orderIdFromUrl(rawHref: string): string | null {
+  try {
+    const parsed = new URL(rawHref, "https://detail.invalid");
+    for (const key of ["order_sn", "order_id", "orderId", "order_no", "orderNo"]) {
+      const value = parsed.searchParams.get(key);
+      if (value !== null && /^[A-Za-z0-9-]{4,64}$/.test(value) && /\d/.test(value)) {
+        return value;
+      }
+    }
+  } catch {
+    // Fall back to matching path-style order identifiers below.
+  }
   const match = ORDER_ID_IN_URL.exec(rawHref);
   if (match === null) return null;
   const candidate = match[1];
   return candidate !== undefined && /\d/.test(candidate) ? candidate : null;
+}
+
+export function normalizeVisibleOrderId(rawValue: string | null): string | null {
+  if (rawValue === null) return null;
+  const withoutCopyAction = rawValue.replace(/(?:\r?\n|\s)*复制\s*$/u, "").trim();
+  const match = withoutCopyAction.match(/[A-Za-z0-9-]{4,64}/);
+  if (match === null || !/\d/.test(match[0])) return null;
+  return match[0];
 }
 
 export function officialHost(host: string, suffix: string): boolean {
@@ -34,6 +53,29 @@ export function sameListUrl(before: string, after: string): boolean {
   try {
     const a = new URL(before);
     const b = new URL(after);
+    return (
+      a.origin === b.origin &&
+      a.pathname === b.pathname &&
+      a.search === b.search &&
+      a.hash === b.hash
+    );
+  } catch {
+    return before === after;
+  }
+}
+
+export function sameListUrlIgnoringQueryKeys(
+  before: string,
+  after: string,
+  ignoredKeys: readonly string[],
+): boolean {
+  try {
+    const a = new URL(before);
+    const b = new URL(after);
+    for (const key of ignoredKeys) {
+      a.searchParams.delete(key);
+      b.searchParams.delete(key);
+    }
     return (
       a.origin === b.origin &&
       a.pathname === b.pathname &&

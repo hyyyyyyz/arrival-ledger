@@ -121,15 +121,18 @@ describe("loadConfig", () => {
       env: {
         SYNC_PAGE_DELAY_MS: "0",
         SYNC_MAX_PAGES: "9",
+        SYNC_MAX_RECORDS: "101",
         SYNC_MIN_INTERVAL_MINUTES: "0",
       },
     });
     expect(config.page_delay_ms).toBe(2500);
     expect(config.max_pages).toBe(5);
+    expect(config.max_records).toBe(30);
     expect(config.min_interval_minutes).toBe(15);
     const fields = issues.map((issue) => issue.field);
     expect(fields).toContain("SYNC_PAGE_DELAY_MS");
     expect(fields).toContain("SYNC_MAX_PAGES");
+    expect(fields).toContain("SYNC_MAX_RECORDS");
     expect(fields).toContain("SYNC_MIN_INTERVAL_MINUTES");
   });
 

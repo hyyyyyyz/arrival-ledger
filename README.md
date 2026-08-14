@@ -36,8 +36,9 @@
 | Windows 浏览器可见页面同步 PDD/1688（`sync-agent`） | 代码完成，待 Windows 真机手工验收 |
 | 截图 / OCR / 手工录入 | 兜底路径 |
 
-浏览器同步**不调用任何平台官方 API**：在闲置 Windows 上用两个独立 Chrome profile，由用户手工
-登录，程序只读可见页面，先 dry-run 预览、用户确认后才提交脱敏批次到自家服务器。同步失败
+浏览器同步**不调用任何平台官方 API**：在闲置 Windows 上用两个独立 Playwright Chromium profile，由用户手工
+登录，程序只读可见页面，先 dry-run 预览、用户确认后才提交最小必要的结构化订单批次到自家服务器。批次包含
+订单号、商品和运单号，但不包含密码、Cookie、地址、电话或原始页面；同步失败
 不影响拍照收货。
 
 ### 安全与隐私
@@ -59,7 +60,7 @@ Ubuntu 服务器（纯 Server，无桌面）
                       ▲
                       │ 可见页面只读同步（可失效的增强能力）
 闲置 Windows 电脑
-  ├─ 独立 Chrome profile：PDD / 1688（用户手工登录）
+  ├─ 独立 Chromium profile：PDD / 1688（用户手工登录）
   └─ sync-agent：Node 20 + TypeScript + Playwright headed
 ```
 
@@ -88,7 +89,7 @@ deploy/scripts/verify.sh http://127.0.0.1:8766
 固定流程：
 
 ```text
-doctor → login-check → sync-once --mode dry-run → 用户确认 → sync-once --mode commit --from-report <snapshot> --yes
+doctor → 必要时 login-check → 等待页面访问冷却 → sync-once --mode dry-run → 用户确认 → sync-once --mode commit --from-report <snapshot> --yes
 ```
 
 - 规格与边界：[`docs/BROWSER_SYNC_SPEC.md`](docs/BROWSER_SYNC_SPEC.md)
@@ -103,7 +104,7 @@ doctor → login-check → sync-once --mode dry-run → 用户确认 → sync-on
 ```text
 backend/     FastAPI + SQLite：收货凭证、认证、订单/包裹数据模型、同步批次接收
 frontend/    Vue 3 微信 H5：拍照、压缩、条码、离线队列、清单
-sync-agent/  Windows 同步端：doctor / login-check / sync-once，PDD 与 1688 适配器
+sync-agent/  Windows 同步端：doctor / login-check / capture-page / sync-once，PDD 与 1688 适配器
 deploy/      Nginx 模板、备份/验证脚本
 docs/        计划、规格、部署、验收文档
 ```

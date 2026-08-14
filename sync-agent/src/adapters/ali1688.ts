@@ -56,8 +56,13 @@ export const ALI1688_SELECTORS = {
     "text=安全验证",
     "text=滑动验证",
     "text=拖动滑块",
-    "text=验证码",
     "text=风险",
+  ],
+  busyMarkers: [
+    "text=系统繁忙",
+    "text=刷新试试",
+    "text=访问受限",
+    "text=操作过于频繁",
   ],
   emptyMarkers: ["text=暂无订单", "text=没有订单", "text=暂无数据"],
 } as const;
@@ -90,6 +95,202 @@ const SKU_LABELS = ["规格", "型号"];
 const QUANTITY_LABELS = ["数量", "件数"];
 const PRICE_LABELS = ["单价", "金额"];
 const LOGISTICS_LABELS = ["物流", "物流信息"];
+
+const ORDER_ID_PATTERN = /(?:订单号|订单编号)\s*[:：]?\s*([A-Za-z0-9-]{8,64})/g;
+const DATETIME_PATTERN = /\b(20\d{2}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)\b/;
+const CARD_ACTION_PATTERN = /订单详情|再次购买|申请退款|确认收货|提醒发货|找同款|售后详情/;
+const STATUS_PRIORITY = [
+  "等待买家付款",
+  "待付款",
+  "待卖家发货",
+  "待发货",
+  "待收货",
+  "退款中",
+  "退款成功",
+  "交易关闭",
+  "订单关闭",
+  "已取消",
+  "交易成功",
+  "已收货",
+  "运输中",
+  "已发货",
+] as const;
+
+const ALI1688_CARD_FIELD_SELECTORS = {
+  title: [
+    "[class*='item-title']",
+    "[class*='goods-name']",
+    "[class*='product-name']",
+    "[class*='offer-title']",
+    "a[href*='offer']",
+  ],
+  sku: ["[class*='item-sku']", "[class*='goods-sku']", "[class*='spec']"],
+  quantity: ["[class*='item-quantity']", "[class*='goods-count']", "[class*='quantity']"],
+  price: ["[class*='item-price']", "[class*='goods-price']", "[class*='unit-price']"],
+  shop: [
+    "[class*='seller-name']",
+    "[class*='shop-name']",
+    "[class*='company-name']",
+    "a[href*='winport.1688.com']",
+  ],
+} as const;
+
+function orderIdsFromText(text: string): string[] {
+  const ids: string[] = [];
+  for (const match of text.matchAll(ORDER_ID_PATTERN)) {
+    const value = match[1]?.trim();
+    if (value !== undefined && /\d/.test(value) && !ids.includes(value)) ids.push(value);
+  }
+  return ids;
+}
+
+async function orderIdsFromContainer(container: Locator): Promise<string[]> {
+  const ids: string[] = [];
+  const directTexts = await container
+    .evaluate((element) => {
+      const own = Array.from(element.childNodes)
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.textContent ?? "")
+        .join(" ");
+      const leaves = Array.from(element.querySelectorAll("*"))
+        .filter((child) => child.children.length === 0)
+        .map((child) => child.textContent ?? "");
+      return [own, ...leaves];
+    })
+    .catch(() => [] as string[]);
+  for (const text of directTexts) {
+    for (const id of orderIdsFromText(text)) {
+      if (!ids.includes(id)) ids.push(id);
+    }
+  }
+  return ids;
+}
+
+async function visibleText(locator: Locator): Promise<string> {
+  return (await locator.innerText().catch(() => "")).trim();
+}
+
+async function exactVisibleText(container: Locator, values: readonly string[]): Promise<string | null> {
+  for (const value of values) {
+    const found = container.getByText(value, { exact: true });
+    const count = await found.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      if (await found.nth(index).isVisible({ timeout: 250 }).catch(() => false)) return value;
+    }
+  }
+  return null;
+}
+
+async function firstVisibleField(
+  container: Locator,
+  selectors: readonly string[],
+): Promise<string | null> {
+  for (const selector of selectors) {
+    const found = container.locator(selector);
+    const count = await found.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      const candidate = found.nth(index);
+      if (!(await candidate.isVisible({ timeout: 250 }).catch(() => false))) continue;
+      const text = await visibleText(candidate);
+      if (text.length > 0 && !CARD_ACTION_PATTERN.test(text)) return text;
+    }
+  }
+  return null;
+}
+
+async function firstPrefixedLeaf(
+  container: Locator,
+  labels: readonly string[],
+): Promise<string | null> {
+  const leaves = container.locator("xpath=.//*[not(*)]");
+  const count = await leaves.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    const leaf = leaves.nth(index);
+    if (!(await leaf.isVisible({ timeout: 250 }).catch(() => false))) continue;
+    const text = await visibleText(leaf);
+    if (labels.some((label) => new RegExp(`^${label}\\s*[:：]`).test(text))) return text;
+  }
+  return null;
+}
+
+async function firstLeafMatching(container: Locator, pattern: RegExp): Promise<string | null> {
+  const leaves = container.locator("xpath=.//*[not(*)]");
+  const count = await leaves.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    const leaf = leaves.nth(index);
+    if (!(await leaf.isVisible({ timeout: 250 }).catch(() => false))) continue;
+    const text = await visibleText(leaf);
+    if (pattern.test(text)) return text;
+  }
+  return null;
+}
+
+async function uniqueStandaloneQuantity(container: Locator): Promise<string | null> {
+  const leaves = container.locator("xpath=.//*[not(*)]");
+  const count = await leaves.count().catch(() => 0);
+  const explicit: string[] = [];
+  const plain: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const leaf = leaves.nth(index);
+    if (!(await leaf.isVisible({ timeout: 250 }).catch(() => false))) continue;
+    const text = await visibleText(leaf);
+    if (/^[xX×]\s*\d{1,6}$/.test(text)) explicit.push(text);
+    else if (/^\d{1,6}$/.test(text)) plain.push(text);
+  }
+  const candidates = explicit.length > 0 ? explicit : plain;
+  return candidates.length === 1 ? candidates[0]! : null;
+}
+
+async function extractSemanticCardItems(row: Locator): Promise<RawOrderItem[]> {
+  const titleLinks = row.locator("a[href*='offer']");
+  const count = await titleLinks.count().catch(() => 0);
+  const candidates: Array<{ locator: Locator; title: string }> = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < count; index += 1) {
+    const titleLink = titleLinks.nth(index);
+    if (!(await titleLink.isVisible({ timeout: 250 }).catch(() => false))) continue;
+    const title = await visibleText(titleLink);
+    if (title.length === 0 || CARD_ACTION_PATTERN.test(title)) continue;
+    const href = (await titleLink.getAttribute("href")) ?? "";
+    const key = `${href}\u0000${cleanText(title)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push({ locator: titleLink, title });
+  }
+
+  const items: RawOrderItem[] = [];
+  for (const candidate of candidates) {
+    const { locator: titleLink, title } = candidate;
+
+    let itemRoot = titleLink;
+    for (let depth = 0; depth < 6; depth += 1) {
+      const offers = itemRoot.locator("a[href*='offer']");
+      const offerCount = await offers.count().catch(() => 0);
+      if (offerCount === 1) {
+        const text = await visibleText(itemRoot);
+        if (/规格\s*[:：]|型号\s*[:：]|颜色\s*[:：]|尺码\s*[:：]|[xX×]\s*\d|[¥￥]\s*\d/.test(text)) {
+          break;
+        }
+      }
+      const parent = itemRoot.locator("xpath=..");
+      if ((await parent.count().catch(() => 0)) === 0) break;
+      itemRoot = parent;
+    }
+    const quantity =
+      (await uniqueStandaloneQuantity(itemRoot)) ??
+      (candidates.length === 1 ? await uniqueStandaloneQuantity(row) : null);
+    items.push({
+      item_key: null,
+      title,
+      sku_text: await firstPrefixedLeaf(itemRoot, ["规格", "型号", "颜色", "尺码"]),
+      quantity,
+      unit_price:
+        (await firstVisibleField(itemRoot, ALI1688_CARD_FIELD_SELECTORS.price)) ??
+        (await firstLeafMatching(itemRoot, /^[¥￥]\s*\d+(?:\.\d{1,2})?$/)),
+    });
+  }
+  return items;
+}
 
 type ColumnName =
   | "order_id"
@@ -158,12 +359,55 @@ async function findRowLocators(page: Page): Promise<Locator[]> {
     const visible: Locator[] = [];
     for (let index = 0; index < count; index += 1) {
       const row = rows.nth(index);
-      if (await row.isVisible({ timeout: 500 }).catch(() => false)) {
-        visible.push(row);
-      }
+      if (!(await row.isVisible({ timeout: 500 }).catch(() => false))) continue;
+      const ids = await orderIdsFromContainer(row);
+      // A broad wrapper around the whole list is not an order card.
+      if (ids.length > 1) continue;
+      // Class names containing "order" are not a stable card contract.  A
+      // zero-ID class candidate may be a list root or an action panel, and
+      // returning it here would prevent the semantic order-label fallback.
+      // Legacy table rows and explicit data-order-id cards remain supported.
+      const tagName = await row.evaluate((element) => element.tagName.toLowerCase());
+      const explicitOrderId = await row.getAttribute("data-order-id");
+      if (ids.length === 0 && tagName !== "tr" && explicitOrderId === null) continue;
+      visible.push(row);
     }
     if (visible.length > 0) return visible;
   }
+
+  // The current buyer-order UI is card based and does not expose a stable
+  // table/class contract. Locate a visible order-id label and walk only as far
+  // as the smallest ancestor that contains one order plus status/action
+  // evidence. This deliberately refuses a list root containing many orders.
+  const anchors = page.getByText(
+    /(?:订单号|订单编号)\s*[:：]?\s*[A-Za-z0-9-]{8,64}/,
+  );
+  const anchorCount = await anchors.count().catch(() => 0);
+  const semantic: Locator[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < anchorCount; index += 1) {
+    const anchor = anchors.nth(index);
+    if (!(await anchor.isVisible({ timeout: 250 }).catch(() => false))) continue;
+    let candidate = anchor;
+    for (let depth = 0; depth < 9; depth += 1) {
+      const text = await visibleText(candidate);
+      const ids = await orderIdsFromContainer(candidate);
+      const hasStatus = STATUS_PRIORITY.some((status) => text.includes(status));
+      const hasCardEvidence = CARD_ACTION_PATTERN.test(text) || /规格\s*[:：]|[¥￥]\s*\d|数量/.test(text);
+      if (ids.length === 1 && hasStatus && hasCardEvidence) {
+        const id = ids[0]!;
+        if (!seen.has(id)) {
+          seen.add(id);
+          semantic.push(candidate);
+        }
+        break;
+      }
+      if (ids.length > 1) break;
+      candidate = candidate.locator("xpath=..");
+      if ((await candidate.count().catch(() => 0)) === 0) break;
+    }
+  }
+  if (semantic.length > 0) return semantic;
   return [];
 }
 
@@ -191,6 +435,8 @@ export const ALI1688_ITEM_CONTAINER_SELECTORS = [
   "[class*='item-line']",
   "[class*='goods-item']",
   "[class*='item-row']",
+  "[class*='product-item']",
+  "[class*='offer-item']",
 ] as const;
 
 export const ALI1688_DETAIL_ITEM_GROUP_SELECTORS = [
@@ -221,11 +467,11 @@ async function extractDetailItems(body: Locator): Promise<RawOrderItem[]> {
       title,
       sku_text: await extractFieldValueStructuralFirst(container, SKU_LABELS, ALI1688_DETAIL_SELECTORS.itemSku),
       quantity:
-        (await extractFieldValueStructuralFirst(
+        await extractFieldValueStructuralFirst(
           container,
           QUANTITY_LABELS,
           ALI1688_DETAIL_SELECTORS.itemQuantity,
-        )) ?? "1",
+        ),
       unit_price: await extractFieldValueStructuralFirst(
         container,
         PRICE_LABELS,
@@ -243,7 +489,7 @@ async function extractDetailItems(body: Locator): Promise<RawOrderItem[]> {
       item_key: null,
       title: single,
       sku_text: await extractLabelValue(body, SKU_LABELS),
-      quantity: (await extractLabelValue(body, QUANTITY_LABELS)) ?? "1",
+      quantity: await extractLabelValue(body, QUANTITY_LABELS),
       unit_price: await extractLabelValue(body, PRICE_LABELS),
     },
   ];
@@ -259,12 +505,28 @@ export const ali1688Adapter: PlatformAdapter = {
   platform: "1688",
   orderListUrl: "https://air.1688.com/app/ctf-page/trade-order-list/buyer-order-list.html",
   statusMap: ALI1688_STATUS_MAP,
+  // Opening a 1688 detail/action surface has triggered an additional human
+  // verification in real testing. Keep automatic runs on the list page.
+  allowDetailNavigation: false,
 
   async openOrders(page: Page, window: SyncWindow): Promise<void> {
     const url = window.order_list_url ?? this.orderListUrl;
     assertAllowedOrderListUrl(this.platform, url);
     await page.goto(url, { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(2000);
+    // Wait on this single navigation for the SPA to paint an order surface.
+    // Never reload or retry here: one invocation means one list-page request.
+    const deadline = Date.now() + 12_000;
+    while (Date.now() < deadline) {
+      if ((await findRowLocators(page)).length > 0) break;
+      const markers = await countVisibleMarkers(page, [
+        ...ALI1688_SELECTORS.emptyMarkers,
+        ...ALI1688_SELECTORS.loginMarkers,
+        ...ALI1688_SELECTORS.blockMarkers,
+        ...ALI1688_SELECTORS.busyMarkers,
+      ]);
+      if (markers > 0) break;
+      await page.waitForTimeout(400);
+    }
   },
 
   async detectLogin(page: Page): Promise<LoginState> {
@@ -284,6 +546,29 @@ export const ali1688Adapter: PlatformAdapter = {
   },
 
   async detectBlock(page: Page): Promise<BlockState> {
+    for (const frame of page.frames()) {
+      const frameUrl = frame.url().toLowerCase();
+      if (frameUrl.includes("captcha") || frameUrl.includes("punish")) {
+        const frameElement = await frame.frameElement().catch(() => null);
+        if (
+          frameElement !== null &&
+          !(await frameElement.isVisible().catch(() => false))
+        ) {
+          continue;
+        }
+        return {
+          blocked: true,
+          kind: "captcha",
+          detail: "visible security-verification frame detected",
+        };
+      }
+    }
+    for (const marker of ALI1688_SELECTORS.busyMarkers) {
+      const visible = await countVisibleMarkers(page, [marker]);
+      if (visible > 0) {
+        return { blocked: true, kind: "risk", detail: `visible busy/risk marker "${marker}"` };
+      }
+    }
     for (const marker of ALI1688_SELECTORS.blockMarkers) {
       const visible = await countVisibleMarkers(page, [marker]);
       if (visible > 0) {
@@ -309,9 +594,12 @@ export const ali1688Adapter: PlatformAdapter = {
     let rowsSeen = 0;
     let recognized = 0;
     for (const row of rows) {
+      const rowText = await visibleText(row);
       const platformOrderId =
         columns === null || columns["order_id"] === undefined
-          ? await extractLabelValue(row, ORDER_ID_LABELS)
+          ? (await orderIdsFromContainer(row))[0] ??
+            (await row.getAttribute("data-order-id")) ??
+            (await extractLabelValue(row, ORDER_ID_LABELS))
           : await cellText(row, columns["order_id"]);
       if (platformOrderId !== null && platformOrderId.length > 0 && skip.has(platformOrderId.trim())) {
         continue;
@@ -339,6 +627,20 @@ export const ali1688Adapter: PlatformAdapter = {
         columns === null || columns[name] === undefined
           ? extractLabelValue(row, labels)
           : cell(name);
+
+      const statusText =
+        columns === null || columns["status"] === undefined
+          ? (await exactVisibleText(row, STATUS_PRIORITY)) ?? (await extractLabelValue(row, STATUS_LABELS))
+          : await cell("status");
+      const orderedAt =
+        columns === null || columns["time"] === undefined
+          ? rowText.match(DATETIME_PATTERN)?.[1] ?? (await extractLabelValue(row, TIME_LABELS))
+          : await cell("time");
+      const shopName =
+        columns === null || columns["shop"] === undefined
+          ? (await firstVisibleField(row, ALI1688_CARD_FIELD_SELECTORS.shop)) ??
+            (await extractLabelValue(row, SHOP_LABELS))
+          : await cell("shop");
 
       const trackingColumnRaw: string | null = await field("tracking", TRACKING_LABELS);
       let logisticsUnreadable =
@@ -431,12 +733,11 @@ export const ali1688Adapter: PlatformAdapter = {
           item_key: null,
           title,
           sku_text: await extractFieldValueStructuralFirst(container, SKU_LABELS, ALI1688_DETAIL_SELECTORS.itemSku),
-          quantity:
-            (await extractFieldValueStructuralFirst(
-              container,
-              QUANTITY_LABELS,
-              ALI1688_DETAIL_SELECTORS.itemQuantity,
-            )) ?? "1",
+          quantity: await extractFieldValueStructuralFirst(
+            container,
+            QUANTITY_LABELS,
+            ALI1688_DETAIL_SELECTORS.itemQuantity,
+          ),
           unit_price: await extractFieldValueStructuralFirst(
             container,
             PRICE_LABELS,
@@ -444,23 +745,41 @@ export const ali1688Adapter: PlatformAdapter = {
           ),
         });
       }
+      if (items.length === 0) items = await extractSemanticCardItems(row);
       if (items.length === 0) {
-        const title = await field("title", TITLE_LABELS);
+        const title =
+          columns === null || columns["title"] === undefined
+            ? (await firstVisibleField(row, ALI1688_CARD_FIELD_SELECTORS.title)) ??
+              (await extractLabelValue(row, TITLE_LABELS))
+            : await cell("title");
         items = [
           {
             item_key: null,
             title,
-            sku_text: await field("sku", SKU_LABELS),
-            quantity: (await field("quantity", QUANTITY_LABELS)) ?? "1",
-            unit_price: await field("price", PRICE_LABELS),
+            sku_text:
+              columns === null || columns["sku"] === undefined
+                ? (await firstVisibleField(row, ALI1688_CARD_FIELD_SELECTORS.sku)) ??
+                  (await extractLabelValue(row, SKU_LABELS))
+                : await cell("sku"),
+            quantity:
+              (columns === null || columns["quantity"] === undefined
+                ? (await firstVisibleField(row, ALI1688_CARD_FIELD_SELECTORS.quantity)) ??
+                  (await extractLabelValue(row, QUANTITY_LABELS)) ??
+                  (await uniqueStandaloneQuantity(row))
+                : await cell("quantity")),
+            unit_price:
+              columns === null || columns["price"] === undefined
+                ? (await firstVisibleField(row, ALI1688_CARD_FIELD_SELECTORS.price)) ??
+                  (await extractLabelValue(row, PRICE_LABELS))
+                : await cell("price"),
           },
         ];
       }
       const raw: RawOrder = {
         platform_order_id: platformOrderId,
-        ordered_at: await field("time", TIME_LABELS),
-        status: await field("status", STATUS_LABELS),
-        shop_name: await field("shop", SHOP_LABELS),
+        ordered_at: orderedAt,
+        status: statusText,
+        shop_name: shopName,
         items: items.every((item) => item.title === null) ? emptyItemList() : items,
         packages,
         observed_at: new Date().toISOString(),
@@ -481,9 +800,9 @@ export const ali1688Adapter: PlatformAdapter = {
           : ALI1688_STATUS_MAP[raw.status.trim()];
       if (
         mappedStatus === "SHIPPED" ||
-        mappedStatus === "COMPLETED" ||
-        mappedStatus === undefined ||
-        mappedStatus === null
+          mappedStatus === "COMPLETED" ||
+          mappedStatus === undefined ||
+          mappedStatus === null
       ) {
         unparsed.push({
           locator: row,

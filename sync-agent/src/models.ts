@@ -35,7 +35,9 @@ export const LIMITS = {
   max_orders_per_batch: 100,
   max_items_per_order: 50,
   max_packages_per_order: 20,
-  max_records: 500,
+  // One dry-run snapshot maps to one server batch. Keep this aligned with
+  // max_orders_per_batch until explicit batch sharding exists.
+  max_records: 100,
   min_records: 1,
   platform_order_id: 64,
   shop_name: 128,

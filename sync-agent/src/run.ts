@@ -36,6 +36,7 @@ import {
 } from "./snapshot.js";
 import { acquireLock, describeHolder } from "./state/lock.js";
 import { loadCursor, updateCursor } from "./state/cursor.js";
+import { reservePlatformAccess } from "./state/platform_access.js";
 import { postBatch, TransportError } from "./transport.js";
 
 export type BrowserLauncher = (profileDir: string) => Promise<SyncBrowser>;
@@ -178,6 +179,39 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
   const launcher = options.launcher ?? launchSyncBrowser;
   let browser: SyncBrowser | null = null;
   try {
+    let access;
+    try {
+      access = reservePlatformAccess(
+        config.state_dir,
+        platform,
+        accountKey,
+        "sync-once",
+        config.min_interval_minutes,
+      );
+    } catch {
+      logger.error({
+        command: "sync-once",
+        platform,
+        message: "platform access state is invalid; no browser was opened",
+        error_code: "STATE_INVALID",
+      });
+      return {
+        exitCode: 1,
+        report: buildReport("sync-once", platform, "dry-run", null, "DISABLED", "STATE_INVALID", startedAt, emptyCounts(), []),
+      };
+    }
+    if (!access.allowed) {
+      logger.warn({
+        command: "sync-once",
+        platform,
+        message: `platform page cooldown is active; retry after ${access.retry_after_seconds}s`,
+        error_code: "RATE_LIMITED",
+      });
+      return {
+        exitCode: 1,
+        report: buildReport("sync-once", platform, "dry-run", null, "DISABLED", "RATE_LIMITED", startedAt, emptyCounts(), []),
+      };
+    }
     browser = await launcher(profileDir);
     const page = browser.context.pages()[0] ?? (await browser.context.newPage());
     try {
@@ -217,6 +251,11 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
 
     const rawOrders: RawOrder[] = [];
     const warnings: string[] = [];
+    if (adapter.allowDetailNavigation === false) {
+      warnings.push(
+        `${platform} list-only safety mode: automatic order-detail and logistics navigation is disabled`,
+      );
+    }
     let pages = 0;
     let sawEmptyList = false;
     let rowsSeen = 0;
@@ -224,17 +263,28 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
     const seenOrderIds = new Set<string>();
     while (pages < config.max_pages && rawOrders.length < config.max_records) {
       const list = await adapter.collectVisibleOrders(page, { skip_order_ids: seenOrderIds });
-      const pageOrders: RawOrder[] = [...list.orders];
+      const pageCapacity = config.max_records - rawOrders.length;
+      const pageOrders: RawOrder[] = list.orders.slice(0, pageCapacity);
       for (const card of list.unparsed) {
+        if (pageOrders.length >= pageCapacity) break;
+        if (
+          adapter.allowDetailNavigation === false &&
+          !card.missing.includes("order_id")
+        ) {
+          warnings.push(`list-only mode kept order ${card.order_id ?? "unknown"} without detail enrichment`);
+          continue;
+        }
         let detail: RawOrder | null = null;
-        try {
-          detail = await adapter.readOrderDetail(page, card);
-        } catch (error) {
-          logger.warn({
-            command: "sync-once",
-            platform,
-            message: `detail read failed: ${(error as Error).message}`,
-          });
+        if (adapter.allowDetailNavigation !== false) {
+          try {
+            detail = await adapter.readOrderDetail(page, card);
+          } catch (error) {
+            logger.warn({
+              command: "sync-once",
+              platform,
+              message: `detail read failed: ${(error as Error).message}`,
+            });
+          }
         }
         const recheck = await checkPageState(page, adapter);
         if (recheck.status !== "OK") {
@@ -308,6 +358,7 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
         const statusText = raw.status === null ? "" : raw.status.trim();
         const mapped = statusText.length === 0 ? null : adapter.statusMap[statusText];
         if (
+          adapter.allowDetailNavigation !== false &&
           (mapped === "SHIPPED" || mapped === "COMPLETED") &&
           raw.packages.length === 0
         ) {
@@ -614,7 +665,7 @@ async function runCommit(options: RunOptions): Promise<RunOutcome> {
         const counts = { ...emptyCounts(), seen: batch.orders.length, valid: batch.orders.length };
         return {
           exitCode: 1,
-          report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "OK", "RATE_LIMITED", startedAt, counts, [], options.snapshotPath),
+          report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "RATE_LIMITED", startedAt, counts, [], options.snapshotPath),
         };
       }
     }

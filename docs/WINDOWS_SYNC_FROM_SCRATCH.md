@@ -128,6 +128,17 @@ ARRIVAL_LOG_DIR=logs
 Get-Content .env.local
 ```
 
+为 profile、配置、报告和诊断文件设置只允许当前 Windows 用户与 SYSTEM 访问的 NTFS ACL：
+
+```powershell
+$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+New-Item -ItemType Directory -Force .\state, .\logs | Out-Null
+icacls C:\ArrivalLedger\profiles /inheritance:r /grant:r "${currentUser}:(OI)(CI)F" /grant:r "*S-1-5-18:(OI)(CI)F"
+icacls .\state /inheritance:r /grant:r "${currentUser}:(OI)(CI)F" /grant:r "*S-1-5-18:(OI)(CI)F"
+icacls .\logs /inheritance:r /grant:r "${currentUser}:(OI)(CI)F" /grant:r "*S-1-5-18:(OI)(CI)F"
+icacls .\.env.local /inheritance:r /grant:r "${currentUser}:F" /grant:r "*S-1-5-18:F"
+```
+
 注意：
 
 - 当前故意不设置 `ARRIVAL_SYNC_WORKER_KEY`。
@@ -191,8 +202,10 @@ npm.cmd run login-check -- --platform pdd
 状态处理：
 
 - `NEEDS_LOGIN`：继续在浏览器内完成登录，再回 PowerShell 按 Enter。
-- `CAPTCHA_OR_BLOCKED`：立即停止，不连续重试，不绕过验证码。
-- `SCHEMA_CHANGED`：停止并记录状态。
+- `CAPTCHA_OR_BLOCKED`：`login-check` 不做任何自动操作，只保留当前可见窗口；如平台允许，
+  由你本人完成页面上的人工验证后回 PowerShell 按 Enter。无法通过时按 Ctrl+C，至少等待 12–24 小时，
+  不刷新、不连续重试、不绕过验证码。
+- 其他状态：停止并记录终端提示；`login-check` 只负责登录/验证状态，不解析订单结构。
 
 登录态只保存在：
 
@@ -215,6 +228,10 @@ npm.cmd run login-check -- --platform 1688
 3. 回到 PowerShell，按一次 Enter。
 4. 最终状态应为 `OK`。
 
+> `login-check`、`capture-page` 和 dry-run 共用同一账号的页面访问冷却（默认 15 分钟）。
+> 登录成功后不要立刻运行 dry-run，等 15 分钟；如果这个独立 profile 本来已经登录，跳过
+> `login-check`，只执行一次 dry-run，避免重复打开订单页。
+
 登录态只保存在：
 
 ```text
@@ -236,8 +253,8 @@ npm.cmd run sync-once -- --platform pdd --mode dry-run
 - `OK`：继续检查本地报告。
 - `SCHEMA_CHANGED`：安全停止，没有上传；不要运行 commit。
 - `NEEDS_LOGIN`：重新执行拼多多 `login-check`。
-- `CAPTCHA_OR_BLOCKED`：立即停止，不连续重试。
-- `NETWORK_ERROR`：检查网络后稍后再试。
+- `CAPTCHA_OR_BLOCKED`：dry-run 会立即关闭并熔断；不要刷新或立即重跑，人工处理只能通过单独的 `login-check`。
+- `DISABLED` / 配置错误：按终端固定错误码检查网络、URL 和本机配置；不要立即连续重跑平台页面。
 
 ## 11. 1688 `dry-run`（只读，不上传）
 
@@ -248,6 +265,17 @@ npm.cmd run sync-once -- --platform 1688 --mode dry-run
 ```
 
 状态判断与拼多多相同。
+
+1688 自动流程严格 list-only：只读取当前订单列表和正常分页，不点击“订单详情”“平台提醒”或
+“查看物流”。因此列表不展示运单号时，报告中的 `packages` 为空是预期结果，不代表解析失败。
+若返回 `SCHEMA_CHANGED` 且需要结构诊断，等待同一账号 15 分钟冷却后只执行一次：
+
+```powershell
+npm.cmd run capture-page -- --platform 1688
+```
+
+诊断文件位于 `state\diagnostics`，不含自由文本、原始 class、属性值或真实 URL 路径；分享前仍需
+在本机人工检查。命令不会进入详情、翻页或上传。
 
 ## 12. 只在 Windows 本机查看报告
 
@@ -272,11 +300,10 @@ notepad.exe $aliReport.FullName
 
 1. 网页订单数量与报告数量是否一致。
 2. 订单号、店铺、商品标题、规格、数量、状态是否正确。
-3. 已发货订单是否有正确的快递公司和运单号。
-4. 同一订单多个商品是否全部保留。
-5. 拆成多个包裹的订单是否保留所有运单号。
-6. 纯数字运单号是否正常保留。
-7. 是否混入其他订单、隐藏模板或无关页面内容。
+3. 同一订单多个商品是否全部保留。
+4. PDD：页面可见的快递公司、运单号和拆包是否完整，纯数字运单号是否保留。
+5. 1688：只核对列表字段；列表不展示物流时 `packages=[]` 合格，后续由待认领/人工绑定处理。
+6. 是否混入其他订单、隐藏模板或无关页面内容。
 
 ## 13. 把脱敏摘要发回
 
@@ -306,8 +333,8 @@ dry-run 状态：
 解析成功数：
 页数：
 多商品订单：正确 / 不正确 / 未发现样本
-多包裹订单：正确 / 不正确 / 未发现样本
-字段完整率大约：
+packages：有列表可见单号 / 空（允许）
+列表字段完整率大约：
 异常信息：
 ```
 
@@ -330,7 +357,7 @@ dry-run 状态：
 - 合并 `main`。
 - 部署新的同步后端。
 
-先完成两平台 `login-check + dry-run`，再根据真实页面结果决定下一步。
+先按页面访问冷却完成两平台 `login-check` 与 dry-run，再根据真实页面结果决定下一步。
 
 ## 常见错误
 
@@ -358,7 +385,8 @@ npx.cmd playwright install chromium
 
 ### `CAPTCHA_OR_BLOCKED`
 
-立即停止，不高频重试，不绕过验证码。
+dry-run/capture 会立即停止；不要高频重试或绕过验证码。需要人工处理时，等待冷却后单独运行
+`login-check`，只在可见官方页面中由账号持有人完成验证。
 
 ### `SCHEMA_CHANGED`
 

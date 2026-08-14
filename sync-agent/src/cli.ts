@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, accessSync, constants } from "node:fs";
 import { parseArgs } from "node:util";
 
 import { configFailures, loadConfig, maskKey } from "./config.js";
+import { runCapturePage } from "./capture_page.js";
 import { runLoginCheck as runLoginCheckFlow } from "./login_check.js";
 import { JsonLogger } from "./log.js";
 import { isPlatform, PLATFORMS, type Platform } from "./models.js";
@@ -20,6 +21,7 @@ const HELP = `arrival-ledger sync-agent (browser sync MVP)
 Usage:
   sync-agent doctor [--offline] [--platform <pdd|1688>]
   sync-agent login-check --platform <pdd|1688>
+  sync-agent capture-page --platform <pdd|1688>
   sync-agent sync-once --platform <pdd|1688> --mode dry-run
   sync-agent sync-once --platform <pdd|1688> --mode commit --from-report <snapshot> --yes
 
@@ -29,6 +31,9 @@ Commands:
   login-check  Open the visible browser on the platform order list and report
                login/captcha state. It never fills passwords or solves
                captchas; log in manually in the visible window.
+  capture-page Open the order list exactly once and save a private structural
+               diagnostic. It stores no raw HTML, free-form page text, screenshots,
+               URL query, cookies or form values; it never opens details.
   sync-once    dry-run reads visible orders once and saves a private local
                snapshot; commit uploads EXACTLY the snapshot bytes and never
                re-opens the browser. commit requires --yes.
@@ -217,6 +222,16 @@ async function runLoginCheckCommand(platform: Platform): Promise<number> {
   return outcome.exitCode;
 }
 
+async function runCapturePageCommand(platform: Platform): Promise<number> {
+  const { config, issues } = loadConfig();
+  const configExit = requireValidConfig(issues);
+  if (configExit !== null) return configExit;
+
+  const logger = new JsonLogger({ logDir: config.log_dir });
+  const outcome = await runCapturePage({ config, platform, logger });
+  return outcome.exitCode;
+}
+
 async function runSyncOnceCommand(
   platform: Platform,
   mode: "dry-run" | "commit",
@@ -271,6 +286,9 @@ async function main(): Promise<number> {
     case "login-check":
       if (platform === null) return fail(`--platform is required for login-check`);
       return runLoginCheckCommand(platform);
+    case "capture-page":
+      if (platform === null) return fail(`--platform is required for capture-page`);
+      return runCapturePageCommand(platform);
     case "sync-once": {
       if (platform === null) return fail(`--platform is required for sync-once`);
       if (values.mode === undefined) return fail(`--mode dry-run|commit is required for sync-once`);

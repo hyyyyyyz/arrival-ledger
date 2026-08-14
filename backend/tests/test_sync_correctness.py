@@ -183,7 +183,7 @@ def test_item_and_package_changes_update_in_place(
     second["orders"][0]["items"][0]["unit_price"] = "20.00"
     second["orders"][0]["items"][0]["sku_text"] = "规格:加大"
     second["orders"][0]["packages"] = [
-        {"courier": "顺丰速运", "tracking_no": "SF515407643541", "status": "DELIVERED"}
+        {"courier": "顺丰速运", "tracking_no": "SF1234567890000", "status": "DELIVERED"}
     ]
     response = post_batch(client, second, sync_headers)
     assert response.status_code == 200

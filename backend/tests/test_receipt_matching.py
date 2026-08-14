@@ -33,7 +33,7 @@ def test_receipt_order_match_by_tracking(
     assert post_batch(authenticated_client, payload, sync_headers).status_code == 200
 
     receipt = upload_receipt(
-        authenticated_client, "SF515407643541", "receipt-match-0001", jpeg_bytes
+        authenticated_client, "SF1234567890000", "receipt-match-0001", jpeg_bytes
     )
     matches = receipt["order_matches"]
     assert len(matches) == 1
@@ -42,7 +42,7 @@ def test_receipt_order_match_by_tracking(
     assert match["platform_order_id"] == "260813-0001"
     assert match["shop_name"] == "测试店铺"
     assert match["courier"] == "顺丰速运"
-    assert match["tracking_no"] == "SF515407643541"
+    assert match["tracking_no"] == "SF1234567890000"
     assert len(match["items"]) == 1
     assert match["items"][0]["title"] == "示例商品"
     assert match["items"][0]["quantity"] == "2"
@@ -69,7 +69,7 @@ def test_cross_platform_tracking_matches_all_orders(
     assert post_batch(authenticated_client, ali, sync_headers).status_code == 200
 
     receipt = upload_receipt(
-        authenticated_client, "SF515407643541", "receipt-xplat-0001", jpeg_bytes
+        authenticated_client, "SF1234567890000", "receipt-xplat-0001", jpeg_bytes
     )
     matches = receipt["order_matches"]
     assert len(matches) == 2
@@ -85,7 +85,7 @@ def test_single_match_has_exact_confidence(
     assert post_batch(authenticated_client, payload, sync_headers).status_code == 200
 
     receipt = upload_receipt(
-        authenticated_client, "SF515407643541", "receipt-exact-0001", jpeg_bytes
+        authenticated_client, "SF1234567890000", "receipt-exact-0001", jpeg_bytes
     )
     matches = receipt["order_matches"]
     assert len(matches) == 1
@@ -103,7 +103,7 @@ def test_multi_item_order_match_lists_all_items(
     assert post_batch(authenticated_client, payload, sync_headers).status_code == 200
 
     receipt = upload_receipt(
-        authenticated_client, "SF515407643541", "receipt-multi-item-0001", jpeg_bytes
+        authenticated_client, "SF1234567890000", "receipt-multi-item-0001", jpeg_bytes
     )
     match = receipt["order_matches"][0]
     assert len(match["items"]) == 2
@@ -122,7 +122,7 @@ def test_platform_signed_status_does_not_auto_receive(
         assert count == 0
 
     receipt = upload_receipt(
-        authenticated_client, "SF515407643541", "receipt-signed-0001", jpeg_bytes
+        authenticated_client, "SF1234567890000", "receipt-signed-0001", jpeg_bytes
     )
     assert receipt["evidence_status"] == "READY"
     with authenticated_client.app.state.database.connect() as connection:
@@ -134,7 +134,7 @@ def test_matches_refresh_after_later_sync(
     authenticated_client: TestClient, sync_headers: dict[str, str], jpeg_bytes: bytes
 ) -> None:
     receipt = upload_receipt(
-        authenticated_client, "SF515407643541", "receipt-late-match-0001", jpeg_bytes
+        authenticated_client, "SF1234567890000", "receipt-late-match-0001", jpeg_bytes
     )
     assert receipt["order_matches"] == []
 

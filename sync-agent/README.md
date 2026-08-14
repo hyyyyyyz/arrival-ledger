@@ -13,11 +13,15 @@
 - 本机配置加载与脱敏展示，配置错误 fail-closed（`src/config.ts`）；
 - 平台游标按 `(platform, account_key)` 原子读写、单实例锁、脱敏 JSON Lines 日志（`src/state/`、`src/log.ts`）；
 - 内部批次传输客户端（`src/transport.ts`：401/403/409/422 不重试；429/5xx 有限退避；`Retry-After ≥ 60s` 直接放弃）；
-- `doctor --offline`、`login-check`、`sync-once --mode dry-run|commit --from-report`（`src/cli.ts`）；
+- `doctor --offline`、`login-check`、`capture-page`、`sync-once --mode dry-run|commit --from-report`（`src/cli.ts`）；
 - 同步编排 `src/run.ts`：dry-run 不上传并落盘私有 snapshot；commit 只上传 snapshot 字节、
   绝不重新打开网页；`--yes` 缺失、快照完整性校验失败、超过 30 分钟 TTL、或快照 cursor_before
-  与当前游标不一致都会拒绝并要求重新 dry-run；空列表不覆盖服务器数据；低频限制（默认 15 分钟）；
-- 1688 买家订单页适配器（表头列映射 + 行内标签两种解析模式）；
+  与当前游标不一致都会拒绝并要求重新 dry-run；空列表不覆盖服务器数据；所有会打开平台页面的
+  `login-check`、`capture-page`、dry-run 共用按账号冷却（默认 15 分钟，预留在浏览器启动前落盘）；
+- 1688 买家订单页适配器（旧表格 + 新版语义卡片）；1688 自动同步固定为 list-only，
+  不点击“订单详情”“平台提醒”“查看物流”等动作入口；
+- 单次 `capture-page` 诊断：只加载一页，保存固定标签、捕获内匿名 class、ARIA 名称和结构标记，不保存原始 HTML、
+  自由文本、截图、Cookie、表单值、URL query，也不翻页或进入详情；
 - 拼多多订单页适配器（卡片式结构：标签提取 + 结构化 class 兜底，`加载更多` 分页）；
 - 跨语言契约锁定：TS 序列化 golden fixture 与后端 pytest 直接互验（`tests/fixtures/batch_contract.json`）；
 - 契约级端到端测试：真实 HTTP 模拟服务器验证上传、幂等重放、409、401、429 与游标推进。
@@ -51,6 +55,7 @@ npm run doctor -- --platform pdd                # 只检查 pdd 一项
 npm run login-check -- --platform 1688          # 打开可见浏览器检查登录/风控状态；
                                                 # 未登录时保持窗口，按 Enter 后重新检测
 npm run login-check -- --platform pdd
+npm run capture-page -- --platform 1688        # 一次加载、零详情点击的脱敏结构诊断
 npm run sync-once -- --platform 1688 --mode dry-run
 npm run sync-once -- --platform pdd --mode dry-run
 npm run sync-once -- --platform pdd --mode commit --from-report .\state\snapshot-pdd-pdd-main-<batch_id>.json --yes
@@ -86,38 +91,45 @@ ARRIVAL_LOG_DIR=logs
 
 - 安全下限/上限：`SYNC_PAGE_DELAY_MS` 最小 1500（不可关闭）、`SYNC_MAX_PAGES` 1–5、
   `SYNC_MIN_INTERVAL_MINUTES` 最小 1（定时同步不允许 0）；默认值：`SYNC_MAX_PAGES=5`、
-  `SYNC_MAX_RECORDS=30`（上限 500）、`SYNC_PAGE_DELAY_MS=2500`、`SYNC_MIN_INTERVAL_MINUTES=15`；
+  `SYNC_MAX_RECORDS=30`（上限 100，与单批接收上限一致）、`SYNC_PAGE_DELAY_MS=2500`、`SYNC_MIN_INTERVAL_MINUTES=15`；
+- 平台页面冷却在浏览器启动前预留；进程崩溃也不会立刻重试。同一账号刚执行完 `login-check`
+  时，需等待冷却结束才能 dry-run；若 profile 已登录，应直接执行一次 dry-run，避免重复打开订单页；
 - 游标与锁按 `(platform, account_key)` 隔离；`*_ACCOUNT_KEY` 强制规范化为小写，且两个平台必须不同；
   切换账号时修改对应 `*_ACCOUNT_KEY` 即可，不会复用旧账号游标；
 - 配置值“设置了但非法”会直接报错退出（fail-closed），不会静默回退默认值；
 - PDD 与 1688 的 profile 目录必须不同；未显式配置时，两平台默认使用当前 `sync-agent` 目录下的 `profiles/<platform>`；
-- worker key 只以明文保存在 Windows 本机受 ACL 保护的 `.env.local`，日志和输出中始终脱敏；
+- worker key 的明文只保存在 Windows 本机受 ACL 保护的 `.env.local` 和服务器受限 `.env`；
+  数据库只保存其摘要，日志和输出中始终脱敏；
 - 公网隧道使用时 `ARRIVAL_API_BASE_URL` 必须为 `https://`。
 
 ## 目录
 
 ```text
 src/
-  cli.ts          doctor / login-check / sync-once 命令入口
+  cli.ts          doctor / login-check / capture-page / sync-once 命令入口
   config.ts       本机配置（fail-closed），不含密码/Cookie
   models.ts       统一订单与批次类型、校验
   normalize.ts    纯函数规范化
   transport.ts    到货管家内部批次接口客户端（响应校验、有限重试）
   snapshot.ts     dry-run 私有快照（payload hash 完整性校验，30 分钟 TTL）
   login_check.ts  手工登录等待与状态复检流程
+  capture_page.ts 单次列表结构诊断流程（零详情/零分页）
   run.ts          dry-run / commit 编排、游标推进、低频限制
   log.ts          JSON Lines 日志（自动脱敏）
   state/
     redact.ts     敏感字段打码
     lock.ts       单实例锁（按 platform + account_key 互斥）
     cursor.ts     游标原子读写（按 platform + account_key 隔离）
+    platform_access.ts 平台页面访问预留与按账号冷却
   browser/
     context.ts    persistent headed context
     dom.ts        标签提取 + 结构化兜底字段提取
     guards.ts     登录/验证码/页面状态守卫
+  diagnostics/
+    dom_capture.ts 只保留结构证据的严格清洗器
   adapters/
     base.ts       适配器契约
-    ali1688.ts    1688 只读适配器（表头列映射 + 标签提取）
+    ali1688.ts    1688 只读适配器（旧表格 + 新语义卡片，默认 list-only）
     pdd.ts        拼多多只读适配器（标签提取 + class 兜底）
   extract/
     text.ts       标签/文本纯函数
@@ -131,6 +143,8 @@ tests/            脱敏 fixture 与单元/适配器测试
 
 - `state\report-*.json` 与 `state\snapshot-*.json` 包含**真实订单号、商品标题和运单号**；
   这些文件只属于本机，严禁分享、截图外发或提交 Git（已被 .gitignore 排除）。
+- `state\diagnostics\structure-*.json` 不含自由文本、原始 class、属性值或 URL 路径，但分享前仍应
+  人工检查；POSIX 使用 `0700/0600`，Windows 必须按安装教程用 NTFS ACL 限制 `state`/`logs`。
 - `logs\sync-agent.jsonl` 已自动脱敏，但报告文件是明文业务数据，处理时按真实订单对待。
 
 ## 安全红线
@@ -139,4 +153,6 @@ tests/            脱敏 fixture 与单元/适配器测试
 - 密码、Cookie、登录态、profile 永远只留在 Windows 本机，不上传、不提交 Git、不写日志；
 - 日志采用 JSON Lines 并自动打码 Authorization/手机号/长数字串/敏感键名；
 - 同一平台同一 profile 同时只允许一个同步进程（lock 文件）；
-- 只读、低频、手动确认；出现验证码/风控必须停止并人工处理。
+- 只读、低频、手动确认；`login-check` 只保留可见窗口供用户本人处理验证，任何 dry-run/capture
+  检测到验证码或风控都会立即熔断，不点击、不刷新、不重试。
+- 1688 出现“系统繁忙”“访问受限”“操作过于频繁”时按风控熔断；程序不刷新、不重试。

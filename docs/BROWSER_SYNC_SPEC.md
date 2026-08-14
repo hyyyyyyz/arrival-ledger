@@ -1,8 +1,8 @@
 # 浏览器自动化同步技术规格（Browser Sync MVP）
 
-版本：1.0（2026-08-13）
+版本：1.4（2026-08-14）
 适用仓库：`arrival-ledger`
-状态：实现前冻结的技术约定
+状态：MVP 已实现，等待 Windows 真机手工验收
 
 ## 1. 目的与边界
 
@@ -24,7 +24,7 @@
 ```text
 Windows 10/11（闲置电脑）
   ├─ Node.js 20 LTS + TypeScript 同步程序
-  ├─ Playwright + 可见 Chrome
+  ├─ Playwright + 可见 Chromium
   ├─ C:\ArrivalLedger\profiles\pdd       # 拼多多独立登录态
   ├─ C:\ArrivalLedger\profiles\1688      # 1688 独立登录态
   ├─ C:\ArrivalLedger\state               # 游标、批次、锁
@@ -59,13 +59,14 @@ C:\ArrivalLedger\profiles\1688
 npm run doctor
 npm run login-check -- --platform pdd
 npm run login-check -- --platform 1688
+npm run capture-page -- --platform 1688
 npm run sync-once -- --platform pdd --mode dry-run
 npm run sync-once -- --platform 1688 --mode dry-run
 npm run sync-once -- --platform pdd --mode commit --from-report .\state\snapshot-pdd-pdd-main-<batch_id>.json --yes
 ```
 
 `sync-once` 运行时浏览器保持可见（始终 headed，无隐藏运行模式）；用户能看到当前页面和进度。
-首次同步默认最近 90 天、最多 30 条，允许通过参数回补到 500 条。每个平台先手动跑通 20–30 条
+首次同步从平台当前订单列表的最新页开始，默认最多 30 条；当前单次快照与服务器单批上限均为 100 条。每个平台先手动跑通 20–30 条
 真实订单，再考虑 Task Scheduler。
 
 本机配置只保存非敏感连接信息和路径，例如：
@@ -85,11 +86,11 @@ SYNC_PAGE_DELAY_MS=2500
 ### MVP-1 完成条件
 
 1. 两个独立 profile 均可由用户手工登录并通过 `login-check`。
-2. PDD、1688 各成功读取至少 20 条真实订单，字段完整率不低于 95%。
+2. PDD、1688 各成功读取至少 20 条真实订单；订单号、商品、规格、数量、店铺等列表字段完整率不低于 95%。
 3. 同一批次重复运行不新增重复订单、商品行或包裹。
-4. 至少一个带运单号的订单能在手机收货页面按运单号显示商品。
+4. PDD 至少一个带运单号的订单能在手机收货页面显示商品；1688 列表没有运单号时允许进入待认领并人工绑定。
 5. 登录过期、验证码、页面改版均产生明确状态，不静默写入错误数据。
-6. 服务器数据库/日志中不存在密码、Cookie、worker token、完整地址和原始 HTML（worker token 只以明文存在于 Windows 受 ACL 保护的本机配置）。
+6. 服务器数据库/日志中不存在密码、Cookie、完整地址和原始 HTML；worker token 的明文只存在于服务器受限 `.env` 与 Windows 受 ACL 保护的 `.env.local`，数据库只保存摘要。
 7. 关闭 Windows 同步程序后，P0 收货页面仍可正常使用。
 
 `dry-run` 只读取、解析、校验并把完整记录集保存为本地私有 snapshot（含 payload hash），不能写服务器；
@@ -106,7 +107,8 @@ sync-agent/
   README.md
   package.json / package-lock.json / tsconfig.json
   src/
-    cli.ts                 # doctor/login-check/sync-once
+    cli.ts                 # doctor/login-check/capture-page/sync-once
+    capture_page.ts        # 单次、只读、严格脱敏的结构诊断
     config.ts              # 本机配置，不含密码/Cookie
     models.ts              # 统一订单与批次类型
     run.ts                 # dry-run/commit 编排
@@ -115,6 +117,8 @@ sync-agent/
     browser/
       context.ts          # persistent headed context
       guards.ts           # 登录/验证码/结构守卫
+    diagnostics/
+      dom_capture.ts      # 只保存匿名结构，不保存原始 HTML/文本/URL
     adapters/
       base.ts
       pdd.ts
@@ -128,7 +132,7 @@ sync-agent/
       cursor.ts
       lock.ts
       redact.ts
-    report.ts
+      platform_access.ts  # 打开平台页前的账号级冷却预留
   tests/
     fixtures/pdd/
     fixtures/1688/
@@ -146,10 +150,14 @@ sync-agent/
 ```ts
 interface PlatformAdapter {
   readonly platform: "pdd" | "1688";
+  readonly orderListUrl: string;
+  readonly statusMap: StatusMap;
+  readonly allowDetailNavigation?: boolean;
   openOrders(page: Page, window: SyncWindow): Promise<void>;
   detectLogin(page: Page): Promise<LoginState>;
   detectBlock(page: Page): Promise<BlockState>;
-  collectVisibleOrders(page: Page): Promise<RawOrder[]>;
+  collectVisibleOrders(page: Page, options?: CollectOptions): Promise<OrderListState>;
+  readOrderDetail(page: Page, card: UnparsedCard): Promise<RawOrder | null>;
   advancePage(page: Page): Promise<boolean>;
 }
 ```
@@ -201,14 +209,16 @@ interface PlatformAdapter {
 
 ### 5.3 页面读取策略
 
-1. 打开订单列表并等待页面稳定；
-2. 先调用 `detect_login` 和 `detect_block`；
-3. 读取当前可见订单卡片/行；
-4. 按字段标签、语义角色和相对 DOM 结构解析，不依赖随机 CSS 类名；
-5. 记录当前页面已观察到的订单 ID，避免同页重复；
-6. 通过“下一页”或明确的加载更多控件推进；最多处理配置的页数/条数；
-7. 若页面结构无法确认，返回 `SCHEMA_CHANGED`，保存本地脱敏诊断，不猜字段；
-8. 每完成一个页面就本地落盘，网络上传失败可从批次继续。
+1. 在浏览器启动前按 `(platform, account_key)` 预留访问并检查冷却；默认 15 分钟内不再次打开同一账号页面；
+2. 打开订单列表并等待页面稳定；
+3. 先调用 `detectLogin` 和 `detectBlock`；
+4. 读取当前可见订单卡片/行；
+5. 按字段标签、语义角色和相对 DOM 结构解析，不依赖随机 CSS 类名；
+6. 记录当前页面已观察到的订单 ID，避免同页重复；
+7. 通过“下一页”或明确的加载更多控件推进；最多处理配置的页数/条数；
+8. 若页面结构无法确认，立即返回 `SCHEMA_CHANGED`，不猜字段；需要诊断时等待页面访问冷却，
+   再由用户手工运行一次 `capture-page`，程序不会在失败后自动重开页面；
+9. 完整批次只在本地保存一次；commit 复用该快照，不重新访问平台。
 
 不要以“找到任意 18 位数字”作为订单号；订单 ID、商品 ID、运单号必须依据字段标签和页面上下文识别。面单匹配只使用 `packages[].tracking_no`。
 
@@ -219,12 +229,13 @@ interface PlatformAdapter {
 | 平台 | 列表阶段 | 详情阶段 | 必须抽取 |
 |---|---|---|---|
 | PDD | 已登录订单列表、状态筛选、分页/加载更多 | 必要时打开订单详情再返回列表 | 订单号、状态、下单/更新时间、店铺、商品标题/规格/数量、可见快递公司/运单号 |
-| 1688 | 已登录买家订单列表、分页 | 必要时打开订单详情再返回列表 | 订单号、状态、下单/更新时间、供应商/店铺、商品标题/规格/数量、可见物流公司/运单号 |
+| 1688 | 已登录买家订单列表、分页 | **禁止自动进入详情/物流/平台提醒**；默认 list-only | 订单号、状态、下单/更新时间、供应商/店铺、商品标题/规格/数量；列表没有运单号时保留空 `packages` |
 
 适配器必须：
 
 1. 以页面标签、表格语义、ARIA role/label 和稳定 `data-*` 属性为首选；随机 CSS 类名只能作为最后一层且必须有 fixture 测试；
-2. 进入详情前保存列表页订单 ID，返回后校验仍在同一页，避免把详情内容错配到下一条订单；
+2. 仅当适配器明确设置 `allowDetailNavigation=true` 时才允许进入详情；进入前保存列表页订单 ID，
+   返回后校验仍在同一页，避免把详情内容错配到下一条订单；1688 必须保持 `false`；
 3. 一个订单出现多个包裹时全部保留；没有运单号时写空数组，不伪造单号；
 4. 订单号、商品 ID、规格 ID、运单号先做字符串清洗，再做长度/字符集校验；
 5. 页面显示“暂无订单”时先确认账号和筛选条件，不得用空结果覆盖服务器已有订单；
@@ -251,7 +262,7 @@ interface PlatformAdapter {
 - 同一平台同一 profile 同时只能有一个同步进程，使用 lock 文件；
 - 网络错误最多做有限次退避重试（例如 2 次），不能无限刷新页面；
 - 出现验证码、滑块、异常登录或风控提示立即熔断，当次不再重试；
-- 连续两次解析失败进入 `SCHEMA_CHANGED`，等待人工检查；
+- 任一可见订单无法可靠解析即进入 `SCHEMA_CHANGED`，等待人工检查，不提交部分批次；
 - 不因为订单列表变少就删除服务器已有订单；
 - 只有服务器确认批次成功后才推进 `last_cursor`；
 - 每次运行生成本地报告，包含读取数、有效数、跳过数、上传数、错误数和状态。
@@ -315,7 +326,8 @@ Idempotency-Key: <batch_id>
 - 限制请求体大小、批次订单数和请求频率；
 - 记录 `worker_id`、平台、批次、时间和结果，不记录 Authorization 原文；
 - 公网使用时必须 HTTPS；局域网 HTTP 只用于首次测试且不得把端口转发公网；
-- 原始页面、截图、Cookie 和密码不上传；解析失败证据只保存在 Windows 本地且默认自动删除。
+- 原始页面、截图、Cookie 和密码不上传；手工执行 `capture-page` 产生的严格脱敏结构诊断只保存在
+  Windows 本地。目前不承诺自动清理，使用者应在问题修复后人工删除 `state/diagnostics/` 中的旧文件。
 
 建议响应码：`401` worker key 缺失/无效，`403` key 已撤销或 scope 不允许，`409` 批次内容与已记录的同一 `batch_id` 不一致，`413` 超过大小/条数限制，`422` 字段校验失败，`429` 频率限制，`5xx` 服务暂时不可用。客户端只对网络错误和 `5xx/429` 做有限退避；`401/403/409/422` 直接停止并显示人工可读错误。
 
@@ -408,7 +420,10 @@ sync_batches(
 
 本地日志使用 JSON Lines，字段包括时间、平台、worker、batch、状态、计数和错误码。以下内容一律打码或禁止记录：密码、Cookie、Authorization、完整手机号、完整地址、原始 HTML、整页截图、支付信息。
 
-页面改版诊断默认只保存：URL 主机名、标题、元素计数、缺失字段名称和脱敏文本片段。若必须保存截图供人工修复，用户显式执行 `--save-debug` 后才保存，7 天自动删除，且不得提交 Git。
+页面改版诊断使用 `capture-page`：只保存平台 canonical origin、固定的 redacted pathname、可见元素层级、
+捕获内局部编号的 class、白名单 role/属性名称和固定 UI 标记。它不保存 raw HTML、标题、自由文本、
+原始 class、属性值、截图、Cookie、storage、URL path 参数或 query。诊断命令固定单页、零详情点击、
+零分页、零上传；POSIX 文件权限为目录 `0700`/文件 `0600`，Windows 依赖安装教程设置的 NTFS ACL。
 
 ## 10. 后续定时任务（不属于 MVP-1）
 
@@ -444,7 +459,7 @@ MVP-1 手动同步稳定后，才配置 Windows Task Scheduler：
 
 ## 12. 版本演进
 
-- MVP-1：手动、可见、单平台/全平台 `sync-once`；
+- MVP-1：手动、可见、每次显式指定一个平台的 `sync-once`；
 - MVP-2：批次历史、预览确认、PDD/1688 字段差异修复；
 - MVP-3：Task Scheduler 低频增量同步和失败通知；
 - 后续：仅在官方许可、稳定性和实际收益明确时评估其他接入方式。官方 API 不再列入当前实现计划。

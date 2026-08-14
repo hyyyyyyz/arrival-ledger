@@ -9,7 +9,12 @@ import { ali1688Adapter } from "../src/adapters/ali1688.js";
 import { pddAdapter } from "../src/adapters/pdd.js";
 import type { UnparsedCard } from "../src/adapters/base.js";
 import { checkPageState } from "../src/browser/guards.js";
-import { sameListUrl } from "../src/browser/detail.js";
+import {
+  normalizeVisibleOrderId,
+  orderIdFromUrl,
+  sameListUrl,
+  sameListUrlIgnoringQueryKeys,
+} from "../src/browser/detail.js";
 
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 
@@ -50,13 +55,22 @@ async function open1688List(fixture: string): Promise<void> {
   await page.goto(ALI1688_LIST_URL);
 }
 
-async function openPddList(fixture: string): Promise<void> {
+async function openPddList(
+  fixture: string,
+  detailFixture = "detail.html",
+): Promise<void> {
   await page.context().unrouteAll();
   await page.context().route("**/orders.html", async (route) => {
     await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await fixtureBody(`pdd/${fixture}`) });
   });
   await page.context().route("**/detail.html*", async (route) => {
     await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await fixtureBody("pdd/detail.html") });
+  });
+  await page.context().route("**/order.html*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: await fixtureBody(`pdd/${detailFixture}`) });
+  });
+  await page.context().route("**/goods_express.html*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: "<!doctype html><html><body><main>物流轨迹</main></body></html>" });
   });
   await page.goto(PDD_LIST_URL);
 }
@@ -144,6 +158,58 @@ describe("order detail navigation over visible DOM", () => {
     expect(list.unparsed).toHaveLength(1);
     const detail = await pddAdapter.readOrderDetail(page, list.unparsed[0]!);
     expect(detail).toBeNull();
+  });
+
+  it("binds a semantic mobile card to its order_sn detail", async () => {
+    await openPddList("order-list-mobile-semantic.html");
+    const state = await checkPageState(page, pddAdapter);
+    expect(state.status).toBe("OK");
+    const list = await pddAdapter.collectVisibleOrders(page);
+    expect(list.rows_seen).toBe(1);
+    expect(list.recognized).toBe(0);
+    expect(list.unparsed).toHaveLength(1);
+    expect(list.unparsed[0]?.summary?.items[0]?.title).toBe("测试商品丙");
+    expect(list.unparsed[0]?.summary?.items[0]?.sku_text).toBe("红色");
+    expect(list.unparsed[0]?.summary?.items[0]?.quantity).toBe("x1");
+    const detail = await pddAdapter.readOrderDetail(page, list.unparsed[0]!);
+    expect(detail).not.toBeNull();
+    expect(detail?.platform_order_id).toBe("260813-8800000002");
+    expect(detail?.shop_name).toBe("测试店铺");
+  });
+
+  it("rejects the same shop when the detail product does not match", async () => {
+    await openPddList("order-list-mobile-semantic.html", "detail-wrong-product.html");
+    const list = await pddAdapter.collectVisibleOrders(page);
+    expect(list.unparsed).toHaveLength(1);
+    const detail = await pddAdapter.readOrderDetail(page, list.unparsed[0]!);
+    expect(detail).toBeNull();
+  });
+
+  it("does not bind an unrelated detail when the expected title only appears in recommendations", async () => {
+    await openPddList(
+      "order-list-mobile-semantic.html",
+      "detail-wrong-product-with-recommendation.html",
+    );
+    const list = await pddAdapter.collectVisibleOrders(page);
+    expect(list.unparsed).toHaveLength(1);
+    const detail = await pddAdapter.readOrderDetail(page, list.unparsed[0]!);
+    expect(detail).toBeNull();
+  });
+
+  it("reads a PDD tracking number from the visible logistics link", async () => {
+    await openPddList("order-list-mobile-semantic.html", "detail-linked-logistics.html");
+    const list = await pddAdapter.collectVisibleOrders(page);
+    const detail = await pddAdapter.readOrderDetail(page, list.unparsed[0]!);
+    expect(detail).not.toBeNull();
+    expect(detail?.packages).toEqual([
+      { courier: null, tracking_no: "SF-20260813-0002", status: null },
+    ]);
+    expect(detail?.detail_logistics).toEqual({
+      area_found: true,
+      rows_seen: 1,
+      rows_parsed: 1,
+      unparsed_rows: 0,
+    });
   });
 
   it("fails closed when the detail link order id does not match the detail page (pdd)", async () => {
@@ -238,6 +304,14 @@ describe("order detail navigation over visible DOM", () => {
 });
 
 describe("sameListUrl", () => {
+  it("extracts PDD order_sn query identifiers", () => {
+    expect(orderIdFromUrl("https://mobile.yangkeduo.com/order.html?order_sn=260813-8800000002"))
+      .toBe("260813-8800000002");
+  });
+
+  it("normalizes the visible PDD copy action suffix", () => {
+    expect(normalizeVisibleOrderId("260813-8800000002\n复制")).toBe("260813-8800000002");
+  });
   const base = "https://air.1688.com/app/ctf-page/trade-order-list/buyer-order-list.html";
   it("requires origin, pathname, query and hash to match", () => {
     expect(sameListUrl(base, base)).toBe(true);
@@ -245,5 +319,23 @@ describe("sameListUrl", () => {
     expect(sameListUrl(`${base}?page=2&status=shipped`, `${base}?page=2&status=paid`)).toBe(false);
     expect(sameListUrl(`${base}#x`, `${base}#y`)).toBe(false);
     expect(sameListUrl(base, "https://mobile.yangkeduo.com/orders.html")).toBe(false);
+  });
+
+  it("allows only the known PDD return-state query keys", () => {
+    const list = "https://mobile.yangkeduo.com/orders.html";
+    expect(
+      sameListUrlIgnoringQueryKeys(
+        list,
+        `${list}?page_id=orders&order_index=0&is_back=1`,
+        ["page_id", "order_index", "is_back"],
+      ),
+    ).toBe(true);
+    expect(
+      sameListUrlIgnoringQueryKeys(
+        `${list}?status=shipped`,
+        `${list}?status=all&page_id=orders`,
+        ["page_id", "order_index", "is_back"],
+      ),
+    ).toBe(false);
   });
 });

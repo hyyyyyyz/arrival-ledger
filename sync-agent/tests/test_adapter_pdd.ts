@@ -42,6 +42,32 @@ describe("pdd adapter with sanitized fixtures", () => {
     expect(state.status).toBe("NEEDS_LOGIN");
   });
 
+  it("does not confuse an SMS login code with a captcha block", async () => {
+    await page.setContent(`
+      <main>
+        <h1>手机号登录</h1>
+        <input type="text" aria-label="手机号" />
+        <input type="text" aria-label="验证码" />
+        <button>获取验证码</button>
+        <button>立即登录</button>
+      </main>
+    `);
+    const state = await checkPageState(page, pddAdapter);
+    expect(state.status).toBe("NEEDS_LOGIN");
+  });
+
+  it("ignores a hidden security iframe left in the order page", async () => {
+    await openFixture("order-list.html");
+    await page.evaluate(() => {
+      const iframe = document.createElement("iframe");
+      iframe.src = "data:text/html,captcha-punish";
+      iframe.style.display = "none";
+      document.body.append(iframe);
+    });
+    await page.waitForTimeout(50);
+    expect((await checkPageState(page, pddAdapter)).status).toBe("OK");
+  });
+
   it("detects captcha/risk blocks", async () => {
     await openFixture("blocked.html");
     const state = await checkPageState(page, pddAdapter);

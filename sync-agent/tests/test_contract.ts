@@ -38,7 +38,7 @@ function contractBatch(): SyncBatch {
         packages: [
           {
             courier: "顺丰速运",
-            tracking_no: "SF515407643541",
+            tracking_no: "SF1234567890000",
             status: null,
           },
         ],

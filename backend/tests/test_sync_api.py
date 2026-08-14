@@ -47,7 +47,7 @@ def batch_payload(batch_id: str = "b0000000-0000-4000-8000-000000000001", **over
                     }
                 ],
                 "packages": [
-                    {"courier": "顺丰速运", "tracking_no": "SF515407643541", "status": "SHIPPED"}
+                    {"courier": "顺丰速运", "tracking_no": "SF1234567890000", "status": "SHIPPED"}
                 ],
                 "observed_at": "2026-08-13T02:00:10.000Z",
             }
@@ -109,7 +109,7 @@ def test_sync_batch_accepts_and_ingests(
         assert items[0]["quantity"] == "2"
         packages = connection.execute("SELECT * FROM packages").fetchall()
         assert len(packages) == 1
-        assert packages[0]["tracking_no_normalized"] == "SF515407643541"
+        assert packages[0]["tracking_no_normalized"] == "SF1234567890000"
         links = connection.execute("SELECT * FROM package_order_links").fetchall()
         assert len(links) == 1
         batches = connection.execute("SELECT * FROM sync_batches").fetchall()

@@ -7,6 +7,8 @@ import { dirname } from "node:path";
 import { chromium } from "playwright";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { ali1688Adapter } from "../src/adapters/ali1688.js";
+import type { PlatformAdapter } from "../src/adapters/base.js";
 import type { SyncBrowser } from "../src/browser/context.js";
 import { loadConfig } from "../src/config.js";
 import { JsonLogger } from "../src/log.js";
@@ -15,6 +17,12 @@ import { runSyncOnce } from "../src/run.js";
 
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 const createdDirs: string[] = [];
+const aliDetailTestAdapter: PlatformAdapter = {
+  ...ali1688Adapter,
+  // Production keeps this false. These fixture-only tests retain coverage of
+  // the dormant detail parser without exposing an automatic CLI path.
+  allowDetailNavigation: true,
+};
 
 function tempCwd(): string {
   const dir = mkdtempSync(join(tmpdir(), "sync-agent-fc-"));
@@ -64,6 +72,7 @@ async function assertFailedClosed(
     confirm: false,
     logger: new JsonLogger({ logDir: null }),
     launcher,
+    adapter: platform === "1688" ? aliDetailTestAdapter : undefined,
   });
   expect(outcome.exitCode).toBe(1);
   expect(outcome.report.status).toBe("SCHEMA_CHANGED");
@@ -130,6 +139,7 @@ describe("detail logistics completeness is not masked by list logistics", () => 
       confirm: false,
       logger: new JsonLogger({ logDir: null }),
       launcher: shippedOneTrackingLauncher("1688/detail.html"),
+      adapter: aliDetailTestAdapter,
     });
     expect(outcome.exitCode).toBe(0);
     const snapshot = JSON.parse(
@@ -155,6 +165,7 @@ describe("detail logistics completeness is not masked by list logistics", () => 
       confirm: false,
       logger: new JsonLogger({ logDir: null }),
       launcher: shippedOneTrackingLauncher("1688/detail-partial-logistics.html"),
+      adapter: aliDetailTestAdapter,
     });
     expect(outcome.exitCode).toBe(1);
     const stateDir = join(cwd, "state");
@@ -191,6 +202,7 @@ describe("wrapper-less detail logistics parsing", () => {
       confirm: false,
       logger: new JsonLogger({ logDir: null }),
       launcher,
+      adapter: platform === "1688" ? aliDetailTestAdapter : undefined,
     });
     expect(outcome.exitCode).toBe(0);
     const snapshot = JSON.parse(

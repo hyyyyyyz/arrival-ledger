@@ -13,6 +13,7 @@
     "test": "vitest run",
     "doctor": "npm run build --silent && node dist/cli.js doctor",
     "login-check": "npm run build --silent && node dist/cli.js login-check",
+    "capture-page": "npm run build --silent && node dist/cli.js capture-page",
     "sync-once": "npm run build --silent && node dist/cli.js sync-once"
   },
   "dependencies": {

@@ -11,6 +11,7 @@ import type { JsonLogger } from "./log.js";
 import type { Platform } from "./models.js";
 import type { BrowserLauncher } from "./run.js";
 import { acquireLock, describeHolder } from "./state/lock.js";
+import { reservePlatformAccess } from "./state/platform_access.js";
 
 export interface LoginCheckOptions {
   config: SyncConfig;
@@ -86,6 +87,34 @@ export async function runLoginCheck(options: LoginCheckOptions): Promise<LoginCh
   const waitForInput = options.waitForInput ?? waitForEnter;
   let browser: SyncBrowser | null = null;
   try {
+    let access;
+    try {
+      access = reservePlatformAccess(
+        config.state_dir,
+        platform,
+        accountKey,
+        "login-check",
+        config.min_interval_minutes,
+      );
+    } catch {
+      logger.error({
+        command: "login-check",
+        platform,
+        message: "platform access state is invalid; no browser was opened",
+        error_code: "STATE_INVALID",
+      });
+      return { exitCode: 1, state: null };
+    }
+    if (!access.allowed) {
+      write(`[WARN] ${platform} page cooldown is active; retry after ${access.retry_after_seconds}s.`);
+      logger.warn({
+        command: "login-check",
+        platform,
+        message: `platform page cooldown is active; retry after ${access.retry_after_seconds}s`,
+        error_code: "RATE_LIMITED",
+      });
+      return { exitCode: 1, state: null };
+    }
     browser = await launcher(profileDir);
     const page: Page = browser.context.pages()[0] ?? (await browser.context.newPage());
     await adapter.openOrders(page, {
@@ -96,27 +125,22 @@ export async function runLoginCheck(options: LoginCheckOptions): Promise<LoginCh
 
     let state = await checkPageState(page, adapter);
     let attempts = 0;
-    while (state.status === "NEEDS_LOGIN") {
+    while (state.status === "NEEDS_LOGIN" || state.status === "CAPTCHA_OR_BLOCKED") {
       attempts += 1;
-      write(
-        `[WARN] ${platform} login state: ${state.detail}`,
-      );
-      write(
-        "Please finish the login manually in the visible browser window. This tool never fills passwords, solves captchas or scans QR codes.",
-      );
+      if (state.status === "CAPTCHA_OR_BLOCKED") {
+        write(`[WARN] ${platform} security verification: ${state.detail}`);
+        write(
+          "Please complete the visible verification manually. This tool never solves or bypasses captchas.",
+        );
+      } else {
+        write(`[WARN] ${platform} login state: ${state.detail}`);
+        write(
+          "Please finish the login manually in the visible browser window. This tool never fills passwords, solves captchas or scans QR codes.",
+        );
+      }
       write("Press Enter here after the login is complete (Ctrl+C to abort)...");
       await waitForInput();
       state = await checkPageState(page, adapter);
-      if (state.status === "CAPTCHA_OR_BLOCKED") {
-        write(`[FAIL] ${platform} blocked after login attempt: ${state.detail}`);
-        logger.warn({
-          command: "login-check",
-          platform,
-          status: state.status,
-          message: `blocked after ${attempts} login attempt(s): ${state.detail}`,
-        });
-        return { exitCode: 1, state };
-      }
     }
 
     if (state.status === "OK") {

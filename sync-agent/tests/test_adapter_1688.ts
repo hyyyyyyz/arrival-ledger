@@ -42,6 +42,19 @@ describe("ali1688 adapter with sanitized fixtures", () => {
     expect(state.status).toBe("NEEDS_LOGIN");
   });
 
+  it("does not confuse a login verification code with a captcha block", async () => {
+    await page.setContent(`
+      <main>
+        <h1>扫码登录</h1>
+        <input type="password" />
+        <input type="text" aria-label="验证码" />
+        <button>获取验证码</button>
+      </main>
+    `);
+    const state = await checkPageState(page, ali1688Adapter);
+    expect(state.status).toBe("NEEDS_LOGIN");
+  });
+
   it("detects captcha/risk blocks", async () => {
     await openFixture("blocked.html");
     const state = await checkPageState(page, ali1688Adapter);
@@ -70,6 +83,38 @@ describe("ali1688 adapter with sanitized fixtures", () => {
     expect(second?.platform_order_id).toBe("1688-260813-0002");
     expect(second?.status).toBe("交易关闭");
     expect(second?.packages).toHaveLength(0);
+  });
+
+  it("uses an explicit data-order-id without treating a broad wrapper as an order", async () => {
+    await page.setContent(`
+      <main class="order-list-wrapper">
+        <div data-order-id="888888888888888804">
+          <time>2026-08-14 15:10:00</time><span>待卖家发货</span>
+          <div><a href="https://detail.1688.com/offer/data-id-fixture.html">合成属性订单商品</a>
+          <span>规格：合成规格</span><span>x1</span><span>￥6.60</span></div>
+          <button>订单详情</button>
+        </div>
+      </main>
+    `);
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    expect(list.orders).toHaveLength(1);
+    expect(list.orders[0]?.platform_order_id).toBe("888888888888888804");
+    expect(list.orders[0]?.items[0]?.quantity).toBe("x1");
+  });
+
+  it("keeps the order id bound to its labeled DOM leaf beside a timestamp", async () => {
+    await page.setContent(`
+      <article role="listitem" style="display:flex">
+        <span>订单号 888888888888888806</span><span>2026-08-14 15:21:00</span>
+        <a href="https://detail.1688.com/offer/id-boundary-fixture.html">合成边界商品</a>
+        <span>规格：合成规格</span><span>x1</span><span>￥1.00</span><span>待卖家发货</span>
+        <button>订单详情</button>
+      </article>
+    `);
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    expect(list.orders).toHaveLength(1);
+    expect(list.orders[0]?.platform_order_id).toBe("888888888888888806");
+    expect(list.orders[0]?.ordered_at).toBe("2026-08-14 15:21:00");
   });
 
   it("reports an empty list without treating it as schema change", async () => {
@@ -132,14 +177,12 @@ describe("ali1688 adapter with sanitized fixtures", () => {
     }
   });
 
-  it("routes shipped orders to detail enrichment even with a readable tracking", async () => {
+  it("keeps 1688 shipped orders on the list page without detail enrichment", async () => {
     await openFixture("order-list.html");
     const list = await ali1688Adapter.collectVisibleOrders(page);
-    const shipped = list.unparsed.find(
-      (card) => card.missing.includes("logistics") && card.hint.includes("shipped"),
-    );
-    expect(shipped).toBeDefined();
-    expect(shipped?.order_id).toBe("1688-260813-0001");
+    expect(ali1688Adapter.allowDetailNavigation).toBe(false);
+    expect(list.unparsed.some((card) => card.missing.includes("logistics"))).toBe(true);
+    expect(list.orders[0]?.platform_order_id).toBe("1688-260813-0001");
   });
 
   it("parses multiple items per row without cross-item shifting", async () => {
@@ -153,7 +196,7 @@ describe("ali1688 adapter with sanitized fixtures", () => {
     expect(items.map((item) => item.quantity)).toEqual(["2", "4"]);
   });
 
-  it("routes unknown status text to detail enrichment", async () => {
+  it("leaves unknown status text for fail-closed normalization without opening detail", async () => {
     await page.setContent(
       `<table class="trade-order-list"><thead><tr><th>订单号</th><th>商品名称</th><th>数量</th><th>订单状态</th><th>物流</th></tr></thead>
        <tbody><tr>
@@ -165,10 +208,96 @@ describe("ali1688 adapter with sanitized fixtures", () => {
        </tr></tbody></table>`,
     );
     const list = await ali1688Adapter.collectVisibleOrders(page);
-    const unknown = list.unparsed.find(
-      (card) => card.order_id === "1688-260813-0007" && card.hint.includes("unknown"),
-    );
-    expect(unknown).toBeDefined();
+    expect(list.orders[0]?.status).toBe("奇异状态");
+    expect(list.unparsed.some((card) => card.order_id === "1688-260813-0007")).toBe(true);
+    const normalized = buildUnifiedOrder(list.orders[0]!, "1688", "1688-main", ali1688Adapter.statusMap);
+    expect(normalized.order).toBeNull();
+    expect(normalized.issues.join(" ")).toContain("unrecognized status");
+  });
+
+  it("parses the current card-based buyer-order surface without random class coupling", async () => {
+    await openFixture("order-list-modern-cards.html");
+    const state = await checkPageState(page, ali1688Adapter);
+    expect(state.status).toBe("OK");
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    expect(list.rows_seen).toBe(2);
+    expect(list.recognized).toBe(2);
+    expect(list.orders).toHaveLength(2);
+    expect(list.orders.map((order) => order.platform_order_id)).toEqual([
+      "888888888888888801",
+      "888888888888888802",
+    ]);
+    expect(list.orders[0]?.ordered_at).toBe("2026-08-14 17:20:56");
+    expect(list.orders[0]?.shop_name).toBe("合成测试供应商甲");
+    expect(list.orders[0]?.items[0]).toMatchObject({
+      title: "合成测试商品甲",
+      sku_text: "颜色：黑色；尺码：37",
+      quantity: "1",
+      unit_price: "￥19.00",
+    });
+    expect(list.orders[0]?.status).toBe("待卖家发货");
+    expect(list.orders[1]?.status).toBe("待收货");
+    expect(list.orders[1]?.packages).toEqual([]);
+    expect(list.orders.some((order) => order.platform_order_id?.includes("999999"))).toBe(false);
+  });
+
+  it("treats system-busy pages as a hard risk stop", async () => {
+    await page.setContent("<main><h1>系统繁忙</h1><button>刷新试试</button></main>");
+    const state = await checkPageState(page, ali1688Adapter);
+    expect(state.status).toBe("CAPTCHA_OR_BLOCKED");
+    expect(state.detail).toContain("risk");
+  });
+
+  it("ignores a hidden security iframe left in the logged-in order DOM", async () => {
+    await openFixture("order-list-modern-cards.html");
+    await page.evaluate(() => {
+      const iframe = document.createElement("iframe");
+      iframe.src = "data:text/html,captcha-punish";
+      iframe.style.display = "none";
+      document.body.append(iframe);
+    });
+    await page.waitForTimeout(50);
+    expect((await checkPageState(page, ali1688Adapter)).status).toBe("OK");
+  });
+
+  it("does not invent quantity 1 when a modern card has no readable quantity", async () => {
+    await page.setContent(`
+      <article role="listitem">
+        <span>订单号 888888888888888803</span><time>2026-08-14 15:00:00</time>
+        <div><a href="https://detail.1688.com/offer/missing-quantity.html">合成缺数量商品</a>
+        <span>规格：合成规格</span><span>￥8.80</span></div>
+        <span>待卖家发货</span><button>订单详情</button>
+      </article>
+    `);
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    expect(list.orders).toHaveLength(1);
+    expect(list.orders[0]?.items[0]?.quantity).toBeNull();
+    const normalized = buildUnifiedOrder(list.orders[0]!, "1688", "1688-main", ali1688Adapter.statusMap);
+    expect(normalized.order).toBeNull();
+    expect(normalized.issues.join(" ")).toContain("quantity is missing or invalid");
+  });
+
+  it("deduplicates image/title offer links before using the card quantity", async () => {
+    await page.setContent(`
+      <article role="listitem">
+        <span>订单号 888888888888888805</span>
+        <time>2026-08-14 15:20:00</time>
+        <section>
+          <a href="https://detail.1688.com/offer/duplicate-link-fixture.html"><img alt="" /></a>
+          <a href="https://detail.1688.com/offer/duplicate-link-fixture.html">合成双链接商品</a>
+          <span>规格：合成规格</span>
+        </section>
+        <span>￥12.30</span><span>3</span><span>待卖家发货</span>
+        <button>订单详情</button>
+      </article>
+    `);
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    expect(list.orders).toHaveLength(1);
+    expect(list.orders[0]?.items).toHaveLength(1);
+    expect(list.orders[0]?.items[0]).toMatchObject({
+      title: "合成双链接商品",
+      quantity: "3",
+    });
   });
 
   it("merges multiple rows of the same order into one raw order", async () => {

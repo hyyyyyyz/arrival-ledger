@@ -111,6 +111,38 @@ describe("runSyncOnce dry-run", () => {
     expect(snapshot!.orders).toHaveLength(1);
   });
 
+  it("honors adapter list-only mode and never opens a 1688 detail page", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const readOrderDetail = vi.fn(async () => rawOrder());
+    const listOrder = { ...rawOrder(), packages: [] };
+    const outcome = await runSyncOnce(
+      buildOptions(cwd, {
+        adapter: fakeAdapter({
+          allowDetailNavigation: false,
+          collectVisibleOrders: async () => ({
+            orders: [listOrder],
+            empty: false,
+            rows_seen: 1,
+            recognized: 1,
+            unparsed: [{
+              locator: {} as never,
+              missing: ["logistics"],
+              hint: "list has no package number",
+              order_id: listOrder.platform_order_id,
+            }],
+          }),
+          readOrderDetail,
+        }),
+      }),
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(readOrderDetail).not.toHaveBeenCalled();
+    expect(outcome.report.warnings.join(" ")).toContain("list-only");
+    const snapshot = readSnapshot(outcome.report.snapshot_path!);
+    expect(snapshot?.orders[0]?.packages).toEqual([]);
+  });
+
   it("fails closed when the profile dir is missing", async () => {
     const cwd = tempCwd();
     const outcome = await runSyncOnce(buildOptions(cwd));
@@ -379,6 +411,35 @@ describe("runSyncOnce pagination safety", () => {
     expect(outcome.report.counts.valid).toBe(3);
   });
 
+  it("does not open more unparsed details than max_records", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const readOrderDetail = vi.fn(async (_page, card: { hint: string }) => ({
+      ...rawOrder(),
+      platform_order_id: `1688-260813-${card.hint}`,
+    }));
+    const adapter = fakeAdapter({
+      collectVisibleOrders: async () => ({
+        orders: [],
+        empty: false,
+        rows_seen: 10,
+        recognized: 0,
+        unparsed: Array.from({ length: 10 }, (_, index) => ({
+          locator: {} as never,
+          missing: ["order_id" as const],
+          hint: String(index).padStart(4, "0"),
+        })),
+      }),
+      readOrderDetail,
+    });
+    const outcome = await runSyncOnce(
+      buildOptions(cwd, { adapter }, { SYNC_MAX_RECORDS: "3" }),
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.report.counts.seen).toBe(3);
+    expect(readOrderDetail).toHaveBeenCalledTimes(3);
+  });
+
   it("stops gracefully when page advance throws", async () => {
     const cwd = tempCwd();
     mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
@@ -574,6 +635,7 @@ describe("runSyncOnce commit", () => {
       ),
     );
     expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.status).toBe("DISABLED");
     expect(outcome.report.error_code).toBe("RATE_LIMITED");
   });
 

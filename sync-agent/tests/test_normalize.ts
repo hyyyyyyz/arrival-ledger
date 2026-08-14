@@ -23,7 +23,7 @@ describe("unwrapExcelString", () => {
 
 describe("normalizeTrackingNo", () => {
   it("must match the backend normalization: strip non-alphanumerics and uppercase", () => {
-    expect(normalizeTrackingNo("SF 5154-0764 3541")).toBe("SF515407643541");
+    expect(normalizeTrackingNo("SF 1234-5678 9000")).toBe("SF123456789000");
     expect(normalizeTrackingNo("yt123456")).toBe("YT123456");
     expect(normalizeTrackingNo("zto-9988")).toBe("ZTO9988");
     expect(normalizeTrackingNo("顺丰 sf 123")).toBe("SF123");

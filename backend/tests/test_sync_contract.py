@@ -36,7 +36,7 @@ def test_backend_accepts_the_ts_client_golden_contract(
         packages = connection.execute(
             "SELECT tracking_no_normalized FROM packages"
         ).fetchall()
-        assert [row["tracking_no_normalized"] for row in packages] == ["SF515407643541"]
+        assert [row["tracking_no_normalized"] for row in packages] == ["SF1234567890000"]
         items = connection.execute(
             "SELECT title, quantity FROM order_items ORDER BY id"
         ).fetchall()

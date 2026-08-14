@@ -19,6 +19,9 @@ New-Item -ItemType Directory -Force C:\ArrivalLedger\profiles\pdd, C:\ArrivalLed
 notepad .env.local
 ```
 
+首次使用前必须按 [`WINDOWS_SYNC_FROM_SCRATCH.md`](WINDOWS_SYNC_FROM_SCRATCH.md) 的命令为
+`profiles`、`.env.local`、`state` 和 `logs` 设置当前用户专属 NTFS ACL。
+
 `.env.local` 最少内容（`ARRIVAL_SYNC_WORKER_KEY` 与服务器 `.env` 的 `SYNC_WORKER_TOKENS` 一致，最少 16 字符，
 建议 `openssl rand -hex 24` 生成；服务器在 `.5` 上更新 `.env` 后 `sudo docker compose up -d backend` 生效）：
 
@@ -56,7 +59,10 @@ npm run login-check -- --platform 1688
   不处理短信/扫码/验证码；
 - 未登录时窗口会打开登录页并保持打开，终端提示你手工完成登录后按 Enter，
   程序重新检测登录状态，可反复执行直到成功（Ctrl+C 随时中止）；
-- 出现验证码/风控页面 → 输出 `CAPTCHA_OR_BLOCKED`，立即停止，不要尝试绕过。
+- `login-check` 遇到验证码/风控时不点击、不刷新，只保留可见窗口；账号持有人可以手工完成后
+  按 Enter 复检，无法通过则 Ctrl+C 并冷却，不要尝试绕过。
+- 所有会打开平台页的命令按账号共用默认 15 分钟冷却；刚完成 `login-check` 后需等待冷却再 dry-run。
+  若独立 profile 已登录，应跳过 `login-check`，直接只跑一次 dry-run。
 
 ## 3. 只读 dry-run（每个平台）
 
@@ -67,12 +73,14 @@ npm run sync-once -- --platform 1688 --mode dry-run
 
 - dry-run 不上传任何数据，只写两个本地文件：
   - `state\report-*.json`：供人工核对的完整报告（订单号、状态、店铺、每个商品的
-    标题/规格/数量/单价、每个包裹的快递与运单号）；
+    标题/规格/数量/单价；PDD 还包含页面可见的快递与运单号；1688 列表无物流时允许空 packages）；
   - `state\snapshot-*.json`：规范化记录的私有快照（含 payload hash），供 commit 使用；
 - 记录：读取订单数、解析成功数、字段缺失情况、用时、是否出现登录保护；
 - 页面结构与程序假设不一致 → 状态 `SCHEMA_CHANGED` 并停止，保留游标；需要按真实页面调整对应
   adapter 选择器并补充脱敏 fixture（改完必须重新通过 `npm test`）；
 - 空列表 → 提示 `empty`，不会上传也不会覆盖服务器数据，先人工确认账号和筛选条件。
+- dry-run/capture 检测到验证码、系统繁忙或风险页会立即熔断并关闭，不在当前命令中人工复检；
+  等待冷却后只能用单独的 `login-check` 处理。
 
 ## 4. 确认后 commit（每个平台）
 
@@ -97,8 +105,10 @@ npm run sync-once -- --platform 1688 --mode commit --from-report .\state\snapsho
 |---|---|---|
 | 独立 profile 手工登录 | 两平台均可通过 login-check | 平台/账号脱敏标识 |
 | 各 20–30 条真实订单 | dry-run 报告数量一致 | 订单数/页数 |
-| 字段完整率 | 订单号/商品/规格/数量/店铺/快递/运单 ≥95% | 逐字段统计 |
-| 重复同步 | 服务端数据库行数不变（同一批次由服务器幂等重放，会返回原始 counts，不必等于 created=0；新批次则 skipped 增加） | 同步前后 DB 行数对比 |
+| 列表字段完整率 | 两平台订单号/商品/规格/数量/店铺 ≥95% | 逐字段统计 |
+| PDD 物流字段 | 页面展示物流时，快递/运单与拆包关系正确 | 抽样核对 |
+| 1688 list-only | 不自动点详情/物流；列表无运单时 `packages=[]` 合格 | 记录空包裹数量 |
+| 重复同步 | 等待冷却后重新 dry-run/commit，服务端数据库行数不变且新批次 `skipped` 增加；同一 batch 的服务器幂等由后端测试及不确定响应重试覆盖 | 同步前后 DB 行数对比 |
 | 服务器无敏感数据 | DB 无 Cookie/密码/地址/电话 | 抽查 sync_batches/purchase_orders |
 | 登录过期/验证码 | 明确状态，不静默写错 | 记录状态与处理方式 |
 | dry-run 与 commit 集合一致 | commit 复用同一份记录集 | 报告对比 |
@@ -130,8 +140,9 @@ npm run sync-once -- --platform 1688 --mode commit --from-report .\state\snapsho
 账号：<account_key 标签，不含真实手机号>
 login-check：OK / NEEDS_LOGIN / CAPTCHA_OR_BLOCKED
 dry-run：读取 N 条、解析 N 条、失败 N 条、用时 M 分钟
-字段完整率：订单号 %、商品 %、数量 %、店铺 %、快递 %、运单号 %
+列表字段完整率：订单号 %、商品 %、数量 %、店铺 %
+PDD 物流完整率：快递 %、运单号 %；1688：有列表单号 / packages 为空（允许）
 commit：created / updated / skipped / errors
-重复运行：同一 batch 重放会返回首次 counts，以数据库行数不增加确认幂等；新 batch 才期待 skipped 增加
+重复运行：等待冷却后生成新 batch，数据库行数不增加且 skipped 增加；同一 batch 幂等见后端自动测试
 异常：SCHEMA_CHANGED / 验证码 / 登录过期及处理方式
 ```

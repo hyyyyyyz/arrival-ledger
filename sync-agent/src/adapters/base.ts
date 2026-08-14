@@ -29,6 +29,12 @@ export interface UnparsedCard {
   missing: Array<"order_id" | "logistics">;
   hint: string;
   order_id?: string | null;
+  summary?: {
+    ordered_at: string | null;
+    status: string | null;
+    shop_name: string | null;
+    items: RawOrder["items"];
+  };
 }
 
 export interface OrderListState {
@@ -43,6 +49,12 @@ export interface PlatformAdapter {
   readonly platform: Platform;
   readonly orderListUrl: string;
   readonly statusMap: StatusMap;
+  /**
+   * Whether the automatic sync flow may leave the order-list page to enrich
+   * an order.  Adapters that are sensitive to action-level verification must
+   * keep this false; a dry-run then remains strictly list-only.
+   */
+  readonly allowDetailNavigation?: boolean;
   openOrders(page: Page, window: SyncWindow): Promise<void>;
   detectLogin(page: Page): Promise<LoginState>;
   detectBlock(page: Page): Promise<BlockState>;

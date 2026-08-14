@@ -114,12 +114,13 @@ describe("runLoginCheck", () => {
     expect(waitCalls).toBeGreaterThanOrEqual(1);
   });
 
-  it("stops immediately when a captcha appears during login waiting", async () => {
+  it("keeps the visible window open for manual captcha resolution", async () => {
     const cwd = tempCwd();
     let captcha = false;
+    let loggedIn = false;
     let waitCalls = 0;
     const adapter = fakeAdapter({
-      detectLogin: async () => ({ logged_in: false, detail: "login wall" }),
+      detectLogin: async () => ({ logged_in: loggedIn, detail: loggedIn ? "orders" : "login wall" }),
       detectBlock: async () =>
         captcha
           ? { blocked: true, kind: "captcha", detail: "slider appeared" }
@@ -130,27 +131,41 @@ describe("runLoginCheck", () => {
         adapter,
         waitForInput: async () => {
           waitCalls += 1;
-          captcha = true;
+          if (waitCalls === 1) captcha = true;
+          else {
+            captcha = false;
+            loggedIn = true;
+          }
         },
       }),
     );
-    expect(outcome.exitCode).toBe(1);
-    expect(outcome.state?.status).toBe("CAPTCHA_OR_BLOCKED");
-    expect(waitCalls).toBe(1);
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.state?.status).toBe("OK");
+    expect(waitCalls).toBe(2);
   });
 
-  it("does not wait for input when already blocked", async () => {
+  it("waits for manual resolution when already blocked", async () => {
     const cwd = tempCwd();
+    let blocked = true;
     const adapter = fakeAdapter({
-      detectBlock: async () => ({ blocked: true, kind: "captcha", detail: "blocked" }),
+      detectBlock: async () =>
+        blocked
+          ? { blocked: true, kind: "captcha", detail: "blocked" }
+          : { blocked: false, kind: "unknown", detail: "clear" },
     });
     let waitCalls = 0;
     const outcome = await runLoginCheck(
-      buildOptions(cwd, { adapter, waitForInput: async () => { waitCalls += 1; } }),
+      buildOptions(cwd, {
+        adapter,
+        waitForInput: async () => {
+          waitCalls += 1;
+          blocked = false;
+        },
+      }),
     );
-    expect(outcome.exitCode).toBe(1);
-    expect(outcome.state?.status).toBe("CAPTCHA_OR_BLOCKED");
-    expect(waitCalls).toBe(0);
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.state?.status).toBe("OK");
+    expect(waitCalls).toBe(1);
   });
 
   it("fails when the profile dir cannot be created", async () => {
