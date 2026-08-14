@@ -76,11 +76,15 @@ describe("order detail navigation over visible DOM", () => {
     const detail = await ali1688Adapter.readOrderDetail(page, card);
     expect(detail).not.toBeNull();
     expect(detail?.platform_order_id).toBe("1688-260813-0002");
+    expect(detail?.items).toHaveLength(2);
     expect(detail?.items[0]?.title).toBe("测试商品丙");
+    expect(detail?.items[1]?.title).toBe("测试商品丁");
     expect(detail?.shop_name).toBe("测试供应商乙");
-    expect(detail?.packages).toHaveLength(1);
+    expect(detail?.packages).toHaveLength(2);
     expect(detail?.packages[0]?.courier).toBe("顺丰速运");
     expect(detail?.packages[0]?.tracking_no).toBe("SF-20260813-0002");
+    expect(detail?.packages[1]?.courier).toBe("中通快递");
+    expect(detail?.packages[1]?.tracking_no).toBe("8800123456791");
 
     const back = await checkPageState(page, ali1688Adapter);
     expect(back.status).toBe("OK");
@@ -95,7 +99,9 @@ describe("order detail navigation over visible DOM", () => {
     const detail = await ali1688Adapter.readOrderDetail(page, list.unparsed[0]!);
     expect(detail).not.toBeNull();
     expect(detail?.platform_order_id).toBe("1688-260813-0002");
+    expect(detail?.items).toHaveLength(2);
     expect(detail?.items[0]?.title).toBe("测试商品丙");
+    expect(detail?.packages).toHaveLength(2);
   });
 
   it("returns null when the detail page structure has no order id", async () => {
@@ -125,6 +131,8 @@ describe("order detail navigation over visible DOM", () => {
     const detail = await pddAdapter.readOrderDetail(page, list.unparsed[0]!);
     expect(detail).not.toBeNull();
     expect(detail?.platform_order_id).toBe("260813-8800000002");
+    expect(detail?.items).toHaveLength(2);
+    expect(detail?.packages).toHaveLength(2);
     await page.waitForTimeout(300);
     expect(page.context().pages().length).toBe(beforeCount);
   });

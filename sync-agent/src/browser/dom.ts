@@ -72,6 +72,27 @@ export async function extractFieldValue(
   return null;
 }
 
+export async function extractAllLabelValues(
+  container: Locator,
+  labels: readonly string[],
+): Promise<string[]> {
+  const values: string[] = [];
+  for (const label of labels) {
+    const markers = container.locator(`text=${label}`);
+    const count = await markers.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      const marker = markers.nth(index);
+      if (!(await marker.isVisible({ timeout: 500 }).catch(() => false))) continue;
+      const ownText = await marker.innerText().catch(() => "");
+      const stripped = stripLabelPrefixAtStart(ownText, [label]);
+      if (stripped.label_at_start && stripped.value.length > 0) {
+        if (!values.includes(stripped.value)) values.push(stripped.value);
+      }
+    }
+  }
+  return values;
+}
+
 export async function extractAllFieldValues(
   container: Locator,
   fallbackSelectors: readonly string[],

@@ -7,7 +7,12 @@ import {
   sameListUrl,
   type DetailLinkRules,
 } from "../browser/detail.js";
-import { countVisibleMarkers, extractLabelValue } from "../browser/dom.js";
+import {
+  countVisibleMarkers,
+  extractAllFieldValues,
+  extractAllLabelValues,
+  extractLabelValue,
+} from "../browser/dom.js";
 import { cleanText } from "../extract/text.js";
 import {
   mergeRawOrdersByOrderId,
@@ -16,7 +21,7 @@ import {
   type RawOrderPackage,
   type StatusMap,
 } from "../extract/order.js";
-import { splitLogisticsCell, trackingFromLabeledText } from "../extract/tracking.js";
+import { splitLogisticsCell, trackingFromLabeledText, normalizeTrackingNo } from "../extract/tracking.js";
 import type {
   BlockState,
   CollectOptions,
@@ -169,6 +174,64 @@ export const ALI1688_DETAIL_RULES: DetailLinkRules = {
   allowedHostSuffix: "1688.com",
 };
 
+export const ALI1688_DETAIL_SELECTORS = {
+  itemTitle: ["[class*='item-title']", "[class*='goods-name']"],
+  itemSku: ["[class*='item-sku']", "[class*='goods-sku']"],
+  itemQuantity: ["[class*='item-quantity']", "[class*='goods-count']"],
+  itemPrice: ["[class*='item-price']", "[class*='goods-price']"],
+  trackingNo: ["[class*='tracking-no']", "[class*='tracking-number']"],
+} as const;
+
+async function extractDetailItems(body: Locator): Promise<RawOrderItem[]> {
+  const titles = await extractAllFieldValues(body, ALI1688_DETAIL_SELECTORS.itemTitle);
+  if (titles.length === 0) {
+    const single = await extractLabelValue(body, TITLE_LABELS);
+    if (single === null) {
+      return [{ item_key: null, title: null, sku_text: null, quantity: null, unit_price: null }];
+    }
+    return [
+      {
+        item_key: null,
+        title: single,
+        sku_text: await extractLabelValue(body, SKU_LABELS),
+        quantity: (await extractLabelValue(body, QUANTITY_LABELS)) ?? "1",
+        unit_price: await extractLabelValue(body, PRICE_LABELS),
+      },
+    ];
+  }
+  const skus = await extractAllFieldValues(body, ALI1688_DETAIL_SELECTORS.itemSku);
+  const quantities = await extractAllFieldValues(body, ALI1688_DETAIL_SELECTORS.itemQuantity);
+  const prices = await extractAllFieldValues(body, ALI1688_DETAIL_SELECTORS.itemPrice);
+  return titles.map((title, index) => ({
+    item_key: null,
+    title,
+    sku_text: skus[index] ?? null,
+    quantity: quantities[index] ?? "1",
+    unit_price: prices[index] ?? null,
+  }));
+}
+
+async function extractDetailPackages(body: Locator): Promise<RawOrderPackage[]> {
+  const candidates: string[] = await extractAllLabelValues(body, TRACKING_LABELS);
+  for (const value of await extractAllFieldValues(body, ALI1688_DETAIL_SELECTORS.trackingNo)) {
+    if (!candidates.includes(value)) candidates.push(value);
+  }
+  const couriers = await extractAllLabelValues(body, COURIER_LABELS);
+  const packages: RawOrderPackage[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < candidates.length; index += 1) {
+    const parsed = trackingFromLabeledText(candidates[index] ?? "");
+    if (parsed === null) continue;
+    const key = normalizeTrackingNo(parsed);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const courier =
+      couriers.length === candidates.length ? (couriers[index] ?? null) : null;
+    packages.push({ courier, tracking_no: parsed, status: null });
+  }
+  return packages;
+}
+
 export const ali1688Adapter: PlatformAdapter = {
   platform: "1688",
   orderListUrl: "https://air.1688.com/app/ctf-page/trade-order-list/buyer-order-list.html",
@@ -306,6 +369,18 @@ export const ali1688Adapter: PlatformAdapter = {
           order_id: platformOrderId,
         });
       }
+      const mappedStatus =
+        raw.status === null || raw.status.trim().length === 0
+          ? null
+          : ALI1688_STATUS_MAP[raw.status.trim()];
+      if (mappedStatus === "SHIPPED" || mappedStatus === "COMPLETED") {
+        unparsed.push({
+          locator: row,
+          missing: ["logistics"],
+          hint: "shipped order requires a full detail read for all packages",
+          order_id: platformOrderId,
+        });
+      }
     }
     return {
       orders: mergeRawOrdersByOrderId(orders),
@@ -353,25 +428,13 @@ export const ali1688Adapter: PlatformAdapter = {
       return null;
     }
 
-    const title = await extractLabelValue(body, TITLE_LABELS);
-    const courier = await extractLabelValue(body, COURIER_LABELS);
-    const trackingRaw = await extractLabelValue(body, TRACKING_LABELS);
-    const tracking = trackingRaw === null ? null : trackingFromLabeledText(trackingRaw);
     const detail: RawOrder = {
       platform_order_id: platformOrderId,
       ordered_at: await extractLabelValue(body, TIME_LABELS),
       status: await extractLabelValue(body, STATUS_LABELS),
       shop_name: await extractLabelValue(body, SHOP_LABELS),
-      items: [
-        {
-          item_key: null,
-          title,
-          sku_text: await extractLabelValue(body, SKU_LABELS),
-          quantity: (await extractLabelValue(body, QUANTITY_LABELS)) ?? "1",
-          unit_price: await extractLabelValue(body, PRICE_LABELS),
-        },
-      ],
-      packages: tracking === null ? [] : [{ courier, tracking_no: tracking, status: null }],
+      items: await extractDetailItems(body),
+      packages: await extractDetailPackages(body),
       observed_at: new Date().toISOString(),
       source_page: 0,
     };

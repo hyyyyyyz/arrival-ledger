@@ -132,6 +132,16 @@ describe("ali1688 adapter with sanitized fixtures", () => {
     }
   });
 
+  it("routes shipped orders to detail enrichment even with a readable tracking", async () => {
+    await openFixture("order-list.html");
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    const shipped = list.unparsed.find(
+      (card) => card.missing.includes("logistics") && card.hint.includes("shipped"),
+    );
+    expect(shipped).toBeDefined();
+    expect(shipped?.order_id).toBe("1688-260813-0001");
+  });
+
   it("merges multiple rows of the same order into one raw order", async () => {
     await openFixture("order-list-multirow.html");
     const list = await ali1688Adapter.collectVisibleOrders(page);

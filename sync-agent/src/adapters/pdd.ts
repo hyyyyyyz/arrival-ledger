@@ -10,6 +10,7 @@ import {
 import {
   countVisibleMarkers,
   extractAllFieldValues,
+  extractAllLabelValues,
   extractFieldValue,
   extractLabelValue,
 } from "../browser/dom.js";
@@ -177,16 +178,17 @@ async function extractPackages(card: Locator): Promise<{
     if (tracking !== null) add(null, tracking);
     else unreadable = true;
   }
-  const labeledTracking = await extractLabelValue(card, TRACKING_LABELS);
-  if (labeledTracking !== null) {
-    const tracking = trackingFromLabeledText(labeledTracking);
-    if (tracking !== null) add(await extractLabelValue(card, COURIER_LABELS), tracking);
+  const labeledTrackings = await extractAllLabelValues(card, TRACKING_LABELS);
+  for (const text of labeledTrackings) {
+    const tracking = trackingFromLabeledText(text);
+    if (tracking !== null) add(null, tracking);
     else unreadable = true;
   }
+  const singleCourier = await extractLabelValue(card, COURIER_LABELS);
   const logisticsTexts = await extractAllFieldValues(card, PDD_SELECTORS.fieldSelectors.logistics);
   for (const text of logisticsTexts) {
     const split = splitLogisticsCell(text);
-    if (split.tracking !== null) add(split.courier, split.tracking);
+    if (split.tracking !== null) add(split.courier ?? singleCourier, split.tracking);
   }
   return { packages, unreadable };
 }
@@ -272,10 +274,11 @@ export const pddAdapter: PlatformAdapter = {
       recognized += 1;
 
       const { packages, unreadable } = await extractPackages(card);
+      const statusText = await extractFieldValue(card, STATUS_LABELS, PDD_SELECTORS.fieldSelectors.status);
       orders.push({
         platform_order_id: platformOrderId,
         ordered_at: await extractFieldValue(card, TIME_LABELS, PDD_SELECTORS.fieldSelectors.time),
-        status: await extractFieldValue(card, STATUS_LABELS, PDD_SELECTORS.fieldSelectors.status),
+        status: statusText,
         shop_name: await extractFieldValue(card, SHOP_LABELS, PDD_SELECTORS.fieldSelectors.shop),
         items: await extractItems(card),
         packages,
@@ -287,6 +290,18 @@ export const pddAdapter: PlatformAdapter = {
           locator: card,
           missing: ["logistics"],
           hint: "tracking text exists but cannot be parsed",
+          order_id: platformOrderId,
+        });
+      }
+      const mappedStatus =
+        statusText === null || statusText.trim().length === 0
+          ? null
+          : PDD_STATUS_MAP[statusText.trim()];
+      if (mappedStatus === "SHIPPED" || mappedStatus === "COMPLETED") {
+        unparsed.push({
+          locator: card,
+          missing: ["logistics"],
+          hint: "shipped order requires a full detail read for all packages",
           order_id: platformOrderId,
         });
       }
