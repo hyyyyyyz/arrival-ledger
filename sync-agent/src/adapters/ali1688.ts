@@ -1,10 +1,12 @@
 import type { Locator, Page } from "playwright";
 
-import { extractLabelValue } from "../browser/dom.js";
+import { assertAllowedOrderListUrl } from "../browser/context.js";
+import { countVisibleMarkers, extractLabelValue } from "../browser/dom.js";
 import { cleanText } from "../extract/text.js";
 import type { RawOrder, RawOrderItem, RawOrderPackage, StatusMap } from "../extract/order.js";
 import type {
   BlockState,
+  CollectOptions,
   LoginState,
   OrderListState,
   PlatformAdapter,
@@ -158,19 +160,22 @@ export const ali1688Adapter: PlatformAdapter = {
   orderListUrl: "https://air.1688.com/app/ctf-page/trade-order-list/buyer-order-list.html",
   statusMap: ALI1688_STATUS_MAP,
 
-  async openOrders(page: Page, _window: SyncWindow): Promise<void> {
-    await page.goto(this.orderListUrl, { waitUntil: "domcontentloaded" });
+  async openOrders(page: Page, window: SyncWindow): Promise<void> {
+    const url = window.order_list_url ?? this.orderListUrl;
+    assertAllowedOrderListUrl(this.platform, url);
+    await page.goto(url, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(2000);
   },
 
   async detectLogin(page: Page): Promise<LoginState> {
-    let loginMarkers = 0;
-    for (const marker of ALI1688_SELECTORS.loginMarkers) {
-      loginMarkers += await page.locator(marker).count().catch(() => 0);
-    }
+    const emptyCount = await countVisibleMarkers(page, ALI1688_SELECTORS.emptyMarkers);
+    const loginMarkers = await countVisibleMarkers(page, ALI1688_SELECTORS.loginMarkers);
     const rows = (await findRowLocators(page)).length;
+    if (emptyCount > 0 && rows === 0) {
+      return { logged_in: true, detail: "order list is empty but the account appears logged in" };
+    }
     if (loginMarkers > 0 && rows === 0) {
-      return { logged_in: false, detail: "login form detected on the order page" };
+      return { logged_in: false, detail: "visible login form detected on the order page" };
     }
     if (rows > 0) {
       return { logged_in: true, detail: `order rows visible (${rows})` };
@@ -180,31 +185,37 @@ export const ali1688Adapter: PlatformAdapter = {
 
   async detectBlock(page: Page): Promise<BlockState> {
     for (const marker of ALI1688_SELECTORS.blockMarkers) {
-      const count = await page.locator(marker).count().catch(() => 0);
-      if (count > 0) {
-        return { blocked: true, kind: "captcha", detail: `marker "${marker}" visible` };
+      const visible = await countVisibleMarkers(page, [marker]);
+      if (visible > 0) {
+        return { blocked: true, kind: "captcha", detail: `visible marker "${marker}"` };
       }
     }
-    return { blocked: false, kind: "unknown", detail: "no block markers visible" };
+    return { blocked: false, kind: "unknown", detail: "no visible block markers" };
   },
 
-  async collectVisibleOrders(page: Page): Promise<OrderListState> {
-    let emptyCount = 0;
-    for (const marker of ALI1688_SELECTORS.emptyMarkers) {
-      emptyCount += await page.locator(marker).count().catch(() => 0);
-    }
+  async collectVisibleOrders(
+    page: Page,
+    options: CollectOptions = {},
+  ): Promise<OrderListState> {
+    const emptyCount = await countVisibleMarkers(page, ALI1688_SELECTORS.emptyMarkers);
     const rows = await findRowLocators(page);
     if (rows.length === 0) {
       return { orders: [], empty: emptyCount > 0, rows_seen: 0, recognized: 0 };
     }
+    const skip = options.skip_order_ids ?? new Set<string>();
     const columns = await detectColumns(page);
     const orders: RawOrder[] = [];
+    let rowsSeen = 0;
     let recognized = 0;
     for (const row of rows) {
       const platformOrderId =
         columns === null || columns["order_id"] === undefined
           ? await extractLabelValue(row, ORDER_ID_LABELS)
           : await cellText(row, columns["order_id"]);
+      if (platformOrderId !== null && platformOrderId.length > 0 && skip.has(platformOrderId.trim())) {
+        continue;
+      }
+      rowsSeen += 1;
       if (platformOrderId === null || platformOrderId.length === 0) continue;
       recognized += 1;
 
@@ -251,15 +262,20 @@ export const ali1688Adapter: PlatformAdapter = {
         source_page: 0,
       });
     }
-    return { orders, empty: false, rows_seen: rows.length, recognized };
+    return { orders, empty: false, rows_seen: rowsSeen, recognized };
   },
 
   async advancePage(page: Page): Promise<boolean> {
     for (const selector of ALI1688_SELECTORS.nextPage) {
       const button = page.locator(selector).first();
       if ((await button.count()) === 0) continue;
-      if (!(await button.isEnabled().catch(() => false))) continue;
-      await button.click({ timeout: 5000 }).catch(() => undefined);
+      if (!(await button.isVisible({ timeout: 500 }).catch(() => false))) continue;
+      if (!(await button.isEnabled({ timeout: 500 }).catch(() => false))) continue;
+      try {
+        await button.click({ timeout: 5000 });
+      } catch {
+        return false;
+      }
       await page.waitForLoadState("domcontentloaded").catch(() => undefined);
       await page.waitForTimeout(2000);
       return true;

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>1688 订单列表含隐藏验证码模板（脱敏测试 fixture）</title></head>
+<body>
+  <main class="buyer-order-list">
+    <table class="trade-order-list">
+      <thead>
+        <tr><th>订单号</th><th>商品名称</th><th>数量</th><th>供应商</th><th>下单时间</th><th>订单状态</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="order-id">1688-260813-0001</span></td>
+          <td><span class="item-title">测试商品</span></td>
+          <td><span class="item-quantity">2</span></td>
+          <td><span class="shop-name">测试供应商</span></td>
+          <td><span class="order-time">2026-08-12 10:30:00</span></td>
+          <td><span class="order-status">已发货</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <div style="display:none" class="captcha-template">
+      <h1>安全验证</h1>
+      <iframe src="data:captcha"></iframe>
+      <input type="password" />
+    </div>
+    <div style="display:none" class="login-template">亲，请登录</div>
+  </main>
+</body>
+</html>

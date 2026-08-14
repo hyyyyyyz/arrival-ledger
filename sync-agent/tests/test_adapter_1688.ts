@@ -6,6 +6,7 @@ import { chromium, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { ali1688Adapter } from "../src/adapters/ali1688.js";
+import { assertAllowedOrderListUrl } from "../src/browser/context.js";
 import { checkPageState } from "../src/browser/guards.js";
 
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "1688");
@@ -78,6 +79,37 @@ describe("ali1688 adapter with sanitized fixtures", () => {
     expect(list.rows_seen).toBe(0);
   });
 
+  it("treats an empty order page as logged in, not as a login wall", async () => {
+    await openFixture("empty-list.html");
+    const state = await checkPageState(page, ali1688Adapter);
+    expect(state.status).toBe("OK");
+  });
+
+  it("ignores hidden captcha and login templates", async () => {
+    await openFixture("order-list-hidden-templates.html");
+    const state = await checkPageState(page, ali1688Adapter);
+    expect(state.status).toBe("OK");
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    expect(list.recognized).toBe(1);
+    expect(list.orders[0]?.platform_order_id).toBe("1688-260813-0001");
+  });
+
+  it("skips already-seen order ids across pagination", async () => {
+    await openFixture("order-list.html");
+    const first = await ali1688Adapter.collectVisibleOrders(page);
+    const second = await ali1688Adapter.collectVisibleOrders(page, {
+      skip_order_ids: new Set(first.orders.map((order) => order.platform_order_id!)),
+    });
+    expect(second.rows_seen).toBe(0);
+    expect(second.orders).toHaveLength(0);
+    expect(second.empty).toBe(false);
+  });
+
+  it("returns false when no pagination control exists", async () => {
+    await openFixture("order-list-hidden-templates.html");
+    expect(await ali1688Adapter.advancePage(page)).toBe(false);
+  });
+
   it("recognizes an unparseable page as zero recognized rows", async () => {
     await page.setContent("<div class='weird-layout'><p>完全不同的结构</p></div>");
     const list = await ali1688Adapter.collectVisibleOrders(page);
@@ -87,5 +119,17 @@ describe("ali1688 adapter with sanitized fixtures", () => {
 
   it("exposes only https order list urls", () => {
     expect(ali1688Adapter.orderListUrl.startsWith("https://")).toBe(true);
+  });
+});
+
+describe("assertAllowedOrderListUrl", () => {
+  it("allows official domains only", () => {
+    expect(() =>
+      assertAllowedOrderListUrl("1688", "https://air.1688.com/app/ctf-page/orders"),
+    ).not.toThrow();
+    expect(() => assertAllowedOrderListUrl("pdd", "https://mobile.yangkeduo.com/orders.html")).not.toThrow();
+    expect(() => assertAllowedOrderListUrl("pdd", "https://evil.example.com/orders")).toThrow();
+    expect(() => assertAllowedOrderListUrl("1688", "https://1688.evil.com/orders")).toThrow();
+    expect(() => assertAllowedOrderListUrl("1688", "not-a-url")).toThrow();
   });
 });

@@ -1,9 +1,11 @@
 import type { Locator, Page } from "playwright";
 
-import { extractFieldValue, extractLabelValue } from "../browser/dom.js";
+import { assertAllowedOrderListUrl } from "../browser/context.js";
+import { countVisibleMarkers, extractFieldValue, extractLabelValue } from "../browser/dom.js";
 import type { RawOrder, RawOrderItem, RawOrderPackage, StatusMap } from "../extract/order.js";
 import type {
   BlockState,
+  CollectOptions,
   LoginState,
   OrderListState,
   PlatformAdapter,
@@ -130,19 +132,22 @@ export const pddAdapter: PlatformAdapter = {
   orderListUrl: "https://mobile.yangkeduo.com/orders.html",
   statusMap: PDD_STATUS_MAP,
 
-  async openOrders(page: Page, _window: SyncWindow): Promise<void> {
-    await page.goto(this.orderListUrl, { waitUntil: "domcontentloaded" });
+  async openOrders(page: Page, window: SyncWindow): Promise<void> {
+    const url = window.order_list_url ?? this.orderListUrl;
+    assertAllowedOrderListUrl(this.platform, url);
+    await page.goto(url, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(2000);
   },
 
   async detectLogin(page: Page): Promise<LoginState> {
-    let loginMarkers = 0;
-    for (const marker of PDD_SELECTORS.loginMarkers) {
-      loginMarkers += await page.locator(marker).count().catch(() => 0);
-    }
+    const emptyCount = await countVisibleMarkers(page, PDD_SELECTORS.emptyMarkers);
+    const loginMarkers = await countVisibleMarkers(page, PDD_SELECTORS.loginMarkers);
     const cards = (await findCardLocators(page)).length;
+    if (emptyCount > 0 && cards === 0) {
+      return { logged_in: true, detail: "order list is empty but the account appears logged in" };
+    }
     if (loginMarkers > 0 && cards === 0) {
-      return { logged_in: false, detail: "login prompt detected on the order page" };
+      return { logged_in: false, detail: "visible login prompt detected on the order page" };
     }
     if (cards > 0) {
       return { logged_in: true, detail: `order cards visible (${cards})` };
@@ -152,27 +157,33 @@ export const pddAdapter: PlatformAdapter = {
 
   async detectBlock(page: Page): Promise<BlockState> {
     for (const marker of PDD_SELECTORS.blockMarkers) {
-      const count = await page.locator(marker).count().catch(() => 0);
-      if (count > 0) {
-        return { blocked: true, kind: "captcha", detail: `marker "${marker}" visible` };
+      const visible = await countVisibleMarkers(page, [marker]);
+      if (visible > 0) {
+        return { blocked: true, kind: "captcha", detail: `visible marker "${marker}"` };
       }
     }
-    return { blocked: false, kind: "unknown", detail: "no block markers visible" };
+    return { blocked: false, kind: "unknown", detail: "no visible block markers" };
   },
 
-  async collectVisibleOrders(page: Page): Promise<OrderListState> {
-    let emptyCount = 0;
-    for (const marker of PDD_SELECTORS.emptyMarkers) {
-      emptyCount += await page.locator(marker).count().catch(() => 0);
-    }
+  async collectVisibleOrders(
+    page: Page,
+    options: CollectOptions = {},
+  ): Promise<OrderListState> {
+    const emptyCount = await countVisibleMarkers(page, PDD_SELECTORS.emptyMarkers);
     const cards = await findCardLocators(page);
     if (cards.length === 0) {
       return { orders: [], empty: emptyCount > 0, rows_seen: 0, recognized: 0 };
     }
+    const skip = options.skip_order_ids ?? new Set<string>();
     const orders: RawOrder[] = [];
+    let rowsSeen = 0;
     let recognized = 0;
     for (const card of cards) {
       const platformOrderId = await extractFieldValue(card, ORDER_ID_LABELS, PDD_SELECTORS.fieldSelectors.orderId);
+      if (platformOrderId !== null && platformOrderId.length > 0 && skip.has(platformOrderId.trim())) {
+        continue;
+      }
+      rowsSeen += 1;
       if (platformOrderId === null || platformOrderId.length === 0) continue;
       recognized += 1;
 
@@ -199,15 +210,20 @@ export const pddAdapter: PlatformAdapter = {
         source_page: 0,
       });
     }
-    return { orders, empty: false, rows_seen: cards.length, recognized };
+    return { orders, empty: false, rows_seen: rowsSeen, recognized };
   },
 
   async advancePage(page: Page): Promise<boolean> {
     for (const selector of PDD_SELECTORS.nextPage) {
       const button = page.locator(selector).first();
       if ((await button.count()) === 0) continue;
-      if (!(await button.isEnabled().catch(() => false))) continue;
-      await button.click({ timeout: 5000 }).catch(() => undefined);
+      if (!(await button.isVisible({ timeout: 500 }).catch(() => false))) continue;
+      if (!(await button.isEnabled({ timeout: 500 }).catch(() => false))) continue;
+      try {
+        await button.click({ timeout: 5000 });
+      } catch {
+        return false;
+      }
       await page.waitForLoadState("domcontentloaded").catch(() => undefined);
       await page.waitForTimeout(2000);
       return true;

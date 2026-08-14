@@ -49,12 +49,14 @@ function fakeAdapter(overrides: Partial<PlatformAdapter> = {}): PlatformAdapter 
     openOrders: async () => undefined,
     detectLogin: async () => ({ logged_in: true, detail: "fake" }),
     detectBlock: async () => ({ blocked: false, kind: "unknown", detail: "fake" }),
-    collectVisibleOrders: async () => ({
-      orders: [rawOrder()],
-      empty: false,
-      rows_seen: 1,
-      recognized: 1,
-    }),
+    collectVisibleOrders: async (_page, options) => {
+      const order = rawOrder();
+      const skip = options?.skip_order_ids;
+      if (skip !== undefined && order.platform_order_id !== null && skip.has(order.platform_order_id)) {
+        return { orders: [], empty: false, rows_seen: 0, recognized: 0 };
+      }
+      return { orders: [order], empty: false, rows_seen: 1, recognized: 1 };
+    },
     advancePage: async () => false,
     ...overrides,
   };
@@ -212,6 +214,173 @@ describe("runSyncOnce dry-run", () => {
     const pkg = (report.orders[0]?.["packages"] as Array<Record<string, unknown>>)[0];
     expect(pkg?.["courier"]).toBe("中通");
     expect(pkg?.["tracking_no"]).toBe("ZTO-20260813-0001");
+  });
+});
+
+describe("runSyncOnce pagination safety", () => {
+  it("stops when a captcha appears after a page change", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    let pageIndex = 0;
+    const adapter = fakeAdapter({
+      collectVisibleOrders: async () => {
+        pageIndex += 1;
+        return {
+          orders: [rawOrder()],
+          empty: false,
+          rows_seen: 1,
+          recognized: 1,
+        };
+      },
+      advancePage: async () => true,
+      detectBlock: async () =>
+        pageIndex >= 2
+          ? { blocked: true, kind: "captcha", detail: "fake slider after pagination" }
+          : { blocked: false, kind: "unknown", detail: "none" },
+    });
+    const outcome = await runSyncOnce(
+      buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "0" }),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.status).toBe("CAPTCHA_OR_BLOCKED");
+    expect(outcome.report.counts.seen).toBe(0);
+    expect(outcome.report.error_code).toBe("CAPTCHA_OR_BLOCKED");
+  });
+
+  it("stops when pagination produces no new orders", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const adapter = fakeAdapter({
+      advancePage: async () => true,
+      collectVisibleOrders: async (_page, options) => {
+        const order = rawOrder();
+        const skip = options?.skip_order_ids;
+        if (skip !== undefined && skip.has(order.platform_order_id ?? "")) {
+          return { orders: [], empty: false, rows_seen: 0, recognized: 0 };
+        }
+        return { orders: [order], empty: false, rows_seen: 1, recognized: 1 };
+      },
+    });
+    const outcome = await runSyncOnce(
+      buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "0" }),
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.report.counts.seen).toBe(1);
+    expect(outcome.report.warnings.join(" ")).toContain("no new orders");
+  });
+
+  it("stops when the next page contains unparsed rows (SCHEMA_CHANGED)", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    let pageIndex = 0;
+    const adapter = fakeAdapter({
+      advancePage: async () => true,
+      collectVisibleOrders: async () => {
+        pageIndex += 1;
+        if (pageIndex === 1) {
+          return { orders: [rawOrder()], empty: false, rows_seen: 1, recognized: 1 };
+        }
+        const broken: RawOrder = { ...rawOrder(), platform_order_id: "" };
+        return { orders: [broken], empty: false, rows_seen: 1, recognized: 0 };
+      },
+    });
+    const outcome = await runSyncOnce(
+      buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "0" }),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.status).toBe("SCHEMA_CHANGED");
+  });
+
+  it("stops when a page has a mix of parsed and unparsed rows", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const adapter = fakeAdapter({
+      collectVisibleOrders: async () => ({
+        orders: [rawOrder()],
+        empty: false,
+        rows_seen: 2,
+        recognized: 1,
+      }),
+    });
+    const outcome = await runSyncOnce(
+      buildOptions(cwd, { adapter }),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.status).toBe("SCHEMA_CHANGED");
+  });
+
+  it("truncates to max_records instead of pushing a whole page", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const manyOrders = Array.from({ length: 10 }, (_, index) => ({
+      ...rawOrder(),
+      platform_order_id: `1688-260813-${String(index).padStart(4, "0")}`,
+    }));
+    const adapter = fakeAdapter({
+      collectVisibleOrders: async () => ({
+        orders: manyOrders,
+        empty: false,
+        rows_seen: 10,
+        recognized: 10,
+      }),
+    });
+    const outcome = await runSyncOnce(
+      buildOptions(cwd, { adapter }, { SYNC_MAX_RECORDS: "3" }),
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.report.counts.seen).toBe(3);
+    expect(outcome.report.counts.valid).toBe(3);
+  });
+
+  it("stops gracefully when page advance throws", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const adapter = fakeAdapter({
+      advancePage: async () => {
+        throw new Error("click intercepted");
+      },
+    });
+    const outcome = await runSyncOnce(
+      buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "0" }),
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.report.counts.seen).toBe(1);
+    expect(outcome.report.warnings.join(" ")).toContain("pagination ended");
+  });
+
+  it("rejects an unofficial order list url via openOrders", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const opened: string[] = [];
+    const adapter = fakeAdapter({
+      openOrders: async (_page, window) => {
+        opened.push(window.order_list_url ?? "");
+        if (window.order_list_url === "https://evil.example.com/orders") {
+          throw new Error("order list host is not official");
+        }
+      },
+    });
+    const outcome = await runSyncOnce(
+      buildOptions(cwd, { adapter }, { ALI1688_ORDER_URL: "https://evil.example.com/orders" }),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.error_code).toBe("CONFIG");
+    expect(opened).toEqual(["https://evil.example.com/orders"]);
+  });
+
+  it("passes the configured order list url to the adapter", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const opened: string[] = [];
+    const adapter = fakeAdapter({
+      openOrders: async (_page, window) => {
+        opened.push(window.order_list_url ?? "");
+      },
+    });
+    await runSyncOnce(
+      buildOptions(cwd, { adapter }, { ALI1688_ORDER_URL: "https://air.1688.com/app/orders" }),
+    );
+    expect(opened).toEqual(["https://air.1688.com/app/orders"]);
   });
 });
 

@@ -1,6 +1,29 @@
-import type { Locator } from "playwright";
+import type { Locator, Page } from "playwright";
 
 import { stripLabelPrefix } from "../extract/text.js";
+
+export async function countVisible(page: Page, selector: string): Promise<number> {
+  const locator = page.locator(selector);
+  const count = await locator.count().catch(() => 0);
+  let visible = 0;
+  for (let index = 0; index < count; index += 1) {
+    if (await locator.nth(index).isVisible({ timeout: 500 }).catch(() => false)) {
+      visible += 1;
+    }
+  }
+  return visible;
+}
+
+export async function countVisibleMarkers(
+  page: Page,
+  markers: readonly string[],
+): Promise<number> {
+  let visible = 0;
+  for (const marker of markers) {
+    visible += await countVisible(page, marker);
+  }
+  return visible;
+}
 
 export async function extractLabelValue(
   container: Locator,

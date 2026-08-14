@@ -178,10 +178,22 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
   try {
     browser = await launcher(profileDir);
     const page = browser.context.pages()[0] ?? (await browser.context.newPage());
-    await adapter.openOrders(page, {
-      max_pages: config.max_pages,
-      max_records: config.max_records,
-    });
+    try {
+      await adapter.openOrders(page, {
+        max_pages: config.max_pages,
+        max_records: config.max_records,
+        order_list_url: config.order_list_urls[platform],
+      });
+    } catch (error) {
+      logger.error({
+        command: "sync-once",
+        platform,
+        message: `could not open the order list: ${(error as Error).message}`,
+        error_code: "CONFIG",
+      });
+      const report = buildReport("sync-once", platform, "dry-run", null, "DISABLED", "CONFIG", startedAt, emptyCounts(), []);
+      return { exitCode: 1, report };
+    }
 
     const state = await checkPageState(page, adapter);
     if (state.status !== "OK") {
@@ -207,11 +219,30 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
     let sawEmptyList = false;
     let rowsSeen = 0;
     let rowsRecognized = 0;
+    const seenOrderIds = new Set<string>();
     while (pages < config.max_pages && rawOrders.length < config.max_records) {
-      const list = await adapter.collectVisibleOrders(page);
+      const list = await adapter.collectVisibleOrders(page, { skip_order_ids: seenOrderIds });
+      for (const raw of list.orders) {
+        if (raw.platform_order_id !== null && raw.platform_order_id.length > 0) {
+          seenOrderIds.add(raw.platform_order_id.trim());
+        }
+      }
       rowsSeen += list.rows_seen;
       rowsRecognized += list.recognized;
-      if (list.rows_seen > 0 && list.recognized === 0) {
+      if (list.rows_seen === 0 && list.orders.length === 0) {
+        if (list.empty) {
+          sawEmptyList = true;
+        } else if (pages > 0) {
+          warnings.push("pagination produced no new orders; stopping");
+          logger.warn({
+            command: "sync-once",
+            platform,
+            message: "no new orders after page change; stopping pagination",
+          });
+        }
+        break;
+      }
+      if (list.rows_seen !== list.recognized) {
         updateCursor(config.state_dir, platform, accountKey, {
           last_status: "SCHEMA_CHANGED",
           last_sync_at: nowIso(),
@@ -221,23 +252,31 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
           command: "sync-once",
           platform,
           status: "SCHEMA_CHANGED",
-          message: `page ${pages + 1}: ${list.rows_seen} order rows visible but none could be parsed`,
+          message: `page ${pages + 1}: ${list.rows_seen} order rows visible but only ${list.recognized} parsed`,
           error_code: "SCHEMA_CHANGED",
         });
         const report = buildReport("sync-once", platform, "dry-run", null, "SCHEMA_CHANGED", "SCHEMA_CHANGED", startedAt, emptyCounts(), []);
         writeReportFile(config, platform, report, [], logger);
         return { exitCode: 1, report };
       }
-      if (list.empty && list.orders.length === 0) {
-        sawEmptyList = true;
-        break;
-      }
       const remaining = config.max_records - rawOrders.length;
       rawOrders.push(...list.orders.slice(0, remaining));
       pages += 1;
       if (rawOrders.length >= config.max_records || pages >= config.max_pages) break;
-      const advanced = await adapter.advancePage(page);
-      if (!advanced) break;
+      let advanced = false;
+      try {
+        advanced = await adapter.advancePage(page);
+      } catch (error) {
+        logger.warn({
+          command: "sync-once",
+          platform,
+          message: `page advance failed: ${(error as Error).message}; stopping`,
+        });
+      }
+      if (!advanced) {
+        warnings.push("pagination ended");
+        break;
+      }
       const recheck = await checkPageState(page, adapter);
       if (recheck.status !== "OK") {
         updateCursor(config.state_dir, platform, accountKey, {

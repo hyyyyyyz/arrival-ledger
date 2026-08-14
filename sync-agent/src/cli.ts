@@ -1,10 +1,8 @@
 import { existsSync, mkdirSync, accessSync, constants } from "node:fs";
 import { parseArgs } from "node:util";
 
-import { getAdapter } from "./adapters/index.js";
-import { launchSyncBrowser } from "./browser/context.js";
-import { checkPageState } from "./browser/guards.js";
 import { configFailures, loadConfig, maskKey } from "./config.js";
+import { runLoginCheck as runLoginCheckFlow } from "./login_check.js";
 import { JsonLogger } from "./log.js";
 import { isPlatform, PLATFORMS, type Platform } from "./models.js";
 import { runSyncOnce } from "./run.js";
@@ -209,50 +207,14 @@ async function runDoctor(options: {
   return failures.length === 0 ? 0 : 1;
 }
 
-async function runLoginCheck(platform: Platform): Promise<number> {
+async function runLoginCheckCommand(platform: Platform): Promise<number> {
   const { config, issues } = loadConfig();
   const configExit = requireValidConfig(issues);
   if (configExit !== null) return configExit;
 
   const logger = new JsonLogger({ logDir: config.log_dir });
-  const accountKey = config.account_keys[platform];
-  const profileDir = config.profile_dirs[platform];
-  if (!existsSync(profileDir)) {
-    return fail(`profile dir ${profileDir} does not exist; create it before login-check`, 1);
-  }
-
-  const lock = acquireLock(config.state_dir, platform, accountKey, config.worker_id);
-  if (!lock.held) {
-    logger.error({
-      command: "login-check",
-      platform,
-      message: `another sync is running (${describeHolder(lock.holder)})`,
-      error_code: "LOCKED",
-    });
-    return 1;
-  }
-
-  const adapter = getAdapter(platform);
-  let browser = null;
-  try {
-    browser = await launchSyncBrowser(profileDir);
-    const page = browser.context.pages()[0] ?? (await browser.context.newPage());
-    await adapter.openOrders(page, { max_pages: 1, max_records: 1 });
-    const state = await checkPageState(page, adapter);
-    process.stdout.write(`[${state.status === "OK" ? "OK" : "WARN"}] ${platform} login state: ${state.detail}\n`);
-    if (state.status !== "OK") {
-      process.stdout.write(
-        "Please finish login manually in the visible browser window. This tool never fills passwords or solves captchas.\n",
-      );
-      logger.warn({ command: "login-check", platform, status: state.status, message: state.detail });
-      return 1;
-    }
-    logger.info({ command: "login-check", platform, status: "OK", message: state.detail });
-    return 0;
-  } finally {
-    if (browser !== null) await browser.close().catch(() => undefined);
-    lock.release();
-  }
+  const outcome = await runLoginCheckFlow({ config, platform, logger });
+  return outcome.exitCode;
 }
 
 async function runSyncOnceCommand(
@@ -308,7 +270,7 @@ async function main(): Promise<number> {
       return runDoctor({ offline: values.offline, platform });
     case "login-check":
       if (platform === null) return fail(`--platform is required for login-check`);
-      return runLoginCheck(platform);
+      return runLoginCheckCommand(platform);
     case "sync-once": {
       if (platform === null) return fail(`--platform is required for sync-once`);
       if (values.mode === undefined) return fail(`--mode dry-run|commit is required for sync-once`);

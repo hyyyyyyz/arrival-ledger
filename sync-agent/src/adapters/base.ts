@@ -17,6 +17,11 @@ export interface BlockState {
 export interface SyncWindow {
   max_pages: number;
   max_records: number;
+  order_list_url?: string;
+}
+
+export interface CollectOptions {
+  skip_order_ids?: ReadonlySet<string>;
 }
 
 export interface OrderListState {
@@ -33,6 +38,6 @@ export interface PlatformAdapter {
   openOrders(page: Page, window: SyncWindow): Promise<void>;
   detectLogin(page: Page): Promise<LoginState>;
   detectBlock(page: Page): Promise<BlockState>;
-  collectVisibleOrders(page: Page): Promise<OrderListState>;
+  collectVisibleOrders(page: Page, options?: CollectOptions): Promise<OrderListState>;
   advancePage(page: Page): Promise<boolean>;
 }
