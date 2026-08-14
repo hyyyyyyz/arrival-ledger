@@ -11,6 +11,14 @@ from app.main import create_app
 from app.sync_ingest import ingest_sync_batch
 
 
+def post_batch(test_client: TestClient, payload: dict, headers: dict[str, str]):
+    return test_client.post(
+        "/api/sync/v1/batches",
+        json=payload,
+        headers={**headers, "Idempotency-Key": payload["batch_id"]},
+    )
+
+
 def batch_payload(batch_id: str = "b0000000-0000-4000-8000-000000000001", **overrides) -> dict:
     payload = {
         "schema_version": 1,
@@ -50,7 +58,7 @@ def batch_payload(batch_id: str = "b0000000-0000-4000-8000-000000000001", **over
 
 
 def test_sync_batch_requires_worker_token(client: TestClient) -> None:
-    assert client.post("/api/sync/v1/batches", json=batch_payload()).status_code == 401
+    assert post_batch(client, batch_payload(), {}).status_code == 401
     assert (
         client.post(
             "/api/sync/v1/batches",
@@ -68,14 +76,14 @@ def test_sync_batch_rejects_unknown_and_sensitive_fields(
     payload["cookie"] = "session=secret"
     payload["orders"][0]["receiver_phone"] = "13800138000"
     payload["orders"][0]["items"][0]["password"] = "hunter2"
-    response = client.post("/api/sync/v1/batches", json=payload, headers=sync_headers)
+    response = post_batch(client, payload, sync_headers)
     assert response.status_code == 422
 
 
 def test_sync_batch_accepts_and_ingests(
     client: TestClient, sync_headers: dict[str, str], settings
 ) -> None:
-    response = client.post("/api/sync/v1/batches", json=batch_payload(), headers=sync_headers)
+    response = post_batch(client, batch_payload(), sync_headers)
     assert response.status_code == 200
     body = response.json()
     assert body["batch_id"] == "b0000000-0000-4000-8000-000000000001"
@@ -113,9 +121,9 @@ def test_sync_batch_accepts_and_ingests(
 def test_sync_batch_replay_returns_original_result(
     client: TestClient, sync_headers: dict[str, str]
 ) -> None:
-    first = client.post("/api/sync/v1/batches", json=batch_payload(), headers=sync_headers)
+    first = post_batch(client, batch_payload(), sync_headers)
     assert first.status_code == 200
-    second = client.post("/api/sync/v1/batches", json=batch_payload(), headers=sync_headers)
+    second = post_batch(client, batch_payload(), sync_headers)
     assert second.status_code == 200
     assert second.json()["created"] == first.json()["created"]
     with client.app.state.database.connect() as connection:
@@ -126,10 +134,10 @@ def test_sync_batch_replay_returns_original_result(
 def test_sync_batch_id_conflict_returns_409(
     client: TestClient, sync_headers: dict[str, str]
 ) -> None:
-    assert client.post("/api/sync/v1/batches", json=batch_payload(), headers=sync_headers).status_code == 200
+    assert post_batch(client, batch_payload(), sync_headers).status_code == 200
     changed = batch_payload()
     changed["orders"][0]["platform_order_id"] = "260813-0002"
-    response = client.post("/api/sync/v1/batches", json=changed, headers=sync_headers)
+    response = post_batch(client, changed, sync_headers)
     assert response.status_code == 409
 
 
@@ -145,7 +153,7 @@ def test_sync_batch_rejects_bad_fields(
         batch_payload(batch_id=""),
     ]
     for payload in cases:
-        response = client.post("/api/sync/v1/batches", json=payload, headers=sync_headers)
+        response = post_batch(client, payload, sync_headers)
         assert response.status_code == 422, json.dumps(payload)[:200]
 
     bad_orders = [
@@ -162,7 +170,7 @@ def test_sync_batch_rejects_bad_fields(
     for order in bad_orders:
         payload = batch_payload(batch_id="b0000000-0000-4000-8000-000000000009")
         payload["orders"] = [order]
-        response = client.post("/api/sync/v1/batches", json=payload, headers=sync_headers)
+        response = post_batch(client, payload, sync_headers)
         assert response.status_code == 422, json.dumps(order)[:200]
 
 
@@ -190,10 +198,10 @@ def test_sync_batch_size_limit(client: TestClient, settings, sync_headers: dict[
             }
             for index in range(100)
         ]
-        response = limited.post(
-            "/api/sync/v1/batches",
-            json=big,
-            headers={"Authorization": "Bearer test-sync-worker-token-0001"},
+        response = post_batch(
+            limited,
+            big,
+            {"Authorization": "Bearer test-sync-worker-token-0001"},
         )
         assert response.status_code == 413
 
@@ -202,17 +210,11 @@ def test_sync_batch_rate_limit(client: TestClient, settings) -> None:
     limited = replace(settings, sync_rate_limit_per_hour=2)
     with TestClient(create_app(limited)) as test_client:
         headers = {"Authorization": "Bearer test-sync-worker-token-0001"}
-        first = test_client.post(
-            "/api/sync/v1/batches", json=batch_payload("b-rate-0001"), headers=headers
-        )
+        first = post_batch(test_client, batch_payload("b-rate-0001"), headers)
         assert first.status_code == 200
-        second = test_client.post(
-            "/api/sync/v1/batches", json=batch_payload("b-rate-0002"), headers=headers
-        )
+        second = post_batch(test_client, batch_payload("b-rate-0002"), headers)
         assert second.status_code == 200
-        third = test_client.post(
-            "/api/sync/v1/batches", json=batch_payload("b-rate-0003"), headers=headers
-        )
+        third = post_batch(test_client, batch_payload("b-rate-0003"), headers)
         assert third.status_code == 429
         assert "Retry-After" in third.headers
 
@@ -227,10 +229,10 @@ def test_worker_token_cannot_access_admin_endpoints(
 def test_sync_batch_unavailable_without_tokens(client: TestClient, settings) -> None:
     unconfigured = replace(settings, sync_worker_tokens=())
     with TestClient(create_app(unconfigured)) as test_client:
-        response = test_client.post(
-            "/api/sync/v1/batches",
-            json=batch_payload(),
-            headers={"Authorization": "Bearer anything-at-all-0001"},
+        response = post_batch(
+            test_client,
+            batch_payload(),
+            {"Authorization": "Bearer anything-at-all-0001"},
         )
         assert response.status_code == 503
 
@@ -297,14 +299,10 @@ def test_ingest_rolls_back_on_failure(client: TestClient, sync_headers: dict[str
 def test_repeat_ingest_is_idempotent(
     client: TestClient, sync_headers: dict[str, str]
 ) -> None:
-    first = client.post(
-        "/api/sync/v1/batches", json=batch_payload("b-repeat-0001"), headers=sync_headers
-    )
+    first = post_batch(client, batch_payload("b-repeat-0001"), sync_headers)
     assert first.status_code == 200
     assert first.json()["created"] == 1
-    second = client.post(
-        "/api/sync/v1/batches", json=batch_payload("b-repeat-0002"), headers=sync_headers
-    )
+    second = post_batch(client, batch_payload("b-repeat-0002"), sync_headers)
     assert second.status_code == 200
     assert second.json()["skipped"] == 1
     assert second.json()["created"] == 0
@@ -342,7 +340,7 @@ def test_multi_package_and_cross_platform_links(
             "observed_at": "2026-08-13T02:00:10.000Z",
         },
     ]
-    assert client.post("/api/sync/v1/batches", json=payload, headers=sync_headers).status_code == 200
+    assert post_batch(client, payload, sync_headers).status_code == 200
 
     platform2 = batch_payload("b-links-0002", platform="1688", platform_account_key="1688-main")
     platform2["orders"] = [
@@ -356,7 +354,7 @@ def test_multi_package_and_cross_platform_links(
             "observed_at": "2026-08-13T02:00:10.000Z",
         }
     ]
-    assert client.post("/api/sync/v1/batches", json=platform2, headers=sync_headers).status_code == 200
+    assert post_batch(client, platform2, sync_headers).status_code == 200
 
     with client.app.state.database.connect() as connection:
         package_rows = connection.execute(
@@ -377,5 +375,5 @@ def test_sync_endpoint_ignores_trusted_lan_mode(client: TestClient) -> None:
         "X-Arrival-Client": "wechat-h5",
         "Authorization": "Bearer test-sync-worker-token-0001",
     }
-    response = client.post("/api/sync/v1/batches", json=batch_payload(), headers=trusted_headers)
+    response = post_batch(client, batch_payload(), trusted_headers)
     assert response.status_code == 200

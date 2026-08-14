@@ -13,7 +13,11 @@ def test_backend_accepts_the_ts_client_golden_contract(
     client: TestClient, sync_headers: dict[str, str]
 ) -> None:
     payload = json.loads(CONTRACT_FILE.read_text(encoding="utf-8"))
-    response = client.post("/api/sync/v1/batches", json=payload, headers=sync_headers)
+    response = client.post(
+        "/api/sync/v1/batches",
+        json=payload,
+        headers={**sync_headers, "Idempotency-Key": payload["batch_id"]},
+    )
     assert response.status_code == 200
     body = response.json()
     assert body["batch_id"] == "b0000000-0000-4000-8000-00000000dead"
@@ -53,8 +57,16 @@ def test_backend_replays_the_golden_contract_idempotently(
     client: TestClient, sync_headers: dict[str, str]
 ) -> None:
     payload = json.loads(CONTRACT_FILE.read_text(encoding="utf-8"))
-    first = client.post("/api/sync/v1/batches", json=payload, headers=sync_headers)
-    second = client.post("/api/sync/v1/batches", json=payload, headers=sync_headers)
+    first = client.post(
+        "/api/sync/v1/batches",
+        json=payload,
+        headers={**sync_headers, "Idempotency-Key": payload["batch_id"]},
+    )
+    second = client.post(
+        "/api/sync/v1/batches",
+        json=payload,
+        headers={**sync_headers, "Idempotency-Key": payload["batch_id"]},
+    )
     assert first.status_code == 200
     assert second.status_code == 200
     assert second.json() == first.json()

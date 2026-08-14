@@ -793,6 +793,27 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 detail=exc.errors(include_url=False, include_context=False, include_input=False),
             ) from exc
 
+        idempotency_key = request.headers.get("idempotency-key", "").strip()
+        if idempotency_key != payload.batch_id:
+            raise HTTPException(
+                status_code=422,
+                detail="Idempotency-Key header must match the batch_id in the body",
+            )
+        if len(payload.orders) > settings.sync_max_batch_orders:
+            raise HTTPException(
+                status_code=422,
+                detail=f"batch exceeds the configured order limit of {settings.sync_max_batch_orders}",
+            )
+        seen_order_ids: set[str] = set()
+        for order in payload.orders:
+            order_id = order.platform_order_id.strip()
+            if order_id in seen_order_ids:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"duplicate platform_order_id in batch: {order_id}",
+                )
+            seen_order_ids.add(order_id)
+
         payload_sha256 = canonical_payload_digest(
             json.dumps(parsed, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode(
                 "utf-8"
@@ -812,15 +833,23 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                     status_code=409,
                     detail="batch_id was already used with different content",
                 )
-            counts = parse_batch_counts(existing["counts_json"])
-            return SyncBatchResponse(
-                batch_id=payload.batch_id,
-                created=counts.get("created", 0),
-                updated=counts.get("updated", 0),
-                skipped=counts.get("skipped", 0),
-                errors=[],
-                cursor_accepted=True,
-            )
+            if existing["status"] == "OK":
+                counts = parse_batch_counts(existing["counts_json"])
+                return SyncBatchResponse(
+                    batch_id=payload.batch_id,
+                    created=counts.get("created", 0),
+                    updated=counts.get("updated", 0),
+                    skipped=counts.get("skipped", 0),
+                    errors=[],
+                    cursor_accepted=True,
+                )
+            with database.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "DELETE FROM sync_batches WHERE batch_id = ? AND status = 'ERROR'",
+                    (payload.batch_id,),
+                )
+                connection.commit()
 
         now = utc_now()
         cutoff = db_timestamp(now - timedelta(hours=1))

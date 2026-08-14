@@ -1,0 +1,376 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import replace
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from app.database import Database, Migration, SCHEMA, _exec_script_in_tx
+from app.main import create_app
+from app.sync_ingest import canonical_payload_digest, item_identity
+
+from test_sync_api import batch_payload, post_batch
+
+
+def canonical_digest(payload: dict) -> str:
+    return canonical_payload_digest(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode(
+            "utf-8"
+        )
+    )
+
+
+def insert_error_batch(client: TestClient, payload: dict) -> None:
+    digest = canonical_digest(payload)
+    with client.app.state.database.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO sync_batches(
+                batch_id, worker_id, platform, account_key, token_digest,
+                payload_sha256, status, counts_json, cursor_before, cursor_after,
+                error_code, error_message, started_at, finished_at, received_at
+            ) VALUES (?, ?, ?, ?, 'td', ?, 'ERROR', '{"created":0,"updated":0,"skipped":0,"errors":1}',
+                      NULL, NULL, 'INGEST_FAILED', 'injected', ?, ?, ?)
+            """,
+            (
+                payload["batch_id"],
+                payload["worker_id"],
+                payload["platform"],
+                payload["platform_account_key"],
+                digest,
+                payload["started_at"],
+                payload["finished_at"],
+                payload["finished_at"],
+            ),
+        )
+        connection.commit()
+
+
+def test_error_batch_retry_reprocesses_safely(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    payload = batch_payload("b-error-retry-0001")
+    insert_error_batch(client, payload)
+    response = post_batch(client, payload, sync_headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["created"] == 1
+    assert body["cursor_accepted"] is True
+    with client.app.state.database.connect() as connection:
+        batches = connection.execute(
+            "SELECT status, counts_json FROM sync_batches WHERE batch_id = 'b-error-retry-0001'"
+        ).fetchall()
+        assert len(batches) == 1
+        assert batches[0]["status"] == "OK"
+        assert connection.execute("SELECT COUNT(*) AS c FROM purchase_orders").fetchone()["c"] == 1
+
+
+def test_error_batch_conflicting_content_returns_409(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    payload = batch_payload("b-error-conflict-0001")
+    insert_error_batch(client, payload)
+    changed = batch_payload("b-error-conflict-0001")
+    changed["orders"][0]["platform_order_id"] = "260813-9999"
+    response = post_batch(client, changed, sync_headers)
+    assert response.status_code == 409
+    with client.app.state.database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) AS c FROM purchase_orders").fetchone()["c"] == 0
+
+
+def test_idempotency_key_must_match_batch_id(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    payload = batch_payload("b-idem-key-0001")
+    missing = client.post(
+        "/api/sync/v1/batches", json=payload, headers=sync_headers
+    )
+    assert missing.status_code == 422
+    mismatched = client.post(
+        "/api/sync/v1/batches",
+        json=payload,
+        headers={**sync_headers, "Idempotency-Key": "different-batch-id"},
+    )
+    assert mismatched.status_code == 422
+
+
+def test_duplicate_platform_order_id_in_batch_is_rejected(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    payload = batch_payload("b-dup-order-0001")
+    payload["orders"] = batch_payload()["orders"] * 2
+    assert post_batch(client, payload, sync_headers).status_code == 422
+
+
+def test_blank_ids_and_ordering_are_rejected(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    for payload in (
+        batch_payload(batch_id="   "),
+        batch_payload("b-blank-0002", worker_id="  "),
+        batch_payload(
+            "b-blank-0003",
+            finished_at="2026-08-13T01:00:00.000Z",
+        ),
+        batch_payload(
+            "b-blank-0004",
+            orders=[
+                {
+                    **batch_payload()["orders"][0],
+                    "platform_order_id": "   ",
+                }
+            ],
+        ),
+    ):
+        assert post_batch(client, payload, sync_headers).status_code == 422
+
+
+def test_sync_max_batch_orders_is_enforced(
+    client: TestClient, settings, sync_headers: dict[str, str]
+) -> None:
+    limited = replace(settings, sync_max_batch_orders=2)
+    with TestClient(create_app(limited)) as test_client:
+        headers = {**sync_headers}
+        payload = batch_payload("b-order-limit-0001")
+        payload["orders"] = [
+            {**batch_payload()["orders"][0], "platform_order_id": f"260813-{index:04d}"}
+            for index in range(3)
+        ]
+        response = post_batch(test_client, payload, headers)
+        assert response.status_code == 422
+
+
+def test_item_fingerprint_prevents_duplicate_rows(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    payload = batch_payload("b-item-fp-0001")
+    payload["orders"][0]["items"] = [
+        {"item_key": None, "title": "无ID商品", "sku_text": "标准", "quantity": 1, "unit_price": None},
+        {"item_key": None, "title": "无ID商品", "sku_text": "标准", "quantity": 1, "unit_price": None},
+    ]
+    assert post_batch(client, payload, sync_headers).status_code == 200
+    with client.app.state.database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) AS c FROM order_items").fetchone()["c"] == 1
+    second = batch_payload("b-item-fp-0002")
+    second["orders"][0]["items"] = [
+        {"item_key": None, "title": "无ID商品", "sku_text": "标准", "quantity": 3, "unit_price": "9.99"},
+    ]
+    assert post_batch(client, second, sync_headers).status_code == 200
+    with client.app.state.database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) AS c FROM order_items").fetchone()["c"] == 1
+        row = connection.execute("SELECT quantity, unit_price FROM order_items").fetchone()
+        assert row["quantity"] == "3"
+        assert row["unit_price"] == "9.99"
+
+
+def test_item_identity_matches_platform_id_first() -> None:
+    assert item_identity("item-1", "标题", None) == "item-1"
+    fingerprint = item_identity(None, "标题", "规格")
+    assert fingerprint.startswith("fp:")
+    assert fingerprint == item_identity(None, " 标题 ", " 规格 ")
+    assert fingerprint != item_identity(None, "另一标题", "规格")
+
+
+def test_item_and_package_changes_update_in_place(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    first = batch_payload("b-upsert-0001")
+    assert post_batch(client, first, sync_headers).status_code == 200
+    second = batch_payload("b-upsert-0002")
+    second["orders"][0]["items"][0]["quantity"] = 5
+    second["orders"][0]["items"][0]["unit_price"] = "20.00"
+    second["orders"][0]["items"][0]["sku_text"] = "规格:加大"
+    second["orders"][0]["packages"] = [
+        {"courier": "顺丰速运", "tracking_no": "SF515407643541", "status": "DELIVERED"}
+    ]
+    response = post_batch(client, second, sync_headers)
+    assert response.status_code == 200
+    assert response.json()["updated"] == 1
+    assert response.json()["skipped"] == 0
+    with client.app.state.database.connect() as connection:
+        items = connection.execute(
+            "SELECT quantity, unit_price, sku_text FROM order_items"
+        ).fetchall()
+        assert len(items) == 1
+        assert items[0]["quantity"] == "5"
+        assert items[0]["unit_price"] == "20.00"
+        assert items[0]["sku_text"] == "规格:加大"
+        packages = connection.execute(
+            "SELECT courier, package_status FROM packages"
+        ).fetchall()
+        assert len(packages) == 1
+        assert packages[0]["package_status"] == "DELIVERED"
+
+
+def test_unknown_then_known_courier_merges_one_physical_package(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    first = batch_payload("b-courier-0001")
+    first["orders"][0]["packages"] = [
+        {"courier": None, "tracking_no": "8800123456789", "status": None}
+    ]
+    assert post_batch(client, first, sync_headers).status_code == 200
+    second = batch_payload("b-courier-0002")
+    second["orders"][0]["packages"] = [
+        {"courier": "中通快递", "tracking_no": "8800123456789", "status": "SHIPPED"}
+    ]
+    assert post_batch(client, second, sync_headers).status_code == 200
+    with client.app.state.database.connect() as connection:
+        packages = connection.execute(
+            "SELECT courier, courier_normalized, package_status FROM packages"
+        ).fetchall()
+        assert len(packages) == 1
+        assert packages[0]["courier_normalized"] == "中通快递"
+        assert packages[0]["package_status"] == "SHIPPED"
+
+
+def test_known_then_unknown_courier_does_not_create_duplicate(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    first = batch_payload("b-courier-rev-0001")
+    first["orders"][0]["packages"] = [
+        {"courier": "中通快递", "tracking_no": "8800123456789", "status": "SHIPPED"}
+    ]
+    assert post_batch(client, first, sync_headers).status_code == 200
+    second = batch_payload("b-courier-rev-0002")
+    second["orders"][0]["packages"] = [
+        {"courier": None, "tracking_no": "8800123456789", "status": None}
+    ]
+    assert post_batch(client, second, sync_headers).status_code == 200
+    with client.app.state.database.connect() as connection:
+        packages = connection.execute(
+            "SELECT courier_normalized FROM packages"
+        ).fetchall()
+        assert len(packages) == 1
+        assert packages[0]["courier_normalized"] == "中通快递"
+
+
+def test_migration_upgrades_old_database_and_keeps_receipts(
+    tmp_path, client: TestClient
+) -> None:
+    old_path = tmp_path / "old" / "arrival.db"
+    old_path.parent.mkdir(parents=True)
+    raw = sqlite3.connect(old_path)
+    raw.row_factory = sqlite3.Row
+    _exec_script_in_tx(raw, SCHEMA)
+    raw.execute(
+        """
+        INSERT INTO users(id, username, display_name, role, password_hash, is_active, created_at)
+        VALUES (1, 'admin', '旧管理员', 'ADMIN', 'x', 1, '2026-08-01T00:00:00.000Z')
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO receipt_events(
+            id, client_event_id, operator_user_id, event_type, input_method,
+            captured_at, server_received_at, device_id, tracking_no,
+            tracking_no_normalized, evidence_status, photo_storage_path,
+            photo_content_type, photo_sha256, photo_size, created_at, updated_at
+        ) VALUES (
+            1, 'legacy-event-0001', 1, 'RECEIVE', 'PHOTO_CAPTURE',
+            '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:01.000Z', 'legacy-device',
+            'SF0000000000000', 'SF0000000000000', 'READY', '2026/08/legacy.jpg',
+            'image/jpeg', 'aa', 10, '2026-08-01T00:00:01.000Z', '2026-08-01T00:00:01.000Z'
+        )
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO platform_accounts(id, platform, account_key, source, created_at, updated_at)
+        VALUES (1, 'pdd', 'pdd-main', 'WINDOWS_BROWSER', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z')
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO purchase_orders(
+            id, platform_account_id, platform_order_id, ordered_at, order_status,
+            shop_name, source, last_seen_at, created_at, updated_at
+        ) VALUES (1, 1, 'legacy-order-0001', NULL, 'UNKNOWN', NULL,
+                  'WINDOWS_BROWSER', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z')
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO order_items(id, order_id, item_key, title, sku_text, quantity, unit_price)
+        VALUES (1, 1, NULL, '旧商品A', '标准', '2', NULL)
+        """
+    )
+    raw.execute(
+        """
+        INSERT INTO order_items(id, order_id, item_key, title, sku_text, quantity, unit_price)
+        VALUES (2, 1, NULL, '旧商品A', '标准', '2', NULL)
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    database = Database(old_path)
+    database.initialize(
+        bootstrap_username="admin",
+        bootstrap_password="correct horse battery staple",
+        bootstrap_display_name="管理员",
+        session_secret="test-session-secret-that-is-long-enough",
+        sync_worker_tokens=("test-sync-worker-token-0001",),
+        now="2026-08-13T00:00:00.000Z",
+    )
+    with database.connect() as connection:
+        receipts = connection.execute(
+            "SELECT client_event_id FROM receipt_events"
+        ).fetchall()
+        assert [row["client_event_id"] for row in receipts] == ["legacy-event-0001"]
+        items = connection.execute(
+            "SELECT id, item_key FROM order_items ORDER BY id"
+        ).fetchall()
+        assert len(items) == 1
+        assert items[0]["item_key"].startswith("fp:")
+        migrations = connection.execute(
+            "SELECT version, name FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert [row["version"] for row in migrations] == [1, 2]
+
+
+def test_failed_migration_leaves_no_partial_schema(tmp_path) -> None:
+    path = tmp_path / "fail" / "arrival.db"
+    path.parent.mkdir(parents=True)
+
+    def bad_migration(connection: sqlite3.Connection) -> None:
+        connection.execute("CREATE TABLE half_baked_table (id INTEGER PRIMARY KEY)")
+        raise RuntimeError("boom")
+
+    import app.database as database_module
+
+    original = database_module.MIGRATIONS
+    database_module.MIGRATIONS = original + (
+        Migration(version=3, name="bad_migration", apply=bad_migration),
+    )
+    try:
+        database = Database(path)
+        try:
+            database.initialize(
+                bootstrap_username="admin",
+                bootstrap_password="correct horse battery staple",
+                bootstrap_display_name="管理员",
+                session_secret="test-session-secret-that-is-long-enough",
+                sync_worker_tokens=(),
+                now="2026-08-13T00:00:00.000Z",
+            )
+            raise AssertionError("initialize should have raised")
+        except RuntimeError:
+            pass
+    finally:
+        database_module.MIGRATIONS = original
+
+    with database.connect() as connection:
+        applied = {row["name"] for row in connection.execute("SELECT name FROM schema_migrations")}
+        assert "bad_migration" not in applied
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert "half_baked_table" not in tables
+        assert "users" in tables
+        assert "receipt_events" in tables

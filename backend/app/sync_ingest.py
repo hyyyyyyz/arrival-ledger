@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SYNC_SCHEMA_VERSION = 1
 SYNC_SOURCE = "WINDOWS_BROWSER"
@@ -67,6 +67,13 @@ class SyncOrderIn(BaseModel):
     packages: list[SyncPackageIn] = Field(default_factory=list, max_length=20)
     observed_at: datetime
 
+    @field_validator("platform_order_id")
+    @classmethod
+    def platform_order_id_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
     @field_validator("ordered_at", "observed_at")
     @classmethod
     def require_aware(cls, value: datetime | None) -> datetime | None:
@@ -90,12 +97,25 @@ class SyncBatchIn(BaseModel):
     mode: Literal["commit"]
     orders: list[SyncOrderIn] = Field(min_length=1, max_length=100)
 
+    @field_validator("batch_id", "worker_id", "platform_account_key")
+    @classmethod
+    def not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
     @field_validator("started_at", "finished_at")
     @classmethod
     def require_aware(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("must include a timezone offset")
         return value
+
+    @model_validator(mode="after")
+    def finished_after_started(self) -> "SyncBatchIn":
+        if self.finished_at < self.started_at:
+            raise ValueError("finished_at must not be earlier than started_at")
+        return self
 
 
 class SyncBatchResponse(BaseModel):
@@ -113,6 +133,17 @@ def normalize_tracking_no(value: str) -> str:
 
 def normalize_courier(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().upper()
+
+
+def normalize_title(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def item_identity(item_key: str | None, title: str, sku_text: str | None) -> str:
+    if item_key is not None and item_key.strip():
+        return item_key.strip()[:64]
+    raw = f"{normalize_title(title)}\x1f{normalize_title(sku_text or '')}"
+    return "fp:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
 def batch_counts_json(created: int, updated: int, skipped: int, errors: int) -> str:
@@ -308,33 +339,69 @@ def _upsert_order(
             counted = True
 
     for item in order.items:
-        cursor = connection.execute(
+        key = item_identity(item.item_key, item.title, item.sku_text)
+        existing_item = connection.execute(
             """
-            INSERT OR IGNORE INTO order_items(order_id, item_key, title, sku_text, quantity, unit_price)
-            VALUES (?, ?, ?, ?, ?, ?)
+            SELECT id, title, sku_text, quantity, unit_price
+            FROM order_items WHERE order_id = ? AND item_key = ?
             """,
-            (
-                order_id,
-                item.item_key,
-                item.title,
-                item.sku_text,
-                str(item.quantity),
-                item.unit_price,
-            ),
-        )
-        if cursor.rowcount == 1:
+            (order_id, key),
+        ).fetchone()
+        if existing_item is None:
+            connection.execute(
+                """
+                INSERT INTO order_items(order_id, item_key, title, sku_text, quantity, unit_price)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    order_id,
+                    key,
+                    item.title,
+                    item.sku_text,
+                    str(item.quantity),
+                    item.unit_price,
+                ),
+            )
             changed = True
+        else:
+            quantity_text = str(item.quantity)
+            if (
+                existing_item["title"] != item.title
+                or existing_item["sku_text"] != item.sku_text
+                or existing_item["quantity"] != quantity_text
+                or existing_item["unit_price"] != item.unit_price
+            ):
+                connection.execute(
+                    """
+                    UPDATE order_items
+                    SET title = ?, sku_text = ?, quantity = ?, unit_price = ?
+                    WHERE id = ?
+                    """,
+                    (item.title, item.sku_text, quantity_text, item.unit_price, existing_item["id"]),
+                )
+                changed = True
 
     for package in order.packages:
         courier_normalized = normalize_courier(package.courier or "")
         tracking_normalized = normalize_tracking_no(package.tracking_no)
         package_row = connection.execute(
             """
-            SELECT id FROM packages
+            SELECT id, courier, courier_normalized, package_status
+            FROM packages
             WHERE courier_normalized = ? AND tracking_no_normalized = ?
             """,
             (courier_normalized, tracking_normalized),
         ).fetchone()
+        if package_row is None:
+            candidates = connection.execute(
+                """
+                SELECT id, courier, courier_normalized, package_status
+                FROM packages WHERE tracking_no_normalized = ?
+                """,
+                (tracking_normalized,),
+            ).fetchall()
+            if len(candidates) == 1:
+                package_row = candidates[0]
         if package_row is None:
             cursor = connection.execute(
                 """
@@ -355,8 +422,35 @@ def _upsert_order(
                 ),
             )
             package_id = cursor.lastrowid
+            changed = True
         else:
             package_id = package_row["id"]
+            updates: list[str] = []
+            parameters: list[str | None] = []
+            if courier_normalized and package_row["courier_normalized"] != courier_normalized:
+                updates.append("courier = ?, courier_normalized = ?")
+                parameters.extend([package.courier, courier_normalized])
+            elif (
+                package.courier is not None
+                and package_row["courier"] != package.courier
+            ):
+                updates.append("courier = ?")
+                parameters.append(package.courier)
+            if (
+                package.status is not None
+                and package_row["package_status"] != package.status
+            ):
+                updates.append("package_status = ?")
+                parameters.append(package.status)
+            if updates:
+                parameters.extend([now, package_id])
+                connection.execute(
+                    f"""
+                    UPDATE packages SET {", ".join(updates)}, updated_at = ? WHERE id = ?
+                    """,
+                    parameters,
+                )
+                changed = True
         link_cursor = connection.execute(
             """
             INSERT OR IGNORE INTO package_order_links(package_id, order_id, order_item_id, created_at)

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from .security import hash_password, session_token_digest
+from .sync_ingest import item_identity
 
 
 SCHEMA = """
@@ -168,6 +170,65 @@ CREATE INDEX IF NOT EXISTS idx_sync_batches_rate
 """
 
 
+@dataclass(frozen=True)
+class Migration:
+    version: int
+    name: str
+    apply: Callable[[sqlite3.Connection], None]
+
+
+def _exec_script_in_tx(connection: sqlite3.Connection, script: str) -> None:
+    for statement in script.split(";"):
+        stripped = statement.strip()
+        if stripped:
+            connection.execute(stripped)
+
+
+def _migration_initial_schema(connection: sqlite3.Connection) -> None:
+    _exec_script_in_tx(connection, SCHEMA)
+
+
+def _migration_item_identity(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        DELETE FROM order_items
+        WHERE id NOT IN (
+            SELECT MIN(id) FROM order_items
+            GROUP BY order_id, item_key, title, sku_text
+        )
+        """
+    )
+    rows = connection.execute(
+        "SELECT id, title, sku_text FROM order_items WHERE item_key IS NULL OR item_key = ''"
+    ).fetchall()
+    for row in rows:
+        connection.execute(
+            "UPDATE order_items SET item_key = ? WHERE id = ?",
+            (item_identity(None, row["title"], row["sku_text"]), row["id"]),
+        )
+    connection.execute(
+        """
+        DELETE FROM order_items
+        WHERE id NOT IN (
+            SELECT MIN(id) FROM order_items
+            GROUP BY order_id, item_key
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_order_items_order_key
+            ON order_items(order_id, item_key)
+        """
+    )
+
+
+MIGRATIONS: tuple[Migration, ...] = (
+    Migration(version=1, name="initial_schema", apply=_migration_initial_schema),
+    Migration(version=2, name="item_identity", apply=_migration_item_identity),
+)
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
@@ -201,19 +262,36 @@ class Database:
         with self.connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
-            connection.executescript(SCHEMA)
-            self._sync_worker_tokens(connection, session_secret, sync_worker_tokens, now)
-            columns = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(receipt_events)").fetchall()
-            }
-            if "duplicate_of_receipt_id" not in columns:
-                connection.execute(
-                    """
-                    ALTER TABLE receipt_events
-                    ADD COLUMN duplicate_of_receipt_id INTEGER REFERENCES receipt_events(id)
-                    """
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version INTEGER NOT NULL,
+                    name TEXT NOT NULL UNIQUE,
+                    applied_at TEXT NOT NULL
                 )
+                """
+            )
+            applied = {
+                row["name"]
+                for row in connection.execute("SELECT name FROM schema_migrations").fetchall()
+            }
+            for migration in MIGRATIONS:
+                if migration.name in applied:
+                    continue
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    migration.apply(connection)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+                        (migration.version, migration.name, now),
+                    )
+                    connection.commit()
+                except BaseException:
+                    connection.rollback()
+                    raise
+            self._ensure_receipt_columns(connection)
+            self._sync_worker_tokens(connection, session_secret, sync_worker_tokens, now)
             user_count = connection.execute(
                 "SELECT COUNT(*) AS count FROM users"
             ).fetchone()["count"]
@@ -236,6 +314,19 @@ class Database:
                     ),
                 )
             connection.commit()
+
+    def _ensure_receipt_columns(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(receipt_events)").fetchall()
+        }
+        if "duplicate_of_receipt_id" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE receipt_events
+                ADD COLUMN duplicate_of_receipt_id INTEGER REFERENCES receipt_events(id)
+                """
+            )
 
     def _sync_worker_tokens(
         self,
