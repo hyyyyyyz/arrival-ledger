@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 
-import { stripLabelPrefix } from "../extract/text.js";
+import { stripLabelPrefixAtStart } from "../extract/text.js";
 
 export async function countVisible(page: Page, selector: string): Promise<number> {
   const locator = page.locator(selector);
@@ -30,17 +30,21 @@ export async function extractLabelValue(
   labels: readonly string[],
 ): Promise<string | null> {
   for (const label of labels) {
-    const marker = container.locator(`:has-text("${label}")`).first();
+    const marker = container.locator(`text=${label}`).first();
     if ((await marker.count()) === 0) continue;
     const ownText = await marker.innerText().catch(() => "");
-    const stripped = stripLabelPrefix(ownText, [label]);
-    if (stripped.length > 0) return stripped;
-    const siblingText = await marker
-      .locator("xpath=following-sibling::*[1]")
-      .first()
-      .innerText()
-      .catch(() => "");
-    if (siblingText.trim().length > 0) return siblingText.trim();
+    const stripped = stripLabelPrefixAtStart(ownText, [label]);
+    if (stripped.label_at_start) {
+      if (stripped.value.length > 0) return stripped.value;
+      const siblingText = await marker
+        .locator("xpath=following-sibling::*[1]")
+        .first()
+        .innerText()
+        .catch(() => "");
+      if (siblingText.trim().length > 0) return siblingText.trim();
+      continue;
+    }
+    return stripped.value;
   }
   return null;
 }
@@ -60,4 +64,24 @@ export async function extractFieldValue(
     if (trimmed.length > 0) return trimmed;
   }
   return null;
+}
+
+export async function extractAllFieldValues(
+  container: Locator,
+  fallbackSelectors: readonly string[],
+): Promise<string[]> {
+  const values: string[] = [];
+  for (const selector of fallbackSelectors) {
+    const elements = container.locator(selector);
+    const count = await elements.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      if (!(await elements.nth(index).isVisible({ timeout: 250 }).catch(() => false))) {
+        continue;
+      }
+      const text = await elements.nth(index).innerText().catch(() => "");
+      const trimmed = text.trim();
+      if (trimmed.length > 0 && !values.includes(trimmed)) values.push(trimmed);
+    }
+  }
+  return values;
 }

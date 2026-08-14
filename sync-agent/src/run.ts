@@ -12,6 +12,7 @@ import type { SyncConfig } from "./config.js";
 import {
   buildUnifiedOrder,
   dedupeOrders,
+  mergeRawOrdersByOrderId,
   type ExtractResult,
   type RawOrder,
 } from "./extract/order.js";
@@ -222,14 +223,63 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
     const seenOrderIds = new Set<string>();
     while (pages < config.max_pages && rawOrders.length < config.max_records) {
       const list = await adapter.collectVisibleOrders(page, { skip_order_ids: seenOrderIds });
-      for (const raw of list.orders) {
+      const pageOrders: RawOrder[] = [...list.orders];
+      for (const card of list.unparsed) {
+        let detail: RawOrder | null = null;
+        try {
+          detail = await adapter.readOrderDetail(page, card);
+        } catch (error) {
+          logger.warn({
+            command: "sync-once",
+            platform,
+            message: `detail read failed: ${(error as Error).message}`,
+          });
+        }
+        const recheck = await checkPageState(page, adapter);
+        if (recheck.status !== "OK") {
+          updateCursor(config.state_dir, platform, accountKey, {
+            last_status: recheck.status,
+            last_sync_at: nowIso(),
+          });
+          logger.error({
+            command: "sync-once",
+            platform,
+            status: recheck.status,
+            message: `while reading order detail: ${recheck.detail}`,
+            error_code: recheck.status,
+          });
+          const report = buildReport("sync-once", platform, "dry-run", null, recheck.status, recheck.status, startedAt, emptyCounts(), warnings);
+          writeReportFile(config, platform, report, [], logger);
+          return { exitCode: 1, report };
+        }
+        if (detail === null || detail.platform_order_id === null || detail.platform_order_id.length === 0) {
+          updateCursor(config.state_dir, platform, accountKey, {
+            last_status: "SCHEMA_CHANGED",
+            last_sync_at: nowIso(),
+            consecutive_failures: (loadCursor(config.state_dir, platform, accountKey)?.consecutive_failures ?? 0) + 1,
+          });
+          logger.error({
+            command: "sync-once",
+            platform,
+            status: "SCHEMA_CHANGED",
+            message: `order detail could not be parsed (${card.hint})`,
+            error_code: "SCHEMA_CHANGED",
+          });
+          const report = buildReport("sync-once", platform, "dry-run", null, "SCHEMA_CHANGED", "SCHEMA_CHANGED", startedAt, emptyCounts(), warnings);
+          writeReportFile(config, platform, report, [], logger);
+          return { exitCode: 1, report };
+        }
+        pageOrders.push(detail);
+      }
+      const mergedPage = mergeRawOrdersByOrderId(pageOrders);
+      for (const raw of mergedPage) {
         if (raw.platform_order_id !== null && raw.platform_order_id.length > 0) {
           seenOrderIds.add(raw.platform_order_id.trim());
         }
       }
       rowsSeen += list.rows_seen;
       rowsRecognized += list.recognized;
-      if (list.rows_seen === 0 && list.orders.length === 0) {
+      if (mergedPage.length === 0) {
         if (list.empty) {
           sawEmptyList = true;
         } else if (pages > 0) {
@@ -242,25 +292,8 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
         }
         break;
       }
-      if (list.rows_seen !== list.recognized) {
-        updateCursor(config.state_dir, platform, accountKey, {
-          last_status: "SCHEMA_CHANGED",
-          last_sync_at: nowIso(),
-          consecutive_failures: (loadCursor(config.state_dir, platform, accountKey)?.consecutive_failures ?? 0) + 1,
-        });
-        logger.error({
-          command: "sync-once",
-          platform,
-          status: "SCHEMA_CHANGED",
-          message: `page ${pages + 1}: ${list.rows_seen} order rows visible but only ${list.recognized} parsed`,
-          error_code: "SCHEMA_CHANGED",
-        });
-        const report = buildReport("sync-once", platform, "dry-run", null, "SCHEMA_CHANGED", "SCHEMA_CHANGED", startedAt, emptyCounts(), []);
-        writeReportFile(config, platform, report, [], logger);
-        return { exitCode: 1, report };
-      }
       const remaining = config.max_records - rawOrders.length;
-      rawOrders.push(...list.orders.slice(0, remaining));
+      rawOrders.push(...mergedPage.slice(0, remaining));
       pages += 1;
       if (rawOrders.length >= config.max_records || pages >= config.max_pages) break;
       let advanced = false;

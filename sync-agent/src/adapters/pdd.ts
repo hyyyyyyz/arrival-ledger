@@ -1,8 +1,20 @@
 import type { Locator, Page } from "playwright";
 
 import { assertAllowedOrderListUrl } from "../browser/context.js";
-import { countVisibleMarkers, extractFieldValue, extractLabelValue } from "../browser/dom.js";
-import type { RawOrder, RawOrderItem, RawOrderPackage, StatusMap } from "../extract/order.js";
+import {
+  countVisibleMarkers,
+  extractAllFieldValues,
+  extractFieldValue,
+  extractLabelValue,
+} from "../browser/dom.js";
+import {
+  mergeRawOrdersByOrderId,
+  type RawOrder,
+  type RawOrderItem,
+  type RawOrderPackage,
+  type StatusMap,
+} from "../extract/order.js";
+import { splitLogisticsCell, trackingFromLabeledText } from "../extract/tracking.js";
 import type {
   BlockState,
   CollectOptions,
@@ -10,6 +22,7 @@ import type {
   OrderListState,
   PlatformAdapter,
   SyncWindow,
+  UnparsedCard,
 } from "./base.js";
 
 export const PDD_SELECTORS = {
@@ -81,20 +94,6 @@ const QUANTITY_LABELS = ["数量", "件数", "购买数量"];
 const PRICE_LABELS = ["单价", "金额", "实付"];
 const LOGISTICS_LABELS = ["物流", "物流信息", "包裹"];
 
-const TRACKING_CANDIDATE = /[A-Za-z0-9-]{6,}/;
-
-export function splitLogisticsCell(text: string): { courier: string | null; tracking: string | null } {
-  const cleaned = text.replace(/\s+/g, " ").trim();
-  if (cleaned.length === 0) return { courier: null, tracking: null };
-  const trackingMatch = TRACKING_CANDIDATE.exec(cleaned);
-  if (trackingMatch === null) return { courier: cleaned, tracking: null };
-  const tracking = trackingMatch[0] ?? "";
-  const hasLettersAndDigits = /[A-Za-z]/.test(tracking) && /\d/.test(tracking);
-  if (!hasLettersAndDigits) return { courier: cleaned, tracking: null };
-  const courier = cleaned.replace(tracking, " ").trim();
-  return { courier: courier.length > 0 ? courier : null, tracking };
-}
-
 async function findCardLocators(page: Page): Promise<Locator[]> {
   for (const selector of PDD_SELECTORS.orderCards) {
     const cards = page.locator(selector);
@@ -109,22 +108,78 @@ async function findCardLocators(page: Page): Promise<Locator[]> {
 }
 
 async function extractItems(card: Locator): Promise<RawOrderItem[]> {
-  const title = await extractFieldValue(card, TITLE_LABELS, PDD_SELECTORS.fieldSelectors.title);
-  const sku = await extractFieldValue(card, SKU_LABELS, PDD_SELECTORS.fieldSelectors.sku);
-  const quantity = await extractFieldValue(card, QUANTITY_LABELS, PDD_SELECTORS.fieldSelectors.quantity);
-  const price = await extractFieldValue(card, PRICE_LABELS, PDD_SELECTORS.fieldSelectors.price);
-  if (title === null) {
-    return [{ item_key: null, title: null, sku_text: sku, quantity: quantity, unit_price: price }];
+  const titles = await extractAllFieldValues(card, PDD_SELECTORS.fieldSelectors.title);
+  const skus = await extractAllFieldValues(card, PDD_SELECTORS.fieldSelectors.sku);
+  const quantities = await extractAllFieldValues(card, PDD_SELECTORS.fieldSelectors.quantity);
+  const prices = await extractAllFieldValues(card, PDD_SELECTORS.fieldSelectors.price);
+  if (titles.length === 0) {
+    const title = await extractLabelValue(card, TITLE_LABELS);
+    if (title === null) {
+      return [
+        {
+          item_key: null,
+          title: null,
+          sku_text: await extractLabelValue(card, SKU_LABELS),
+          quantity: await extractLabelValue(card, QUANTITY_LABELS),
+          unit_price: await extractLabelValue(card, PRICE_LABELS),
+        },
+      ];
+    }
+    return [
+      {
+        item_key: null,
+        title,
+        sku_text: await extractLabelValue(card, SKU_LABELS),
+        quantity: (await extractLabelValue(card, QUANTITY_LABELS)) ?? "1",
+        unit_price: await extractLabelValue(card, PRICE_LABELS),
+      },
+    ];
   }
-  return [
-    {
-      item_key: null,
-      title,
-      sku_text: sku,
-      quantity: quantity ?? "1",
-      unit_price: price,
-    },
-  ];
+  return titles.map((title, index) => ({
+    item_key: null,
+    title,
+    sku_text: skus[index] ?? null,
+    quantity: quantities[index] ?? "1",
+    unit_price: prices[index] ?? null,
+  }));
+}
+
+async function extractPackages(card: Locator): Promise<{
+  packages: RawOrderPackage[];
+  unreadable: boolean;
+}> {
+  const packages: RawOrderPackage[] = [];
+  const seen = new Set<string>();
+  let unreadable = false;
+  const add = (courier: string | null, tracking: string): void => {
+    const key = tracking.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    if (key.length === 0 || seen.has(key)) return;
+    seen.add(key);
+    packages.push({ courier, tracking_no: tracking, status: null });
+  };
+
+  const trackingTexts = await extractAllFieldValues(card, [
+    "[class*='tracking-no']",
+    "[class*='tracking-number']",
+    "[class*='logistics-no']",
+  ]);
+  for (const text of trackingTexts) {
+    const tracking = trackingFromLabeledText(text);
+    if (tracking !== null) add(null, tracking);
+    else unreadable = true;
+  }
+  const labeledTracking = await extractLabelValue(card, TRACKING_LABELS);
+  if (labeledTracking !== null) {
+    const tracking = trackingFromLabeledText(labeledTracking);
+    if (tracking !== null) add(await extractLabelValue(card, COURIER_LABELS), tracking);
+    else unreadable = true;
+  }
+  const logisticsTexts = await extractAllFieldValues(card, PDD_SELECTORS.fieldSelectors.logistics);
+  for (const text of logisticsTexts) {
+    const split = splitLogisticsCell(text);
+    if (split.tracking !== null) add(split.courier, split.tracking);
+  }
+  return { packages, unreadable };
 }
 
 export const pddAdapter: PlatformAdapter = {
@@ -172,10 +227,11 @@ export const pddAdapter: PlatformAdapter = {
     const emptyCount = await countVisibleMarkers(page, PDD_SELECTORS.emptyMarkers);
     const cards = await findCardLocators(page);
     if (cards.length === 0) {
-      return { orders: [], empty: emptyCount > 0, rows_seen: 0, recognized: 0 };
+      return { orders: [], empty: emptyCount > 0, rows_seen: 0, recognized: 0, unparsed: [] };
     }
     const skip = options.skip_order_ids ?? new Set<string>();
     const orders: RawOrder[] = [];
+    const unparsed: UnparsedCard[] = [];
     let rowsSeen = 0;
     let recognized = 0;
     for (const card of cards) {
@@ -184,21 +240,21 @@ export const pddAdapter: PlatformAdapter = {
         continue;
       }
       rowsSeen += 1;
-      if (platformOrderId === null || platformOrderId.length === 0) continue;
+      if (
+        platformOrderId === null ||
+        platformOrderId.length === 0 ||
+        !/\d/.test(platformOrderId)
+      ) {
+        unparsed.push({
+          locator: card,
+          missing: ["order_id"],
+          hint: "card has no readable order id",
+        });
+        continue;
+      }
       recognized += 1;
 
-      let courier = await extractLabelValue(card, COURIER_LABELS);
-      let tracking = await extractLabelValue(card, TRACKING_LABELS);
-      if (courier === null || tracking === null) {
-        const logistics = await extractFieldValue(card, LOGISTICS_LABELS, PDD_SELECTORS.fieldSelectors.logistics);
-        if (logistics !== null && logistics.length > 0) {
-          const split = splitLogisticsCell(logistics);
-          courier = courier ?? split.courier;
-          tracking = tracking ?? split.tracking;
-        }
-      }
-      const packages: RawOrderPackage[] =
-        tracking === null ? [] : [{ courier, tracking_no: tracking, status: null }];
+      const { packages, unreadable } = await extractPackages(card);
       orders.push({
         platform_order_id: platformOrderId,
         ordered_at: await extractFieldValue(card, TIME_LABELS, PDD_SELECTORS.fieldSelectors.time),
@@ -209,8 +265,62 @@ export const pddAdapter: PlatformAdapter = {
         observed_at: new Date().toISOString(),
         source_page: 0,
       });
+      if (unreadable) {
+        unparsed.push({
+          locator: card,
+          missing: ["logistics"],
+          hint: "tracking text exists but cannot be parsed",
+        });
+      }
     }
-    return { orders, empty: false, rows_seen: rowsSeen, recognized };
+    return {
+      orders: mergeRawOrdersByOrderId(orders),
+      empty: false,
+      rows_seen: rowsSeen,
+      recognized,
+      unparsed,
+    };
+  },
+
+  async readOrderDetail(page: Page, card: UnparsedCard): Promise<RawOrder | null> {
+    try {
+      const link = card.locator.locator("a").first();
+      if ((await link.count()) > 0) {
+        await link.click({ timeout: 5000 });
+      } else {
+        await card.locator.click({ timeout: 5000 });
+      }
+    } catch {
+      return null;
+    }
+    await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+    await page.waitForTimeout(1000);
+
+    const body = page.locator("body");
+    const platformOrderId = await extractLabelValue(body, ORDER_ID_LABELS);
+    const { packages } = await extractPackages(body);
+    const detail: RawOrder = {
+      platform_order_id: platformOrderId,
+      ordered_at: await extractLabelValue(body, TIME_LABELS),
+      status: await extractLabelValue(body, STATUS_LABELS),
+      shop_name: await extractLabelValue(body, SHOP_LABELS),
+      items: await extractItems(body),
+      packages,
+      observed_at: new Date().toISOString(),
+      source_page: 0,
+    };
+
+    try {
+      await page.goBack({ timeout: 5000 });
+    } catch {
+      return null;
+    }
+    await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+    await page.waitForTimeout(1000);
+    if ((await findCardLocators(page)).length === 0) {
+      return null;
+    }
+    return detail;
   },
 
   async advancePage(page: Page): Promise<boolean> {

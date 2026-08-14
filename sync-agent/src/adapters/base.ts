@@ -1,4 +1,4 @@
-import type { Page } from "playwright";
+import type { Locator, Page } from "playwright";
 
 import type { Platform } from "../models.js";
 import type { RawOrder, StatusMap } from "../extract/order.js";
@@ -24,11 +24,18 @@ export interface CollectOptions {
   skip_order_ids?: ReadonlySet<string>;
 }
 
+export interface UnparsedCard {
+  locator: Locator;
+  missing: Array<"order_id" | "logistics">;
+  hint: string;
+}
+
 export interface OrderListState {
   orders: RawOrder[];
   empty: boolean;
   rows_seen: number;
   recognized: number;
+  unparsed: UnparsedCard[];
 }
 
 export interface PlatformAdapter {
@@ -40,4 +47,5 @@ export interface PlatformAdapter {
   detectBlock(page: Page): Promise<BlockState>;
   collectVisibleOrders(page: Page, options?: CollectOptions): Promise<OrderListState>;
   advancePage(page: Page): Promise<boolean>;
+  readOrderDetail(page: Page, card: UnparsedCard): Promise<RawOrder | null>;
 }

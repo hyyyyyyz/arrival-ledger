@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildUnifiedOrder,
   dedupeOrders,
+  mergeRawOrdersByOrderId,
   type RawOrder,
   type StatusMap,
 } from "../src/extract/order.js";
@@ -113,6 +114,52 @@ describe("buildUnifiedOrder", () => {
   it("drops nothing: no order id is ever converted to a number", () => {
     const result = buildUnifiedOrder(rawOrder({ platform_order_id: "00112233445566778899" }), "1688", "1688-main", STATUS_MAP);
     expect(result.order?.platform_order_id).toBe("00112233445566778899");
+  });
+});
+
+describe("mergeRawOrdersByOrderId", () => {
+  it("merges rows of the same order into multiple items and packages", () => {
+    const first = rawOrder();
+    const second = rawOrder({
+      items: [{ item_key: null, title: "测试商品乙", sku_text: null, quantity: "3", unit_price: null }],
+      packages: [{ courier: "中通", tracking_no: "8800123456790", status: null }],
+    });
+    const merged = mergeRawOrdersByOrderId([first, second]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.items).toHaveLength(2);
+    expect(merged[0]?.packages).toHaveLength(2);
+  });
+
+  it("dedupes identical items and packages across rows", () => {
+    const first = rawOrder();
+    const second = rawOrder();
+    const merged = mergeRawOrdersByOrderId([first, second]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.items).toHaveLength(1);
+    expect(merged[0]?.packages).toHaveLength(1);
+  });
+
+  it("drops rows without an order id instead of guessing", () => {
+    const noId: RawOrder = { ...rawOrder(), platform_order_id: "" };
+    const merged = mergeRawOrdersByOrderId([noId]);
+    expect(merged).toHaveLength(0);
+  });
+
+  it("keeps different orders separate", () => {
+    const first = rawOrder();
+    const second = rawOrder({ platform_order_id: "260813-0002" });
+    const merged = mergeRawOrdersByOrderId([first, second]);
+    expect(merged).toHaveLength(2);
+  });
+
+  it("drops placeholder items during merge", () => {
+    const placeholder: RawOrder = {
+      ...rawOrder(),
+      items: [{ item_key: null, title: null, sku_text: null, quantity: null, unit_price: null }],
+    };
+    const real = rawOrder();
+    const merged = mergeRawOrdersByOrderId([real, placeholder]);
+    expect(merged[0]?.items).toHaveLength(1);
   });
 });
 

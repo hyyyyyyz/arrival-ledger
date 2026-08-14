@@ -155,8 +155,10 @@ function fakeAdapter(): PlatformAdapter {
       empty: false,
       rows_seen: 1,
       recognized: 1,
+      unparsed: [],
     }),
     advancePage: async () => false,
+    readOrderDetail: async () => null,
   };
 }
 

@@ -3,7 +3,14 @@ import type { Locator, Page } from "playwright";
 import { assertAllowedOrderListUrl } from "../browser/context.js";
 import { countVisibleMarkers, extractLabelValue } from "../browser/dom.js";
 import { cleanText } from "../extract/text.js";
-import type { RawOrder, RawOrderItem, RawOrderPackage, StatusMap } from "../extract/order.js";
+import {
+  mergeRawOrdersByOrderId,
+  type RawOrder,
+  type RawOrderItem,
+  type RawOrderPackage,
+  type StatusMap,
+} from "../extract/order.js";
+import { splitLogisticsCell, trackingFromLabeledText } from "../extract/tracking.js";
 import type {
   BlockState,
   CollectOptions,
@@ -11,6 +18,7 @@ import type {
   OrderListState,
   PlatformAdapter,
   SyncWindow,
+  UnparsedCard,
 } from "./base.js";
 
 export const ALI1688_SELECTORS = {
@@ -116,20 +124,6 @@ async function detectColumns(page: Page): Promise<ColumnMap | null> {
   return map;
 }
 
-const TRACKING_CANDIDATE = /[A-Za-z0-9-]{6,}/;
-
-export function splitLogisticsCell(text: string): { courier: string | null; tracking: string | null } {
-  const cleaned = cleanText(text);
-  if (cleaned.length === 0) return { courier: null, tracking: null };
-  const trackingMatch = TRACKING_CANDIDATE.exec(cleaned);
-  if (trackingMatch === null) return { courier: cleaned, tracking: null };
-  const tracking = trackingMatch[0] ?? "";
-  const hasLettersAndDigits = /[A-Za-z]/.test(tracking) && /\d/.test(tracking);
-  if (!hasLettersAndDigits) return { courier: cleaned, tracking: null };
-  const courier = cleaned.replace(tracking, " ").trim();
-  return { courier: courier.length > 0 ? courier : null, tracking };
-}
-
 async function cellText(row: Locator, index: number): Promise<string | null> {
   const cells = row.locator("td");
   const count = await cells.count();
@@ -200,11 +194,12 @@ export const ali1688Adapter: PlatformAdapter = {
     const emptyCount = await countVisibleMarkers(page, ALI1688_SELECTORS.emptyMarkers);
     const rows = await findRowLocators(page);
     if (rows.length === 0) {
-      return { orders: [], empty: emptyCount > 0, rows_seen: 0, recognized: 0 };
+      return { orders: [], empty: emptyCount > 0, rows_seen: 0, recognized: 0, unparsed: [] };
     }
     const skip = options.skip_order_ids ?? new Set<string>();
     const columns = await detectColumns(page);
     const orders: RawOrder[] = [];
+    const unparsed: UnparsedCard[] = [];
     let rowsSeen = 0;
     let recognized = 0;
     for (const row of rows) {
@@ -216,7 +211,18 @@ export const ali1688Adapter: PlatformAdapter = {
         continue;
       }
       rowsSeen += 1;
-      if (platformOrderId === null || platformOrderId.length === 0) continue;
+      if (
+        platformOrderId === null ||
+        platformOrderId.length === 0 ||
+        !/\d/.test(platformOrderId)
+      ) {
+        unparsed.push({
+          locator: row,
+          missing: ["order_id"],
+          hint: "row has no readable order id",
+        });
+        continue;
+      }
       recognized += 1;
 
       const cell = (name: ColumnName): Promise<string | null> =>
@@ -229,13 +235,23 @@ export const ali1688Adapter: PlatformAdapter = {
           : cell(name);
 
       let courier: string | null = await field("courier", COURIER_LABELS);
-      let tracking: string | null = await field("tracking", TRACKING_LABELS);
+      const trackingRaw: string | null = await field("tracking", TRACKING_LABELS);
+      let tracking = trackingRaw === null ? null : trackingFromLabeledText(trackingRaw);
+      let logisticsUnreadable =
+        trackingRaw !== null && trackingRaw.trim().length > 0 && tracking === null;
       if ((courier === null || tracking === null) && columns !== null && columns["logistics"] !== undefined) {
         const logisticsText = await cellText(row, columns["logistics"]);
         if (logisticsText !== null && logisticsText.length > 0) {
           const split = splitLogisticsCell(logisticsText);
           courier = courier ?? split.courier;
           tracking = tracking ?? split.tracking;
+          if (
+            split.tracking === null &&
+            /运单号|物流单号|快递单号/.test(logisticsText) &&
+            !/无|暂无|-{1,2}\s*$/.test(logisticsText)
+          ) {
+            logisticsUnreadable = true;
+          }
         }
       }
 
@@ -251,7 +267,7 @@ export const ali1688Adapter: PlatformAdapter = {
       ];
       const packages: RawOrderPackage[] =
         tracking === null ? [] : [{ courier, tracking_no: tracking, status: null }];
-      orders.push({
+      const raw: RawOrder = {
         platform_order_id: platformOrderId,
         ordered_at: await field("time", TIME_LABELS),
         status: await field("status", STATUS_LABELS),
@@ -260,9 +276,75 @@ export const ali1688Adapter: PlatformAdapter = {
         packages,
         observed_at: new Date().toISOString(),
         source_page: 0,
-      });
+      };
+      orders.push(raw);
+      if (logisticsUnreadable) {
+        unparsed.push({
+          locator: row,
+          missing: ["logistics"],
+          hint: "tracking cell has unreadable content",
+        });
+      }
     }
-    return { orders, empty: false, rows_seen: rowsSeen, recognized };
+    return {
+      orders: mergeRawOrdersByOrderId(orders),
+      empty: false,
+      rows_seen: rowsSeen,
+      recognized,
+      unparsed,
+    };
+  },
+
+  async readOrderDetail(page: Page, card: UnparsedCard): Promise<RawOrder | null> {
+    try {
+      const link = card.locator.locator("a").first();
+      if ((await link.count()) > 0) {
+        await link.click({ timeout: 5000 });
+      } else {
+        await card.locator.click({ timeout: 5000 });
+      }
+    } catch {
+      return null;
+    }
+    await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+    await page.waitForTimeout(1000);
+
+    const body = page.locator("body");
+    const platformOrderId = await extractLabelValue(body, ORDER_ID_LABELS);
+    const title = await extractLabelValue(body, TITLE_LABELS);
+    const courier = await extractLabelValue(body, COURIER_LABELS);
+    const trackingRaw = await extractLabelValue(body, TRACKING_LABELS);
+    const tracking = trackingRaw === null ? null : trackingFromLabeledText(trackingRaw);
+    const detail: RawOrder = {
+      platform_order_id: platformOrderId,
+      ordered_at: await extractLabelValue(body, TIME_LABELS),
+      status: await extractLabelValue(body, STATUS_LABELS),
+      shop_name: await extractLabelValue(body, SHOP_LABELS),
+      items: [
+        {
+          item_key: null,
+          title,
+          sku_text: await extractLabelValue(body, SKU_LABELS),
+          quantity: (await extractLabelValue(body, QUANTITY_LABELS)) ?? "1",
+          unit_price: await extractLabelValue(body, PRICE_LABELS),
+        },
+      ],
+      packages: tracking === null ? [] : [{ courier, tracking_no: tracking, status: null }],
+      observed_at: new Date().toISOString(),
+      source_page: 0,
+    };
+
+    try {
+      await page.goBack({ timeout: 5000 });
+    } catch {
+      return null;
+    }
+    await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+    await page.waitForTimeout(1000);
+    if ((await findRowLocators(page)).length === 0) {
+      return null;
+    }
+    return detail;
   },
 
   async advancePage(page: Page): Promise<boolean> {

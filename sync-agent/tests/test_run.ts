@@ -53,11 +53,12 @@ function fakeAdapter(overrides: Partial<PlatformAdapter> = {}): PlatformAdapter 
       const order = rawOrder();
       const skip = options?.skip_order_ids;
       if (skip !== undefined && order.platform_order_id !== null && skip.has(order.platform_order_id)) {
-        return { orders: [], empty: false, rows_seen: 0, recognized: 0 };
+        return { orders: [], empty: false, rows_seen: 0, recognized: 0, unparsed: [] };
       }
-      return { orders: [order], empty: false, rows_seen: 1, recognized: 1 };
+      return { orders: [order], empty: false, rows_seen: 1, recognized: 1, unparsed: [] };
     },
     advancePage: async () => false,
+    readOrderDetail: async () => null,
     ...overrides,
   };
 }
@@ -155,7 +156,18 @@ describe("runSyncOnce dry-run", () => {
     const outcome = await runSyncOnce(
       buildOptions(cwd, {
         adapter: fakeAdapter({
-          collectVisibleOrders: async () => ({ orders: [], empty: false, rows_seen: 5, recognized: 0 }),
+          collectVisibleOrders: async () => ({
+            orders: [],
+            empty: false,
+            rows_seen: 5,
+            recognized: 0,
+            unparsed: Array.from({ length: 5 }, () => ({
+              locator: {} as never,
+              missing: ["order_id"] as const,
+              hint: "no order id",
+            })),
+          }),
+          readOrderDetail: async () => null,
         }),
       }),
     );
@@ -166,11 +178,14 @@ describe("runSyncOnce dry-run", () => {
   it("stops with SCHEMA_CHANGED when extraction fails", async () => {
     const cwd = tempCwd();
     mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
-    const badOrder: RawOrder = { ...rawOrder(), platform_order_id: "" };
+    const badOrder: RawOrder = {
+      ...rawOrder(),
+      items: [{ item_key: null, title: null, sku_text: null, quantity: null, unit_price: null }],
+    };
     const outcome = await runSyncOnce(
       buildOptions(cwd, {
         adapter: fakeAdapter({
-          collectVisibleOrders: async () => ({ orders: [badOrder], empty: false, rows_seen: 1, recognized: 1 }),
+          collectVisibleOrders: async () => ({ orders: [badOrder], empty: false, rows_seen: 1, recognized: 1, unparsed: [] }),
         }),
       }),
     );
@@ -184,7 +199,7 @@ describe("runSyncOnce dry-run", () => {
     const outcome = await runSyncOnce(
       buildOptions(cwd, {
         adapter: fakeAdapter({
-          collectVisibleOrders: async () => ({ orders: [], empty: true, rows_seen: 0, recognized: 0 }),
+          collectVisibleOrders: async () => ({ orders: [], empty: true, rows_seen: 0, recognized: 0, unparsed: [] }),
         }),
       }),
     );
@@ -230,6 +245,7 @@ describe("runSyncOnce pagination safety", () => {
           empty: false,
           rows_seen: 1,
           recognized: 1,
+          unparsed: [],
         };
       },
       advancePage: async () => true,
@@ -256,9 +272,9 @@ describe("runSyncOnce pagination safety", () => {
         const order = rawOrder();
         const skip = options?.skip_order_ids;
         if (skip !== undefined && skip.has(order.platform_order_id ?? "")) {
-          return { orders: [], empty: false, rows_seen: 0, recognized: 0 };
+          return { orders: [], empty: false, rows_seen: 0, recognized: 0, unparsed: [] };
         }
-        return { orders: [order], empty: false, rows_seen: 1, recognized: 1 };
+        return { orders: [order], empty: false, rows_seen: 1, recognized: 1, unparsed: [] };
       },
     });
     const outcome = await runSyncOnce(
@@ -278,11 +294,17 @@ describe("runSyncOnce pagination safety", () => {
       collectVisibleOrders: async () => {
         pageIndex += 1;
         if (pageIndex === 1) {
-          return { orders: [rawOrder()], empty: false, rows_seen: 1, recognized: 1 };
+          return { orders: [rawOrder()], empty: false, rows_seen: 1, recognized: 1, unparsed: [] };
         }
-        const broken: RawOrder = { ...rawOrder(), platform_order_id: "" };
-        return { orders: [broken], empty: false, rows_seen: 1, recognized: 0 };
+        return {
+          orders: [],
+          empty: false,
+          rows_seen: 1,
+          recognized: 0,
+          unparsed: [{ locator: {} as never, missing: ["order_id"] as const, hint: "no order id" }],
+        };
       },
+      readOrderDetail: async () => null,
     });
     const outcome = await runSyncOnce(
       buildOptions(cwd, { adapter }, { SYNC_PAGE_DELAY_MS: "0" }),
@@ -291,7 +313,7 @@ describe("runSyncOnce pagination safety", () => {
     expect(outcome.report.status).toBe("SCHEMA_CHANGED");
   });
 
-  it("stops when a page has a mix of parsed and unparsed rows", async () => {
+  it("stops with SCHEMA_CHANGED when an unparsed card cannot be resolved", async () => {
     const cwd = tempCwd();
     mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
     const adapter = fakeAdapter({
@@ -300,13 +322,37 @@ describe("runSyncOnce pagination safety", () => {
         empty: false,
         rows_seen: 2,
         recognized: 1,
+        unparsed: [{ locator: {} as never, missing: ["order_id"], hint: "no order id" }],
       }),
+      readOrderDetail: async () => null,
     });
     const outcome = await runSyncOnce(
       buildOptions(cwd, { adapter }),
     );
     expect(outcome.exitCode).toBe(1);
     expect(outcome.report.status).toBe("SCHEMA_CHANGED");
+  });
+
+  it("resolves unparsed cards via the detail page and merges them", async () => {
+    const cwd = tempCwd();
+    mkdirSync(join(cwd, "profiles", "1688"), { recursive: true });
+    const detailOrder: RawOrder = { ...rawOrder(), platform_order_id: "1688-260813-0002" };
+    const adapter = fakeAdapter({
+      collectVisibleOrders: async () => ({
+        orders: [rawOrder()],
+        empty: false,
+        rows_seen: 2,
+        recognized: 1,
+        unparsed: [{ locator: {} as never, missing: ["order_id"], hint: "no order id" }],
+      }),
+      readOrderDetail: async () => detailOrder,
+    });
+    const outcome = await runSyncOnce(
+      buildOptions(cwd, { adapter }),
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.report.counts.seen).toBe(2);
+    expect(outcome.report.counts.valid).toBe(2);
   });
 
   it("truncates to max_records instead of pushing a whole page", async () => {
@@ -322,6 +368,7 @@ describe("runSyncOnce pagination safety", () => {
         empty: false,
         rows_seen: 10,
         recognized: 10,
+        unparsed: [],
       }),
     });
     const outcome = await runSyncOnce(

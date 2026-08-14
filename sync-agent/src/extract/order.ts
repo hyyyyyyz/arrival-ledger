@@ -9,7 +9,6 @@ import {
 } from "../normalize.js";
 import type { OrderItem, OrderPackage, OrderStatus, Platform, UnifiedOrder } from "../models.js";
 import { LIMITS } from "../models.js";
-
 export interface RawOrderItem {
   item_key: string | null;
   title: string | null;
@@ -184,6 +183,57 @@ export function dedupeOrders(orders: UnifiedOrder[]): UnifiedOrder[] {
     unique.push(order);
   }
   return unique;
+}
+
+function isPlaceholderItem(item: RawOrderItem): boolean {
+  return item.title === null && item.quantity === null && item.sku_text === null;
+}
+
+export function mergeRawOrdersByOrderId(orders: RawOrder[]): RawOrder[] {
+  const merged = new Map<string, RawOrder>();
+  for (const raw of orders) {
+    if (raw.platform_order_id === null || raw.platform_order_id.length === 0) {
+      continue;
+    }
+    const key = orderIdMatchKey(raw.platform_order_id);
+    const existing = merged.get(key);
+    if (existing === undefined) {
+      merged.set(key, {
+        ...raw,
+        items: raw.items.filter((item) => !isPlaceholderItem(item)),
+      });
+      continue;
+    }
+    const items = [...existing.items];
+    for (const item of raw.items) {
+      if (isPlaceholderItem(item)) continue;
+      const duplicate = items.some(
+        (other) =>
+          orderIdMatchKey(other.title ?? "") === orderIdMatchKey(item.title ?? "") &&
+          (other.sku_text ?? "") === (item.sku_text ?? ""),
+      );
+      if (!duplicate) items.push(item);
+    }
+    const packages = [...existing.packages];
+    for (const item of raw.packages) {
+      const duplicate = packages.some(
+        (other) =>
+          normalizeTrackingNo(other.tracking_no ?? "") === normalizeTrackingNo(item.tracking_no ?? ""),
+      );
+      if (!duplicate) packages.push(item);
+    }
+    merged.set(key, {
+      platform_order_id: existing.platform_order_id,
+      ordered_at: existing.ordered_at ?? raw.ordered_at,
+      status: existing.status ?? raw.status,
+      shop_name: existing.shop_name ?? raw.shop_name,
+      items,
+      packages,
+      observed_at: existing.observed_at,
+      source_page: Math.min(existing.source_page, raw.source_page),
+    });
+  }
+  return [...merged.values()];
 }
 
 export function accountLabelForPlatform(platform: Platform, accountKey: string): string {

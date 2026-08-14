@@ -34,8 +34,9 @@ function fakeAdapter(overrides: Partial<PlatformAdapter> = {}): PlatformAdapter 
     openOrders: async () => undefined,
     detectLogin: async () => ({ logged_in: true, detail: "fake" }),
     detectBlock: async () => ({ blocked: false, kind: "unknown", detail: "fake" }),
-    collectVisibleOrders: async () => ({ orders: [], empty: false, rows_seen: 0, recognized: 0 }),
+    collectVisibleOrders: async () => ({ orders: [], empty: false, rows_seen: 0, recognized: 0, unparsed: [] }),
     advancePage: async () => false,
+    readOrderDetail: async () => null,
     ...overrides,
   };
 }

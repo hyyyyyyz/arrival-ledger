@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ali1688Adapter } from "../src/adapters/ali1688.js";
 import { assertAllowedOrderListUrl } from "../src/browser/context.js";
 import { checkPageState } from "../src/browser/guards.js";
+import { buildUnifiedOrder } from "../src/extract/order.js";
 
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "1688");
 
@@ -115,6 +116,38 @@ describe("ali1688 adapter with sanitized fixtures", () => {
     const list = await ali1688Adapter.collectVisibleOrders(page);
     expect(list.orders).toHaveLength(0);
     expect(list.recognized).toBe(0);
+  });
+
+  it("merges multiple rows of the same order into one raw order", async () => {
+    await openFixture("order-list-multirow.html");
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    expect(list.rows_seen).toBe(2);
+    expect(list.recognized).toBe(2);
+    expect(list.orders).toHaveLength(1);
+    const order = list.orders[0];
+    expect(order?.platform_order_id).toBe("1688-260813-0001");
+    expect(order?.items).toHaveLength(2);
+    expect(order?.items[0]?.title).toBe("测试商品甲");
+    expect(order?.items[1]?.title).toBe("测试商品乙");
+    expect(order?.packages).toHaveLength(2);
+    expect(order?.packages[0]?.tracking_no).toBe("8800123456789");
+    expect(order?.packages[1]?.tracking_no).toBe("8800123456790");
+  });
+
+  it("accepts pure numeric tracking numbers from the logistics column", async () => {
+    await openFixture("order-list-multirow.html");
+    const list = await ali1688Adapter.collectVisibleOrders(page);
+    for (const pkg of list.orders[0]?.packages ?? []) {
+      expect(/^\d{8,24}$/.test(pkg.tracking_no ?? "")).toBe(true);
+    }
+    const result = buildUnifiedOrder(
+      list.orders[0]!,
+      "1688",
+      "1688-main",
+      ali1688Adapter.statusMap,
+    );
+    expect(result.issues).toEqual([]);
+    expect(result.order?.packages).toHaveLength(2);
   });
 
   it("exposes only https order list urls", () => {

@@ -37,6 +37,26 @@ export function stripLabelPrefix(text: string, labels: readonly string[]): strin
   return cleaned;
 }
 
+export interface LabelStripResult {
+  label_at_start: boolean;
+  value: string;
+}
+
+export function stripLabelPrefixAtStart(text: string, labels: readonly string[]): LabelStripResult {
+  const cleaned = cleanText(text);
+  for (const pattern of labelPatterns(labels)) {
+    const leading = cleaned.match(/^[\s:：=]*/)?.[0] ?? "";
+    const rest = cleaned.slice(leading.length);
+    const match = pattern.exec(rest);
+    if (match !== null && match.index === 0) {
+      const after = rest.slice(match[0].length).trim();
+      const separator = after.match(/^[\s:：=]*/)?.[0] ?? "";
+      return { label_at_start: true, value: after.slice(separator.length).trim() };
+    }
+  }
+  return { label_at_start: false, value: cleaned };
+}
+
 export function limitChars(value: string, maximum: number): string {
   return value.length > maximum ? value.slice(0, maximum) : value;
 }
