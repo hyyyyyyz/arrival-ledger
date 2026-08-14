@@ -25,14 +25,46 @@ export interface SnapshotVerifyResult {
 
 export const SNAPSHOT_TTL_MINUTES = 30;
 
-export function snapshotAgeMinutes(snapshot: Snapshot, now: Date = new Date()): number {
-  const createdAt = new Date(snapshot.created_at);
-  if (Number.isNaN(createdAt.getTime())) return Number.POSITIVE_INFINITY;
-  return (now.getTime() - createdAt.getTime()) / 60_000;
+const FUTURE_SKEW_MS = 5 * 60_000;
+
+export interface SnapshotTimeResult {
+  state: "ok" | "expired" | "invalid";
+  reason: string | null;
 }
 
-export function isSnapshotExpired(snapshot: Snapshot, now: Date = new Date()): boolean {
-  return snapshotAgeMinutes(snapshot, now) > SNAPSHOT_TTL_MINUTES;
+export function snapshotFinishedAt(snapshot: Snapshot): Date | null {
+  try {
+    const parsed = JSON.parse(snapshot.payload_json) as { finished_at?: unknown };
+    if (typeof parsed.finished_at !== "string") return null;
+    const date = new Date(parsed.finished_at);
+    return Number.isNaN(date.getTime()) ? null : date;
+  } catch {
+    return null;
+  }
+}
+
+export function evaluateSnapshotTime(
+  snapshot: Snapshot,
+  now: Date = new Date(),
+): SnapshotTimeResult {
+  const finishedAt = snapshotFinishedAt(snapshot);
+  if (finishedAt === null) {
+    return { state: "invalid", reason: "payload lacks a valid finished_at" };
+  }
+  if (finishedAt.getTime() > now.getTime() + FUTURE_SKEW_MS) {
+    return { state: "invalid", reason: "payload finished_at is in the future" };
+  }
+  const createdAt = new Date(snapshot.created_at);
+  if (!Number.isNaN(createdAt.getTime()) && createdAt.getTime() > now.getTime() + FUTURE_SKEW_MS) {
+    return { state: "invalid", reason: "snapshot created_at is in the future" };
+  }
+  if (now.getTime() - finishedAt.getTime() > SNAPSHOT_TTL_MINUTES * 60_000) {
+    return {
+      state: "expired",
+      reason: `snapshot is older than ${SNAPSHOT_TTL_MINUTES} minutes`,
+    };
+  }
+  return { state: "ok", reason: null };
 }
 
 export function snapshotFileName(

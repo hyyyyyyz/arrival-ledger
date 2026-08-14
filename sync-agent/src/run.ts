@@ -27,9 +27,8 @@ import {
 } from "./models.js";
 import {
   buildSnapshot,
-  isSnapshotExpired,
+  evaluateSnapshotTime,
   readSnapshot,
-  SNAPSHOT_TTL_MINUTES,
   snapshotToBatch,
   verifySnapshot,
   writeSnapshot,
@@ -515,17 +514,19 @@ async function runCommit(options: RunOptions): Promise<RunOutcome> {
       report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "EMPTY_SNAPSHOT", startedAt, emptyCounts(), [], options.snapshotPath),
     };
   }
-  if (isSnapshotExpired(snapshot)) {
+  const timeResult = evaluateSnapshotTime(snapshot);
+  if (timeResult.state !== "ok") {
+    const errorCode = timeResult.state === "expired" ? "EXPIRED_SNAPSHOT" : "SNAPSHOT_INVALID";
     logger.error({
       command: "sync-once",
       platform,
       batch_id: snapshot.batch_id,
-      message: `snapshot is older than ${SNAPSHOT_TTL_MINUTES} minutes; re-run dry-run`,
-      error_code: "EXPIRED_SNAPSHOT",
+      message: `${timeResult.reason ?? "snapshot time check failed"}; re-run dry-run`,
+      error_code: errorCode,
     });
     return {
       exitCode: 1,
-      report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", "EXPIRED_SNAPSHOT", startedAt, emptyCounts(), [], options.snapshotPath),
+      report: buildReport("sync-once", platform, "commit", snapshot.batch_id, "DISABLED", errorCode, startedAt, emptyCounts(), [], options.snapshotPath),
     };
   }
   const batch = snapshotToBatch(snapshot);

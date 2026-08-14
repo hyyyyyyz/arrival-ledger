@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { SyncBatch } from "../src/models.js";
 import {
   buildSnapshot,
+  evaluateSnapshotTime,
   readSnapshot,
   snapshotFileName,
   snapshotToBatch,
@@ -56,6 +57,52 @@ function sampleBatch(): SyncBatch {
     ],
   };
 }
+
+describe("evaluateSnapshotTime", () => {
+  it("accepts snapshots whose signed finished_at is within the ttl", () => {
+    const snapshot = buildSnapshot(sampleBatch());
+    snapshot.payload_json = snapshot.payload_json.replace(
+      /"finished_at":"[^"]+"/,
+      `"finished_at":"${new Date().toISOString()}"`,
+    );
+    snapshot.payload_sha256 = createHash("sha256").update(snapshot.payload_json, "utf8").digest("hex");
+    expect(evaluateSnapshotTime(snapshot).state).toBe("ok");
+  });
+
+  it("expires snapshots older than 30 minutes by signed finished_at", () => {
+    const snapshot = buildSnapshot(sampleBatch());
+    snapshot.payload_json = snapshot.payload_json.replace(
+      /"finished_at":"[^"]+"/,
+      `"finished_at":"${new Date(Date.now() - 31 * 60_000).toISOString()}"`,
+    );
+    snapshot.payload_sha256 = createHash("sha256").update(snapshot.payload_json, "utf8").digest("hex");
+    expect(evaluateSnapshotTime(snapshot).state).toBe("expired");
+  });
+
+  it("rejects future finished_at and future created_at", () => {
+    const snapshot = buildSnapshot(sampleBatch());
+    snapshot.payload_json = snapshot.payload_json.replace(
+      /"finished_at":"[^"]+"/,
+      `"finished_at":"${new Date(Date.now() + 2 * 60 * 60_000).toISOString()}"`,
+    );
+    snapshot.payload_sha256 = createHash("sha256").update(snapshot.payload_json, "utf8").digest("hex");
+    expect(evaluateSnapshotTime(snapshot).state).toBe("invalid");
+
+    const fresh = buildSnapshot(sampleBatch());
+    fresh.created_at = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+    expect(evaluateSnapshotTime(fresh).state).toBe("invalid");
+  });
+
+  it("rejects payloads without a valid finished_at", () => {
+    const snapshot = buildSnapshot(sampleBatch());
+    snapshot.payload_json = snapshot.payload_json.replace(
+      /"finished_at":"[^"]+"/,
+      '"finished_at":null',
+    );
+    snapshot.payload_sha256 = createHash("sha256").update(snapshot.payload_json, "utf8").digest("hex");
+    expect(evaluateSnapshotTime(snapshot).state).toBe("invalid");
+  });
+});
 
 describe("snapshot lifecycle", () => {
   it("writes and reads a snapshot whose payload round-trips byte-identically", () => {

@@ -656,11 +656,17 @@ describe("runSyncOnce commit", () => {
     expect(loadCursor(join(cwd, "state"), "1688", "1688-main")).toBeNull();
   });
 
-  it("refuses an expired snapshot", async () => {
+  it("refuses an expired snapshot based on the signed payload finished_at", async () => {
     const cwd = tempCwd();
     const path = await dryRunSnapshot(cwd, { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" });
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as { created_at: string };
-    parsed.created_at = new Date(Date.now() - 31 * 60_000).toISOString();
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { payload_json: string; payload_sha256: string };
+    const stale = new Date(Date.now() - 31 * 60_000).toISOString();
+    parsed.payload_json = parsed.payload_json.replace(
+      /"finished_at":"[^"]+"/,
+      `"finished_at":"${stale}"`,
+    );
+    const { createHash } = await import("node:crypto");
+    parsed.payload_sha256 = createHash("sha256").update(parsed.payload_json, "utf8").digest("hex");
     writeFileSync(path, JSON.stringify(parsed, null, 2), "utf8");
     const outcome = await runSyncOnce(
       buildOptions(
@@ -671,6 +677,29 @@ describe("runSyncOnce commit", () => {
     );
     expect(outcome.exitCode).toBe(1);
     expect(outcome.report.error_code).toBe("EXPIRED_SNAPSHOT");
+  });
+
+  it("rejects snapshots with obviously future timestamps", async () => {
+    const cwd = tempCwd();
+    const path = await dryRunSnapshot(cwd, { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" });
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { payload_json: string; payload_sha256: string };
+    const future = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+    parsed.payload_json = parsed.payload_json.replace(
+      /"finished_at":"[^"]+"/,
+      `"finished_at":"${future}"`,
+    );
+    const { createHash } = await import("node:crypto");
+    parsed.payload_sha256 = createHash("sha256").update(parsed.payload_json, "utf8").digest("hex");
+    writeFileSync(path, JSON.stringify(parsed, null, 2), "utf8");
+    const outcome = await runSyncOnce(
+      buildOptions(
+        cwd,
+        { mode: "commit", confirm: true, snapshotPath: path },
+        { ARRIVAL_SYNC_WORKER_KEY: "test-worker-key-0001" },
+      ),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.report.error_code).toBe("SNAPSHOT_INVALID");
   });
 
   it("refuses a snapshot whose cursor_before no longer matches the current cursor", async () => {
