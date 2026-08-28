@@ -434,7 +434,7 @@ def test_migration_upgrades_old_database_and_keeps_receipts(
         migrations = connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in migrations] == [1, 2, 3]
+        assert [row["version"] for row in migrations] == [1, 2, 3, 4]
 
 
 def test_fp_item_title_sku_change_with_package_is_safe(
@@ -537,7 +537,7 @@ def test_legacy_nonnull_links_are_nullified_and_deduped_on_upgrade(
         migrations = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in migrations] == [1, 2, 3]
+        assert [row["version"] for row in migrations] == [1, 2, 3, 4]
 
 
 def test_failed_migration_leaves_no_partial_schema(tmp_path) -> None:

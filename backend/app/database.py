@@ -167,6 +167,32 @@ CREATE TABLE IF NOT EXISTS sync_batches (
 
 CREATE INDEX IF NOT EXISTS idx_sync_batches_rate
     ON sync_batches(token_digest, received_at);
+
+CREATE TABLE IF NOT EXISTS ali1688_sync_state (
+    account_key TEXT PRIMARY KEY,
+    cursor TEXT,
+    last_success_at TEXT,
+    last_error_at TEXT,
+    last_error_code TEXT,
+    last_error_message TEXT,
+    last_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ali1688_sync_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_key TEXT NOT NULL,
+    run_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    count INTEGER NOT NULL DEFAULT 0,
+    error_code TEXT,
+    error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ali1688_sync_runs_account
+    ON ali1688_sync_runs(account_key, started_at DESC);
 """
 
 
@@ -244,6 +270,33 @@ def _migration_package_links_order_level(connection: sqlite3.Connection) -> None
     )
 
 
+def _migration_ali1688_sync_state(connection: sqlite3.Connection) -> None:
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS ali1688_sync_state (
+            account_key TEXT PRIMARY KEY,
+            cursor TEXT,
+            last_success_at TEXT,
+            last_error_at TEXT,
+            last_error_code TEXT,
+            last_error_message TEXT,
+            last_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS ali1688_sync_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_key TEXT NOT NULL,
+            run_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            count INTEGER NOT NULL DEFAULT 0,
+            error_code TEXT,
+            error_message TEXT
+        )
+    """)
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_ali1688_sync_runs_account ON ali1688_sync_runs(account_key, started_at DESC)")
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial_schema", apply=_migration_initial_schema),
     Migration(version=2, name="item_identity", apply=_migration_item_identity),
@@ -251,6 +304,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=3,
         name="package_links_order_level",
         apply=_migration_package_links_order_level,
+    ),
+    Migration(
+        version=4,
+        name="ali1688_sync_state",
+        apply=_migration_ali1688_sync_state,
     ),
 )
 

@@ -5,7 +5,7 @@
 ## 1. 工作边界
 
 - P0 收货闭环优先，平台同步不能破坏拍照、离线队列、照片证据和已有数据库。
-- 当前平台同步统一使用 Windows 独立 Chrome 的可见、只读自动化；不要重新引入 1688 官方 API、OAuth 或平台内部接口。
+- 1688 使用后端官方 Open API（见 docs/ALI1688_OPEN_API.md）；PDD 保持 Windows 独立 Chrome 的可见、只读自动化。禁止平台内部接口。
 - 不在服务器运行 Chrome/Playwright，不把账号密码、Cookie、profile 或支付数据上传服务器。
 - 不绕过验证码、滑块、风控或登录保护；遇到阻断必须停止并报告。
 - 不为了“让测试通过”关闭认证、放宽 CORS、删除数据库、跳过权限校验或写入假订单。
@@ -15,7 +15,7 @@
 推荐分支：
 
 ```text
-feat/browser-sync-mvp
+codex/1688-open-api-mvp
 ```
 
 提交使用 Conventional Commits：
@@ -42,7 +42,7 @@ DeepSeek 建议按以下最小提交序列交付，便于逐步审查和回滚�
 docs(sync): freeze browser sync contract
 feat(sync): add worker skeleton and offline doctor
 feat(backend): add sync batch migration and ingest
-feat(sync): add 1688 visible-page adapter
+feat(sync): add server-side 1688 Open API sync
 feat(sync): add pdd visible-page adapter
 test(sync): add sanitized fixtures and contract coverage
 ```
@@ -148,7 +148,7 @@ DeepSeek 每完成一个阶段必须回复并写入提交说明：
 - [ ] 无秘密、原始订单或 profile；
 - [ ] 无平台 API/OAuth/平台内部接口回归；到货管家内部 sync endpoint 有权限、幂等和大小限制测试；
 - [ ] 服务器端点权限、幂等和请求大小有测试；
-- [ ] PDD/1688 页面异常会熔断；
+- [ ] PDD 页面异常会熔断；1688 API 权限、网络和结构错误会 fail closed；
 - [ ] 旧收货数据迁移兼容；
 - [ ] 文档与命令和实际代码一致；
 - [ ] `git diff --check`、后端测试、前端测试、构建均通过；

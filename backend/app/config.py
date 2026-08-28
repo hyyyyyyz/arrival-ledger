@@ -70,6 +70,13 @@ class Settings:
     sync_rate_limit_per_hour: int = 6
     sync_max_batch_orders: int = 100
     sync_max_batch_bytes: int = 256 * 1024
+    ali1688_api_enabled: bool = False
+    ali1688_config_path: Path = Path("/run/secrets/ali1688.json")
+    ali1688_sync_interval_seconds: int = 0
+    ali1688_timeout_seconds: float = 15.0
+    ali1688_retries: int = 2
+    ali1688_max_pages: int = 25
+    ali1688_backfill_days: int = 30
 
     def validate(self) -> None:
         if len(self.session_secret) < 32:
@@ -100,6 +107,16 @@ class Settings:
             raise ValueError("SYNC_MAX_BATCH_ORDERS must be between 1 and 100")
         if not 4096 <= self.sync_max_batch_bytes <= 2 * 1024 * 1024:
             raise ValueError("SYNC_MAX_BATCH_BYTES must be between 4096 and 2097152")
+        if self.ali1688_sync_interval_seconds < 0:
+            raise ValueError("ALI1688_SYNC_INTERVAL_SECONDS cannot be negative")
+        if self.ali1688_timeout_seconds <= 0 or self.ali1688_timeout_seconds > 120:
+            raise ValueError("ALI1688_TIMEOUT_SECONDS must be between 0 and 120")
+        if self.ali1688_retries < 0 or self.ali1688_retries > 5:
+            raise ValueError("ALI1688_RETRIES must be between 0 and 5")
+        if self.ali1688_max_pages < 1 or self.ali1688_max_pages > 100:
+            raise ValueError("ALI1688_MAX_PAGES must be between 1 and 100")
+        if self.ali1688_backfill_days < 1 or self.ali1688_backfill_days > 3650:
+            raise ValueError("ALI1688_BACKFILL_DAYS must be between 1 and 3650")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -146,6 +163,13 @@ class Settings:
             sync_max_batch_bytes=_env_int(
                 "SYNC_MAX_BATCH_BYTES", 256 * 1024, 4096
             ),
+            ali1688_api_enabled=_env_bool("ALI1688_API_ENABLED", False),
+            ali1688_config_path=Path(os.getenv("ALI1688_CONFIG_PATH", "/run/secrets/ali1688.json")),
+            ali1688_sync_interval_seconds=_env_int("ALI1688_SYNC_INTERVAL_SECONDS", 0, 0),
+            ali1688_timeout_seconds=float(os.getenv("ALI1688_TIMEOUT_SECONDS", "15")),
+            ali1688_retries=_env_int("ALI1688_RETRIES", 2, 0),
+            ali1688_max_pages=_env_int("ALI1688_MAX_PAGES", 25, 1),
+            ali1688_backfill_days=_env_int("ALI1688_BACKFILL_DAYS", 30, 1),
         )
         settings.validate()
         return settings

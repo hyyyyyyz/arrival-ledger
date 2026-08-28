@@ -5,7 +5,7 @@ import { configFailures, loadConfig, maskKey } from "./config.js";
 import { runCapturePage } from "./capture_page.js";
 import { runLoginCheck as runLoginCheckFlow } from "./login_check.js";
 import { JsonLogger } from "./log.js";
-import { isPlatform, PLATFORMS, type Platform } from "./models.js";
+import { isPlatform, type Platform } from "./models.js";
 import { runSyncOnce } from "./run.js";
 import { acquireLock, describeHolder } from "./state/lock.js";
 import { loadCursor } from "./state/cursor.js";
@@ -19,11 +19,11 @@ interface DoctorCheck {
 const HELP = `arrival-ledger sync-agent (browser sync MVP)
 
 Usage:
-  sync-agent doctor [--offline] [--platform <pdd|1688>]
-  sync-agent login-check --platform <pdd|1688>
-  sync-agent capture-page --platform <pdd|1688>
-  sync-agent sync-once --platform <pdd|1688> --mode dry-run
-  sync-agent sync-once --platform <pdd|1688> --mode commit --from-report <snapshot> --yes
+  sync-agent doctor [--offline] [--platform pdd]
+  sync-agent login-check --platform pdd
+  sync-agent capture-page --platform pdd
+  sync-agent sync-once --platform pdd --mode dry-run
+  sync-agent sync-once --platform pdd --mode commit --from-report <snapshot> --yes
 
 Commands:
   doctor       Check local configuration, state, locks and (unless --offline)
@@ -40,7 +40,7 @@ Commands:
 
 Flags:
   --offline       doctor: skip the Chromium check
-  --platform      one of: pdd, 1688
+  --platform      pdd (1688 browser sync is retired; use the backend Open API)
   --mode          dry-run | commit
   --from-report   path to the dry-run snapshot (required for commit)
   --yes           confirm commit after reviewing the dry-run report
@@ -119,7 +119,7 @@ async function runDoctor(options: {
     detail: `node ${process.versions.node} (>= 20 required)`,
   });
 
-  const platforms = options.platform === null ? [...PLATFORMS] : [options.platform];
+  const platforms: Platform[] = options.platform === null ? ["pdd"] : [options.platform];
 
   for (const issue of issues) {
     checks.push({
@@ -274,10 +274,13 @@ async function main(): Promise<number> {
 
   const platform = parsePlatformFlag(values);
   if (command !== "doctor" && values.platform === undefined) {
-    return fail(`--platform <pdd|1688> is required for ${command}`);
+    return fail(`--platform pdd is required for ${command}`);
   }
   if (values.platform !== undefined && platform === null) {
-    return fail(`--platform must be one of: ${PLATFORMS.join(", ")}`);
+    return fail("--platform must be pdd");
+  }
+  if (platform === "1688") {
+    return fail("1688 browser sync is retired; configure the backend official Open API (see docs/ALI1688_OPEN_API.md)", 1);
   }
 
   switch (command) {

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 SYNC_SCHEMA_VERSION = 1
 SYNC_SOURCE = "WINDOWS_BROWSER"
+SYNC_SOURCES = ("WINDOWS_BROWSER", "ALI1688_API")
 SYNC_PLATFORMS = ("pdd", "1688")
 SYNC_ORDER_STATUSES = (
     "PENDING",
@@ -90,6 +91,8 @@ class SyncBatchIn(BaseModel):
     worker_id: str = Field(min_length=1, max_length=64)
     platform: Literal["pdd", "1688"]
     platform_account_key: str = Field(min_length=1, max_length=64)
+    platform_account_label: str | None = Field(default=None, max_length=128)
+    source: Literal["WINDOWS_BROWSER", "ALI1688_API"] = "WINDOWS_BROWSER"
     started_at: datetime
     finished_at: datetime
     cursor_before: str | None = Field(default=None, max_length=512)
@@ -174,13 +177,16 @@ def ingest_sync_batch(
     payload_sha256: str,
     token_digest: str,
     now: str,
+    *,
+    manage_transaction: bool = True,
 ) -> dict[str, int]:
     created = 0
     updated = 0
     skipped = 0
 
     try:
-        connection.execute("BEGIN IMMEDIATE")
+        if manage_transaction:
+            connection.execute("BEGIN IMMEDIATE")
         account_id = _upsert_platform_account_in_tx(connection, payload, now)
         for order in payload.orders:
             created, updated, skipped = _upsert_order(
@@ -191,6 +197,7 @@ def ingest_sync_batch(
                 created,
                 updated,
                 skipped,
+                payload.source,
             )
         counts = {"created": created, "updated": updated, "skipped": skipped, "errors": 0}
         connection.execute(
@@ -216,14 +223,22 @@ def ingest_sync_batch(
                 now,
             ),
         )
-        connection.commit()
+        if manage_transaction:
+            connection.commit()
         return counts
     except BaseException as exc:
+        if manage_transaction:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
         try:
-            connection.rollback()
-        except sqlite3.Error:
-            pass
-        try:
+            if not manage_transaction:
+                # The caller owns the transaction and must roll it back as a
+                # unit with any associated cursor update.  In particular, do
+                # not insert an error batch here because that would make a
+                # failed API sync look partially committed.
+                raise
             connection.execute(
                 """
                 INSERT INTO sync_batches(
@@ -262,13 +277,18 @@ def _upsert_platform_account_in_tx(
         (payload.platform, payload.platform_account_key),
     ).fetchone()
     if row is not None:
+        if payload.source == "ALI1688_API":
+            connection.execute(
+                "UPDATE platform_accounts SET display_label = COALESCE(?, display_label), source = ?, updated_at = ? WHERE id = ?",
+                (payload.platform_account_label, payload.source, now, row["id"]),
+            )
         return row["id"]
     cursor = connection.execute(
         """
-        INSERT INTO platform_accounts(platform, account_key, source, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO platform_accounts(platform, account_key, display_label, source, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (payload.platform, payload.platform_account_key, SYNC_SOURCE, now, now),
+        (payload.platform, payload.platform_account_key, payload.platform_account_label, payload.source, now, now),
     )
     return cursor.lastrowid
 
@@ -281,11 +301,12 @@ def _upsert_order(
     created: int,
     updated: int,
     skipped: int,
+    source: str = SYNC_SOURCE,
 ) -> tuple[int, int, int]:
     ordered_at = db_timestamp(order.ordered_at) if order.ordered_at is not None else None
     existing = connection.execute(
         """
-        SELECT id, ordered_at, order_status, shop_name
+        SELECT id, ordered_at, order_status, shop_name, source
         FROM purchase_orders
         WHERE platform_account_id = ? AND platform_order_id = ?
         """,
@@ -308,7 +329,7 @@ def _upsert_order(
                 ordered_at,
                 order.status,
                 order.shop_name,
-                SYNC_SOURCE,
+                source,
                 now,
                 now,
                 now,
@@ -324,15 +345,16 @@ def _upsert_order(
             existing["ordered_at"] != ordered_at
             or existing["order_status"] != order.status
             or existing["shop_name"] != order.shop_name
+            or existing["source"] != source
         ):
             connection.execute(
                 """
                 UPDATE purchase_orders
-                SET ordered_at = ?, order_status = ?, shop_name = ?,
+                SET ordered_at = ?, order_status = ?, shop_name = ?, source = ?,
                     last_seen_at = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (ordered_at, order.status, order.shop_name, now, now, order_id),
+                (ordered_at, order.status, order.shop_name, source, now, now, order_id),
             )
             updated += 1
             changed = True
@@ -441,7 +463,7 @@ def _upsert_order(
                     package.tracking_no,
                     tracking_normalized,
                     package.status,
-                    SYNC_SOURCE,
+                    source,
                     now,
                     now,
                 ),

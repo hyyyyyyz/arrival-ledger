@@ -1,69 +1,63 @@
-# 给 DeepSeek 的实现任务单：浏览器自动化 MVP
+# 给实现协作者的任务单：1688 Open API + 拼多多浏览器同步
 
 请先阅读并遵守：
 
 1. `PLAN.md`；
-2. `docs/BROWSER_SYNC_SPEC.md`；
-3. `CONTRIBUTING.md`。
+2. `docs/ALI1688_OPEN_API.md`；
+3. `docs/BROWSER_SYNC_SPEC.md`；
+4. `CONTRIBUTING.md`。
 
-当前明确决定：不实现 1688 官方 API；1688 和拼多多都使用 Windows 独立 Chrome 的可见、只读自动化。不要根据旧提交中的 API 段落继续开发。
+## 当前架构（必须保持）
 
-这里的“不要 API”仅指不要调用平台官方 API、内部接口或 OAuth；到货管家自己的同步 HTTP 接口仍然是必需的，用于把脱敏、规范化订单批次从 Windows 安全送到服务器。
+- 1688：后端调用官方 Open API，支持多个应用、每个应用多个授权买家账号；`AppKey/AppSecret/access_token`
+  只存在服务器私有 secret 文件，不进入代码、数据库、日志、截图或提交。
+- 拼多多：仅在闲置 Windows 电脑上运行 headed Chrome/Playwright，用户手工登录，程序只读取可见订单页面；
+  不调用平台内部接口，不抓包，不绕过验证码/滑块/风控。
+- 手机收货、数据库和内部批次接口必须保持兼容。1688 API 同步失败不能影响拍照收货或拼多多同步。
 
 ## 交付顺序
 
-### D1：同步包骨架（不连接真实平台）
+### A1：1688 配置与客户端
 
-- 新建 `sync-agent/` Node.js/TypeScript 包和 CLI；
-- 实现配置、平台枚举、统一订单模型、状态文件、单实例锁；
-- 实现字符串规范化、批次模型和脱敏 JSON 日志；
-- 添加脱敏 fixture 测试；
-- 交付 `doctor --offline`。
+- 实现严格校验的多应用/多账号 JSON 配置和 `config-doctor`；账号以唯一 `account_key` 隔离。
+- 实现官方请求签名、超时、有限重试、HTTP 与业务错误分类；默认不发送未被官方请求参数要求的字段。
+- 任何错误、日志和状态输出都必须脱敏，不能输出 secret、token、地址、电话或原始响应。
 
-### D2：服务器批次接收
+### A2：1688 同步编排
 
-- 在现有 FastAPI 中增加数据库迁移和 `/api/sync/v1/batches`；
-- 增加 worker token 的摘要存储、撤销/轮换配置和最小权限依赖；
-- 实现批次幂等、订单/商品/包裹 upsert、多包裹和多订单关系；
-- 不改变现有收货 API 行为；
-- 添加未授权、重复批次、超限、坏字段和事务回滚测试。
+- 使用 `alibaba.trade.getBuyerOrderList` 按修改时间窗口分页；订单 ID 使用 `idOfStr` 字符串。
+- 对订单详情调用 `alibaba.trade.get.buyerView`，按 allowlist 读取商品、SKU 和
+  `nativeLogistics.logisticsItems[].logisticsBillNo`，支持多商品、多包裹。
+- 每个账号独立游标、锁、运行记录和错误状态；失败账号不推进游标，不影响其它账号。
+- `dry-run` 不写订单/批次/游标；`sync-once --account <key>` 和 `--all` 均幂等。
 
-### D3：1688 可见页面适配器
+### A3：拼多多同步端回归
 
-- 使用独立 profile 和 headed Playwright；
-- 只读取订单列表可见 DOM；
-- 实现登录检测、阻断检测、分页/加载更多、字段解析和 `sync-once`；
-- 解析失败返回 `SCHEMA_CHANGED`，不猜数据；
-- 用脱敏 fixture 覆盖订单、商品、拆包和缺失物流。
+- `sync-agent` 只保留 PDD operational 命令：`doctor`、`login-check`、`capture-page`、
+  `sync-once`；1688 不得再从 Windows 打开页面。
+- 页面始终 headed、可见、只读；遇到登录过期、验证码、系统繁忙或结构变化立即熔断。
+- dry-run 生成本地私有 snapshot，commit 只能复用 snapshot，不得重新抓取页面。
 
-### D4：拼多多可见页面适配器
+### A4：验证、文档和交接
 
-- 与 D3 相同的接口和安全边界；
-- 适配订单卡片、状态、店铺、商品和物流字段；
-- 首次只做手动同步，不接 Task Scheduler；
-- 真实账号测试前先通过 `login-check`，禁止自动输入密码。
+- 后端覆盖配置、签名、重试、日期、映射、PII 丢弃、双账号隔离、游标/事务、幂等和 page cap。
+- Windows 只按 `docs/WINDOWS_SYNC_FROM_SCRATCH.md` 验收拼多多；1688 按
+  `docs/ALI1688_OPEN_API.md` 在服务器执行离线 doctor、dry-run 和单账号 API 验证。
+- 只提交脱敏测试数据；真实 token、订单号、运单号和报告文件不得进入 Git 或聊天。
 
-### D5：端到端测试与交接
+## 不得扩展的范围
 
-- Windows 上各平台完成 20–30 条真实订单手动同步；
-- 重复运行验证幂等；
-- 用一个真实运单号在到货页面验证匹配；
-- 写出同步报告和失败截图（截图必须脱敏且不提交）；
-- 只有 D1–D5 全部通过后，才另开任务实现定时同步。
-
-## 不得自行扩展的范围
-
-- 不新增平台 API、OAuth、抓包、网络拦截、验证码识别或反检测依赖；允许并要求实现本项目约定的 `/api/sync/v1/batches` 内部接口；
-- 不修改 Cloudflare、服务器防火墙或旧数据路径；
-- 不把真实账号/密码写入测试、脚本、Issue 或 commit；
-- 不自动清理旧数据、不删除用户照片；
-- 不把“页面读不到”处理成随机填充或假成功。
+- 不实现 1688 浏览器适配器或让 Windows 端访问 1688；历史适配器如需保留，只能用于脱敏 fixture 回归，
+  并明确标注为历史兼容代码。
+- 不调用平台内部 API、抓包、网络拦截、代理池、IP 轮换、验证码识别或反检测技术。
+- 不修改订单、支付、退款、确认收货或物流状态；不自动登录或保存平台密码/Cookie。
+- 不自动清理旧数据、不删除照片、不为了测试关闭认证或跳过权限。
 
 ## 每阶段交付模板
 
 ```text
-阶段：D?
-提交：<commit hash>
+阶段：A?
+提交：<commit hash 或未提交>
 文件：...
 命令：...
 测试：通过/失败（附数量）

@@ -6,13 +6,15 @@
 
 ## 1. 目的与边界
 
-本模块把用户已经登录的 1688、拼多多网页订单，低频同步成到货管家的采购订单数据。它不是官方开放平台适配器，也不是通用爬虫。第一版只做“可见页面、只读、单账号、低频、人工可恢复”的测试能力。
+本模块只规定拼多多：把用户已经登录的拼多多网页订单低频同步成到货管家的采购订单数据。1688 订单
+已迁移至后端官方 Open API（支持多个应用和授权账号），本文不提供 1688 浏览器操作步骤；请看
+[`ALI1688_OPEN_API.md`](ALI1688_OPEN_API.md)。本文不是官方开放平台适配器，也不是通用爬虫。
 
 平台页面、账号状态和网站规则都可能变化，因此浏览器同步永远是增强能力。即使同步完全失效，手机拍照收货、CSV 导入和已有历史数据仍必须可用。
 
 ### 明确不做
 
-- 不再申请、实现或依赖 1688 官方订单 API；当前方案中删除 AppKey、AppSecret、OAuth、access token 相关任务。
+- 1688 浏览器同步已停用；需要同步 1688 时只能按后端官方 Open API 文档操作。
 - 不读取或上传密码、Cookie、localStorage、sessionStorage、浏览器 profile、支付信息、完整地址或电话。
 - 不调用平台内部 JSON/API、拦截网络请求、修改请求参数或伪造设备指纹。
 - 不自动下单、支付、退款、确认收货、评价或修改任何平台数据。
@@ -25,8 +27,7 @@
 Windows 10/11（闲置电脑）
   ├─ Node.js 20 LTS + TypeScript 同步程序
   ├─ Playwright + 可见 Chromium
-  ├─ C:\ArrivalLedger\profiles\pdd       # 拼多多独立登录态
-  ├─ C:\ArrivalLedger\profiles\1688      # 1688 独立登录态
+  ├─ C:\ArrivalLedger\profiles\pdd       # 仅拼多多浏览器登录态
   ├─ C:\ArrivalLedger\state               # 游标、批次、锁
   └─ C:\ArrivalLedger\logs                # 脱敏日志
           │ 仅上传订单必要字段
@@ -40,13 +41,12 @@ Ubuntu 192.168.1.5
 
 服务器是纯 Server，不安装桌面环境，也不反向控制 Windows 浏览器。Windows 端主动发起请求；服务器只接受结构化订单批次。
 
-### 2.1 两个独立浏览器 profile
+### 2.1 拼多多浏览器 profile
 
-必须为两个平台使用不同的 `user-data-dir`，不得复用用户日常 Chrome profile：
+拼多多使用独立的 `user-data-dir`，不得复用用户日常 Chrome profile：
 
 ```text
 C:\ArrivalLedger\profiles\pdd
-C:\ArrivalLedger\profiles\1688
 ```
 
 首次运行由用户在可见窗口中登录。程序只检查是否已登录，不自动填写密码、不保存密码、不代做短信/扫码确认。profile 目录永远只留在 Windows，不能进入 Git、服务器备份或同步接口。
@@ -58,10 +58,7 @@ C:\ArrivalLedger\profiles\1688
 ```powershell
 npm run doctor
 npm run login-check -- --platform pdd
-npm run login-check -- --platform 1688
-npm run capture-page -- --platform 1688
 npm run sync-once -- --platform pdd --mode dry-run
-npm run sync-once -- --platform 1688 --mode dry-run
 npm run sync-once -- --platform pdd --mode commit --from-report .\state\snapshot-pdd-pdd-main-<batch_id>.json --yes
 ```
 
@@ -75,7 +72,6 @@ npm run sync-once -- --platform pdd --mode commit --from-report .\state\snapshot
 ARRIVAL_API_BASE_URL=http://192.168.1.5:8766
 ARRIVAL_SYNC_WORKER_KEY=填入本机密钥，不提交 Git
 PDD_PROFILE_DIR=C:/ArrivalLedger/profiles/pdd
-ALI1688_PROFILE_DIR=C:/ArrivalLedger/profiles/1688
 SYNC_MAX_PAGES=5
 SYNC_MAX_RECORDS=30
 SYNC_PAGE_DELAY_MS=2500
@@ -85,10 +81,10 @@ SYNC_PAGE_DELAY_MS=2500
 
 ### MVP-1 完成条件
 
-1. 两个独立 profile 均可由用户手工登录并通过 `login-check`。
-2. PDD、1688 各成功读取至少 20 条真实订单；订单号、商品、规格、数量、店铺等列表字段完整率不低于 95%。
+1. 拼多多 profile 可由用户手工登录并通过 `login-check`。
+2. PDD 成功读取至少 20 条真实订单；订单号、商品、规格、数量、店铺等列表字段完整率不低于 95%。1688 的 API 验收见 `docs/ALI1688_OPEN_API.md`。
 3. 同一批次重复运行不新增重复订单、商品行或包裹。
-4. PDD 至少一个带运单号的订单能在手机收货页面显示商品；1688 列表没有运单号时允许进入待认领并人工绑定。
+4. PDD 至少一个带运单号的订单能在手机收货页面显示商品；1688 API 的物流验收见 `docs/ALI1688_OPEN_API.md`。
 5. 登录过期、验证码、页面改版均产生明确状态，不静默写入错误数据。
 6. 服务器数据库/日志中不存在密码、Cookie、完整地址和原始 HTML；worker token 的明文只存在于服务器受限 `.env` 与 Windows 受 ACL 保护的 `.env.local`，数据库只保存摘要。
 7. 关闭 Windows 同步程序后，P0 收货页面仍可正常使用。
@@ -149,7 +145,7 @@ sync-agent/
 
 ```ts
 interface PlatformAdapter {
-  readonly platform: "pdd" | "1688";
+  readonly platform: "pdd";
   readonly orderListUrl: string;
   readonly statusMap: StatusMap;
   readonly allowDetailNavigation?: boolean;
@@ -169,7 +165,7 @@ interface PlatformAdapter {
 默认入口可配置为：
 
 - 拼多多：`https://mobile.yangkeduo.com/orders.html`
-- 1688：`https://air.1688.com/app/ctf-page/trade-order-list/buyer-order-list.html`
+- 1688 不属于本浏览器同步模块；服务器 API 入口和权限见 `docs/ALI1688_OPEN_API.md`。
 
 页面 URL、选择器、字段标签必须放在适配器配置/常量中，不能散落在业务层。页面改版时只修改对应适配器和 fixture。
 
@@ -179,7 +175,7 @@ interface PlatformAdapter {
 
 ```json
 {
-  "platform": "pdd|1688",
+  "platform": "pdd",
   "platform_account_key": "pdd-main",
   "platform_order_id": "string",
   "ordered_at": "ISO-8601|null",
@@ -229,13 +225,13 @@ interface PlatformAdapter {
 | 平台 | 列表阶段 | 详情阶段 | 必须抽取 |
 |---|---|---|---|
 | PDD | 已登录订单列表、状态筛选、分页/加载更多 | 必要时打开订单详情再返回列表 | 订单号、状态、下单/更新时间、店铺、商品标题/规格/数量、可见快递公司/运单号 |
-| 1688 | 已登录买家订单列表、分页 | **禁止自动进入详情/物流/平台提醒**；默认 list-only | 订单号、状态、下单/更新时间、供应商/店铺、商品标题/规格/数量；列表没有运单号时保留空 `packages` |
+| 1688 | 不在本浏览器同步端运行 | 后端官方 Open API | 见 `docs/ALI1688_OPEN_API.md` |
 
 适配器必须：
 
 1. 以页面标签、表格语义、ARIA role/label 和稳定 `data-*` 属性为首选；随机 CSS 类名只能作为最后一层且必须有 fixture 测试；
 2. 仅当适配器明确设置 `allowDetailNavigation=true` 时才允许进入详情；进入前保存列表页订单 ID，
-   返回后校验仍在同一页，避免把详情内容错配到下一条订单；1688 必须保持 `false`；
+   返回后校验仍在同一页，避免把详情内容错配到下一条订单；
 3. 一个订单出现多个包裹时全部保留；没有运单号时写空数组，不伪造单号；
 4. 订单号、商品 ID、规格 ID、运单号先做字符串清洗，再做长度/字符集校验；
 5. 页面显示“暂无订单”时先确认账号和筛选条件，不得用空结果覆盖服务器已有订单；
@@ -287,8 +283,8 @@ Idempotency-Key: <batch_id>
   "schema_version": 1,
   "batch_id": "uuid",
   "worker_id": "win-arrival-01",
-  "platform": "pdd|1688",
-  "platform_account_key": "pdd-main|1688-main",
+  "platform": "pdd",
+  "platform_account_key": "pdd-main",
   "started_at": "ISO-8601",
   "finished_at": "ISO-8601",
   "cursor_before": "string|null",
@@ -425,7 +421,7 @@ sync_batches(
 原始 class、属性值、截图、Cookie、storage、URL path 参数或 query。诊断命令固定单页、零详情点击、
 零分页、零上传；POSIX 文件权限为目录 `0700`/文件 `0600`，Windows 依赖安装教程设置的 NTFS ACL。
 
-## 10. 后续定时任务（不属于 MVP-1）
+## 10. PDD 后续定时任务（不属于 MVP-1）
 
 MVP-1 手动同步稳定后，才配置 Windows Task Scheduler：
 
@@ -440,8 +436,8 @@ MVP-1 手动同步稳定后，才配置 Windows Task Scheduler：
 ### 自动测试（CI 可执行）
 
 - 单号、订单号、日期、数量的字符串规范化；
-- PDD/1688 脱敏 HTML fixture 解析；
-- 多页、重复卡片、缺失字段、拆包/合包；
+- PDD 脱敏 HTML fixture 解析；1688 API mapping 在后端测试中覆盖；
+- 多页、重复卡片、缺失字段、拆包/合包；1688 多包裹由后端 API 测试覆盖；
 - 状态映射和退款/取消处理；
 - 本地游标原子保存、锁和失败恢复；
 - 批次 JSON schema、大小限制、幂等接口和 token 权限；
@@ -449,8 +445,7 @@ MVP-1 手动同步稳定后，才配置 Windows Task Scheduler：
 
 ### 人工验收
 
-- 两个平台分别登录正确账号；
-- 每个平台手动同步 20–30 条真实订单；
+- PDD 手工登录正确账号并同步 20–30 条真实订单；1688 在服务器以至少两个授权账号验收；
 - 关闭/重新运行同步，计数不重复；
 - 账号退出或登录过期显示 `NEEDS_LOGIN`；
 - 人工触发验证码时程序停止，不尝试处理；
@@ -462,4 +457,5 @@ MVP-1 手动同步稳定后，才配置 Windows Task Scheduler：
 - MVP-1：手动、可见、每次显式指定一个平台的 `sync-once`；
 - MVP-2：批次历史、预览确认、PDD/1688 字段差异修复；
 - MVP-3：Task Scheduler 低频增量同步和失败通知；
-- 后续：仅在官方许可、稳定性和实际收益明确时评估其他接入方式。官方 API 不再列入当前实现计划。
+- 后续：1688 由 backend 官方 API 独立定时；PDD 仅在人工验收后评估 Windows Task Scheduler。其它平台
+  接入必须另行评估官方许可、权限和稳定性。

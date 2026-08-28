@@ -9,7 +9,9 @@ RUN groupadd --gid 10001 appuser \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir --requirement requirements.txt
+RUN python -m pip install --no-cache-dir \
+      "pip @ https://files.pythonhosted.org/packages/62/36/a3aed958d60531cb442b7ab4596cda7b3621cfb916f8ae1d6769795c7dc1/pip-26.2-py3-none-any.whl#sha256=931c303696af6fa3417112103b1cad26890e5a07eccb5b99783700e33f2b8aad" \
+    && python -m pip install --no-cache-dir --requirement requirements.txt
 
 COPY app ./app
 

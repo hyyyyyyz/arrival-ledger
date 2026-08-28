@@ -35,6 +35,13 @@ services:
       SYNC_RATE_LIMIT_PER_HOUR: ${SYNC_RATE_LIMIT_PER_HOUR:-6}
       SYNC_MAX_BATCH_ORDERS: ${SYNC_MAX_BATCH_ORDERS:-100}
       SYNC_MAX_BATCH_BYTES: ${SYNC_MAX_BATCH_BYTES:-262144}
+      ALI1688_API_ENABLED: ${ALI1688_API_ENABLED:-false}
+      ALI1688_CONFIG_PATH: /run/secrets/ali1688.json
+      ALI1688_SYNC_INTERVAL_SECONDS: ${ALI1688_SYNC_INTERVAL_SECONDS:-0}
+      ALI1688_TIMEOUT_SECONDS: ${ALI1688_TIMEOUT_SECONDS:-15}
+      ALI1688_RETRIES: ${ALI1688_RETRIES:-2}
+      ALI1688_MAX_PAGES: ${ALI1688_MAX_PAGES:-25}
+      ALI1688_BACKFILL_DAYS: ${ALI1688_BACKFILL_DAYS:-30}
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
     expose:
@@ -49,6 +56,13 @@ services:
       - type: bind
         source: ${DATA_ROOT:-/home/jackson/arrival-manager-data}/uploads
         target: /data/uploads
+      - type: bind
+        # The checked-in example is a safe disabled placeholder. Set
+        # ALI1688_SECRET_FILE to a private, ignored file before enabling API
+        # sync; never edit or commit the example with real credentials.
+        source: ${ALI1688_SECRET_FILE:-./secrets/ali1688.empty.json}
+        target: /run/secrets/ali1688.json
+        read_only: true
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m

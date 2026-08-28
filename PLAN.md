@@ -21,19 +21,19 @@
 |---|---|---:|---|
 | 仓库局域网 | 微信 H5，访问 http://192.168.1.5:8766 | 否 | `.5` 已部署并通过服务端健康检查，待真机完整验收 |
 | 外网/异地 | HTTPS 临时 Quick Tunnel（无域名） | 是 | `.5` 已启用临时隧道并通过公网健康检查；等待手机登录/拍照验收 |
-| 平台订单采集 | 闲置 Windows 上的两个独立 Playwright Chromium profile + `sync-agent` | 平台登录只留在 Windows | 自动化实现完成，Windows 真机验收待执行 |
+| 平台订单采集 | 1688 后端 Open API + Windows 上的一个 PDD Playwright Chromium profile | 1688 secret 在服务器；PDD 登录态只留 Windows | 自动化实现完成，待分别验收 |
 
-服务器是纯 Server，不需要安装桌面环境。Windows 电脑只承担“保持 PDD/1688 浏览器登录并同步订单”的工作；Mac 不参与采集，也不需要一直开着。
+服务器是纯 Server，不需要安装桌面环境。1688 由后端官方 Open API 同步；Windows 电脑只承担 PDD 浏览器同步工作；Mac 不参与采集，也不需要一直开着。
 
 ### 0.3 平台结论
 
-#### 1688 与拼多多（统一浏览器自动化路线）
+#### 1688 官方 API 与拼多多浏览器路线
 
-本项目明确**不申请、不实现、不依赖 1688 或拼多多的官方平台 API**。此前调研过的开放平台、OAuth、AppKey、AppSecret、access token、官方订单导出等路径全部从实现计划中移除；它们不应出现在同步端代码、配置或部署步骤里。
+1688 采用后端官方 Open API（多应用、多授权账号、只读 secret 文件）；拼多多继续采用 Windows headed Chrome 浏览器同步。详见 docs/ALI1688_OPEN_API.md。旧的“不实现官方 API”段落仅代表历史决策。
 
-两个平台统一由 Windows 闲置电脑上的 Node.js/TypeScript + Playwright headed worker 读取用户已经打开并登录的可见网页：
+PDD 由 Windows 闲置电脑上的 Node.js/TypeScript + Playwright headed worker 读取用户已经打开并登录的可见网页；1688 由后端官方 Open API 读取：
 
-1. 用户在两个独立 Playwright Chromium profile 中手工登录；
+1. 用户只在一个独立 PDD Playwright Chromium profile 中手工登录；1688 账号授权在服务器 secret 文件中配置；
 2. worker 打开订单列表，只读取用户可见 DOM/无障碍文本和正常分页；
 3. 先生成 dry-run 预览，用户明确确认后才上传结构化订单；
 4. 到货管家服务器按订单/商品/运单号幂等入库；
@@ -192,7 +192,6 @@ Ubuntu 服务器 192.168.1.5
                 │
 闲置 Windows 电脑
   ├─ 独立 Chromium profile：PDD
-  ├─ 独立 Chromium profile：1688
   ├─ Node.js/TypeScript + Playwright headed worker
   └─ Task Scheduler（MVP 验收后才启用）
 ~~~
@@ -212,12 +211,12 @@ Ubuntu 服务器 192.168.1.5
 - 以 client_event_id 做幂等；
 - 保存订单、包裹、商品行和多对多关系；
 - 查询、去重、匹配、事件时间线和备份；
-- 接收 Windows 浏览器同步批次；
+- 接收 Windows PDD 浏览器同步批次，并在后端执行 1688 Open API 同步；
 - 不负责把拼多多账号登录到网页，也不保存浏览器会话。
 
 ### 4.3 Windows 同步端负责什么
 
-- 在真实用户已登录的 1688/拼多多网页环境中读取订单展示数据；
+- 在真实用户已登录的拼多多网页环境中读取订单展示数据；1688 不经过 Windows 浏览器；
 - 只上传必要的非 PII 字段；
 - 记录同步游标、结果和错误状态；
 - 登录失效/验证码/页面改版时停止并提示人工；
@@ -227,17 +226,18 @@ Windows 端不需要把 Chromium 窗口交给服务器控制，也不要求 Mac 
 
 ## 5. 订单进入路线
 
-### 5.1 主路线：Windows 浏览器自动化
+### 5.1 1688 API 与 PDD 浏览器两条路线
 
-平台订单的主路线统一是 `sync-agent`：Windows 上两个独立、可见的 Playwright Chromium profile，用户手工登录，程序读取可见订单页面，先 dry-run 预览再提交。PDD 和 1688 只在各自 adapter 内处理页面差异，服务器不运行浏览器。
+1688 主路线是服务器官方 Open API：每个授权买家账号独立配置、游标和运行状态，后端按修改时间窗口读取列表并读取详情。PDD 仍使用 Windows 上一个独立、可见的 Playwright Chromium profile，用户手工登录，先 dry-run 预览再提交；服务器不运行浏览器。
 
 第一测试版固定为：
 
 ```text
-doctor → 必要时 login-check → 等待页面访问冷却 → sync-once --mode dry-run → 用户确认 → --mode commit
+1688：config-doctor → 单账号 dry-run → 用户确认 → 单账号/全账号 sync-once
+PDD：doctor → 必要时 login-check → 等待页面访问冷却 → sync-once --mode dry-run → 用户确认 → commit
 ```
 
-每个平台最多先读取 3–5 页/30 条，默认从最新订单向旧订单读取。两次成功同步后才设计游标增量；MVP 不启用无人值守定时任务。
+PDD 最多先读取 3–5 页/30 条；1688 使用后端页数上限和重叠修改时间游标。两条路线均先人工验收，之后才启用低频定时任务。
 
 ### 5.2 降级路线：CSV 批量导入
 
@@ -260,12 +260,12 @@ doctor → 必要时 login-check → 等待页面访问冷却 → sync-once --mo
 
 ### 5.3 浏览器同步详细规则
 
-这是用户当前希望采用的免费方案，但必须标记为“非官方、可失效增强能力”。
+以下规则仅适用于拼多多这一非官方、可失效增强能力；1688 不使用浏览器规则。
 
 初始配置：
 
 - Windows 10/11 闲置电脑；
-- 两个独立 Chromium 数据目录：`C:/ArrivalLedger/profiles/pdd`、`C:/ArrivalLedger/profiles/1688`；
+- 一个独立 Chromium 数据目录：`C:/ArrivalLedger/profiles/pdd`；
 - 不复用日常 Chrome profile，不同时打开同一个 profile；
 - 第一次由用户在可见窗口中手工登录；
 - 首次同步前显示当前账号的脱敏标识和订单数量，由用户确认“这是采购账号”后才允许导入；
@@ -305,7 +305,7 @@ doctor → 必要时 login-check → 等待页面访问冷却 → sync-once --mo
 - 自动支付、下单、退款、确认收货；
 - 把内部同步接口当成平台 API 或控制通道；它只接收 worker 主动提交的结构化批次。
 
-只有手动同步在两个平台各 20–30 个真实订单上验证字段完整率、去重和登录失效提示后，才允许交给 Windows 任务计划定时运行。
+只有 PDD 手动同步在 20–30 个真实订单上、且 1688 API 多账号验收完成后，才允许分别启用 Windows Task Scheduler 或服务器定时器。
 
 ### 5.4 截图/OCR/手工兜底
 
@@ -318,7 +318,7 @@ doctor → 必要时 login-check → 等待页面访问冷却 → sync-once --mo
 - Windows 10/11；
 - Node.js 20 LTS + TypeScript strict；
 - Playwright（锁定版本）+ `chromium.launchPersistentContext`；
-- headed Chromium，两个独立 `user-data-dir`；
+- headed Chromium，一个独立 PDD `user-data-dir`；
 - CLI 先支持 `doctor`、`login-check`、`sync-once --mode dry-run|commit`；
 - 服务器只增加内部 `/api/sync/v1/batches` 接收接口，不把平台 API 误称为“不要 API”。
 
@@ -327,7 +327,7 @@ doctor → 必要时 login-check → 等待页面访问冷却 → sync-once --mo
 ```text
 browser/guards      登录、验证码、风控、页面状态守卫
 adapters/pdd.ts     拼多多页面入口、订单卡片、详情和分页
-adapters/ali1688.ts 1688 页面入口、订单行与分页（自动流程固定 list-only）
+adapters/ali1688.ts 历史兼容 fixture（不作为 operational CLI；1688 实际由 backend Open API 负责）
 extract/            纯函数：文本、日期、数量、运单号、订单模型
 state/              游标、批次、单实例锁、失败状态
 transport/          到货管家内部批次上传
@@ -363,7 +363,7 @@ Idempotency-Key: <run-id>
 
 ### 6.5 账户与人工确认
 
-`account_key` 由用户在 Windows 本地配置，不能依赖抓取手机号。首次 `login-check` 显示脱敏账号标识和订单数量，用户确认后才可 `commit`。程序不自动输入密码、不处理短信/二维码登录，不上传 profile。
+PDD 的 `account_key` 由用户在 Windows 本地配置，不能依赖抓取手机号。1688 的 `account_key` 由服务器 secret 配置，不能依赖手机号。首次 `login-check` 显示脱敏账号标识和订单数量，用户确认后才可 `commit`。程序不自动输入密码、不处理短信/二维码登录，不上传 profile。
 
 ## 7. 数据模型（目标模型）
 
@@ -458,10 +458,10 @@ sync_runs(
 - TypeScript 检查通过；
 - 生产构建通过；
 - 尚未完成真实 iPhone/Android 微信连续 30 件验收；
-- Windows 浏览器同步端（`sync-agent`）与内部批次接收接口代码已完成并全量测试（`feat/browser-sync-mvp`：后端 49 tests、同步端 240 tests、前端 4 tests），待 Windows 真机按 [`docs/SYNC_MANUAL_ACCEPTANCE.md`](docs/SYNC_MANUAL_ACCEPTANCE.md) 手工验收，尚未合并 main；
+- 1688 Open API、Windows PDD 浏览器同步端与内部批次接收接口已完成自动化测试，待按 [`docs/SYNC_MANUAL_ACCEPTANCE.md`](docs/SYNC_MANUAL_ACCEPTANCE.md) 分别完成服务器 API 和 Windows PDD 真机验收，尚未合并 main；
 - 尚未完成采购订单/CSV 导入模块；
 - 浏览器自动化文档、数据契约和 DeepSeek 交接规范已冻结；
-- D1–D5 自动化代码全部完成（worker 骨架/离线 doctor、服务器批次接收与迁移、1688 与 PDD 可见页面适配器、dry-run 快照与 commit、收货运单匹配闭环），真实平台采集与手工验收待 Windows 真机执行；
+- 1688 API 与 PDD worker 自动化代码已完成（配置/签名/分页详情映射、服务器批次接收与迁移、PDD dry-run 快照与 commit、收货运单匹配闭环），真实 1688 授权调用和 PDD 页面采集仍待手工验收；
 - Git 回滚基线已建立并推送到 GitHub `hyyyyyyz/arrival-ledger`（提交 `d431654`）。
 
 ### 8.4 服务器迁移：192.168.1.4 → 192.168.1.5
@@ -588,20 +588,19 @@ sync_runs(
 - 登录失效能明确提示而不是静默写错；
 - CSV/手工导入仍可独立使用。
 
-### 阶段 P3：1688 可见浏览器同步
+### 阶段 P3：1688 官方 Open API 多账号同步
 
-1688 与拼多多使用完全相同的 worker 信任边界；不申请官方开放平台权限，不保存 AppKey/AppSecret/OAuth/token。
+1688 使用后端官方 Open API，不安装浏览器 profile，不保存平台密码或 Cookie。按
+[`docs/ALI1688_OPEN_API.md`](docs/ALI1688_OPEN_API.md) 配置多个应用和授权买家账号，完成单账号
+dry-run、全账号同步、游标隔离、多商品/多包裹和运单匹配验收。
 
-- [ ] Windows 10/11 安装独立 `1688` profile；
-- [ ] 用户在可见窗口手工登录实际采购账号；
-- [ ] 适配新版语义卡片订单列表与分页；1688 自动流程固定 list-only，不点击详情/物流/平台提醒；
-- [ ] 列表不展示运单号时保留空包裹，后续由面单待认领/人工绑定补齐；
-- [ ] 读取最近 20–30 条真实订单并先 dry-run；
-- [ ] 用户确认后 commit，验证订单—包裹—商品关系；
-- [ ] 页面改版、登录失效、验证码均进入明确状态并保留游标；
-- [ ] 与 PDD 共用内部批次接口，但账号 profile、account_key 和状态完全隔离。
-
-平台页面无法读取时回退 CSV/截图/OCR/手工录入，不绕过页面保护。
+- [ ] `config-doctor` 只显示配置摘要，不泄露 secret/token；
+- [ ] 每个账号有独立 `account_key`、游标、锁和运行状态；
+- [ ] 订单 ID 使用字符串 `idOfStr`，SKU 不合并，详情物流支持多包裹；
+- [ ] 401/403/权限和结构错误 fail closed，网络/429/5xx 只有限重试；
+- [ ] dry-run 不写库，确认后单账号/全账号同步幂等；
+- [ ] 至少两个真实授权账号通过脱敏摘要验收后，再评估服务器定时器；
+- [ ] token/AppSecret 轮换与回滚步骤已演练。
 
 ### 阶段 P4：公网和运维
 
@@ -645,18 +644,18 @@ sync_runs(
 6. 导入报告能解释每一行的结果；
 7. 运单号能和收货照片识别结果匹配。
 
-### 11.3 Windows 浏览器同步（PDD 与 1688）
+### 11.3 平台订单同步（1688 API + PDD 浏览器）
 
-1. 独立 profile 首次人工登录成功；
-2. 两个平台各手动同步 20–30 条真实订单；
-3. 两个平台的订单号、商品、规格、数量、店铺等列表字段完整率 ≥95%；
-4. PDD 页面可见的快递/运单及拆包关系抽样正确；1688 list-only 没有列表单号时允许空 `packages`；
-5. 重复同步不增加重复记录；
-6. 服务器收不到密码、Cookie 或完整 profile；
-7. 登录过期/验证码/页面改版进入明确错误状态；
-8. dry-run 与 commit 的记录集合一致，重复 commit 幂等；
-9. 停止同步端时，P0/P1 功能仍正常；
-10. 只有验收通过后，才允许 Task Scheduler 低频运行。
+1. 1688 至少两个授权账号分别通过 `config-doctor` 和单账号 dry-run；
+2. 1688 订单 ID、商品、SKU、数量、状态和多包裹物流映射正确；
+3. 1688 重复同步不增加重复记录，失败账号不推进自己的游标；
+4. PDD 独立 profile 首次人工登录成功并手动同步 20–30 条真实订单；
+5. PDD 订单号、商品、规格、数量、店铺和页面可见物流字段完整率达到 95%；
+6. 服务器不保存平台密码、Cookie、完整 profile、地址或电话；
+7. 1688 权限/结构错误和 PDD 登录/验证码/页面改版进入明确错误状态；
+8. dry-run 与 commit 的记录集合一致，重复提交幂等；
+9. 停止任一同步端时，P0/P1 功能仍正常；
+10. 只有验收通过后，才允许启用 1688 服务端定时器或 PDD Task Scheduler。
 
 ### 11.4 公网
 
@@ -670,7 +669,8 @@ sync_runs(
 
 | 风险 | 影响 | 应对 |
 |---|---|---|
-| PDD/1688 网页改版/风控 | 同步停止 | CSV、截图/OCR、手工导入；同步熔断 |
+| PDD 网页改版/风控 | PDD 浏览器同步停止 | CSV、截图/OCR、手工导入；同步熔断 |
+| 1688 API 权限/结构变化 | 1688 API 同步停止 | 重新授权、检查官方文档；回退 CSV/手工导入 |
 | 拼多多协议限制 | 账号或工具风险 | 只读、低频、单账号、人工登录，不绕过验证 |
 | 浏览器登录失效/验证码 | 同步不可用 | Windows 窗口人工处理；不自动重试或绕过 |
 | 页面结构变化 | 错误订单入库 | `SCHEMA_CHANGED` 熔断，保留游标和脱敏诊断 |
@@ -687,7 +687,7 @@ sync_runs(
 这些事项不会阻塞 P0：
 
 1. 闲置 Windows 的版本（Windows 10/11）及是否允许长期接电运行；
-2. PDD、1688 两个独立 profile 对应的 `account_key` 标签；
+2. PDD 独立 profile 的 `account_key` 标签，以及 1688 服务器 secret 中各账号的 `account_key`；
 3. 服务器照片的异机备份目标；
 4. 是否在临时隧道验收后恢复局域网免登录，还是继续保留认证模式；
 5. 首次手动同步的最大订单数（MVP 默认 30）。
@@ -697,16 +697,17 @@ sync_runs(
 1. 先完成微信真机拍摄一件和连续 30 件局域网验收；
 2. 实现 CSV 预览、导入、去重和订单—包裹匹配；
 3. 用现有拼多多样本验证扫描运单号能反查商品；
-4. DeepSeek 按 [`DEEPSEEK_HANDOFF.md`](DEEPSEEK_HANDOFF.md) 完成 sync-agent 骨架和内部批次接口；
-5. Windows 上分别对 PDD、1688 执行 `doctor → 必要时 login-check → 等待冷却 → dry-run → commit`；
-6. 手动同步稳定后才启用每天 1–2 次任务计划；
+4. 按 [`DEEPSEEK_HANDOFF.md`](DEEPSEEK_HANDOFF.md) 完成 1688 API 与 PDD worker 的测试和交接；
+5. 服务器按 API 文档对 1688 各账号执行 `config-doctor → dry-run → commit`；Windows 只对 PDD 执行
+   `doctor → 必要时 login-check → 等待冷却 → dry-run → commit`；
+6. 两条路线手工稳定后才分别启用低频定时器；
 7. 最后决定公网访问策略，并在公网前切换认证。
 
 ## 15. 变更记录
 
-### v1.4（2026-08-14）
+### v1.4（历史，2026-08-14；1688 浏览器方案已废止）
 
-- 1688 自动采集改为列表页安全模式：支持新版语义卡片，但禁止自动进入订单详情、物流或平台提醒；
+- （历史）1688 自动采集曾改为列表页安全模式；该路线现已废止，当前请使用后端官方 Open API；
 - 新增 `capture-page` 单次结构诊断：只加载一次订单列表，保存严格脱敏的结构证据，不翻页、不上传；
 - 识别“系统繁忙”“访问受限”“操作过于频繁”等页面并立即熔断，不刷新、不自动重试；
 - `login-check`、`capture-page` 与 dry-run 共用按平台/账号的页面访问冷却，预留在启动浏览器前落盘；
@@ -728,7 +729,8 @@ sync_runs(
   多候选匹配标记 CANDIDATE、单商品订单包裹链接到具体商品行；
 - 配置安全下限：页间延迟 ≥1500ms、max_pages ≤5、min_interval ≥1 分钟、两平台 profile 目录必须不同、
   account_key 小写化并检测碰撞；
-- 后端依赖升级（FastAPI 0.141.1 / starlette 1.6.0 / python-multipart 0.0.32 / httpx2 / pytest 9），
+- 后端依赖升级并以官方 PyPI wheel URL + SHA-256 固定（FastAPI 0.141.1 / Starlette 1.6.0 /
+  python-multipart 0.0.32 / httpx2 2.10.0 / pytest 9.0.3），避免区域镜像滞后导致无法重建，
   `pip-audit` 无已知漏洞；本地 venv 迁移到 Python 3.13（生产镜像仍为 3.12）。
 
 ### v1.1（2026-08-14）
@@ -738,8 +740,8 @@ sync_runs(
 
 ### v1.0（2026-08-13）
 
-- 根据实际账号权限结果，正式废弃 1688/PDD 官方平台 API、OAuth、AppKey/AppSecret 和 token 路线；不再把申请平台权限作为任务或前置条件；
-- 将 PDD 与 1688 统一为 Windows 独立 Chromium profile + Node.js/TypeScript + Playwright headed 浏览器同步；
+- 1688 改由后端官方 Open API（AppKey/AppSecret 只在服务器 secret 文件中，多个授权账号按 account_key 隔离）；
+- PDD 保持 Windows 独立 Chromium profile + Node.js/TypeScript + Playwright headed 浏览器同步；
 - 冻结可见 DOM、只读、低频、人工登录、验证码/风控熔断等安全边界；
 - 新增 [`docs/BROWSER_SYNC_SPEC.md`](docs/BROWSER_SYNC_SPEC.md)：浏览器适配器、订单模型、游标、批次接口、数据表、测试矩阵和 MVP 验收；
 - 新增 [`DEEPSEEK_HANDOFF.md`](DEEPSEEK_HANDOFF.md) 与 [`CONTRIBUTING.md`](CONTRIBUTING.md)，规定实现顺序、提交格式、测试门槛和禁止事项；

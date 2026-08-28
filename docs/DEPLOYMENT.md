@@ -77,6 +77,33 @@ db/media/uploads 和私有 `.env`；目标机 `.env` 的 TRUSTED_HOSTS 改为 19
    本机 `.env.local`，数据库仅存 HMAC 摘要，从列表移除即撤销。
    未配置时同步接口返回 503。
 
+   1688 使用后端官方 Open API，不需要在 Windows 或服务器安装浏览器。需要启用时，在服务器项目根目录
+   创建受限 secret 文件并在 `.env` 指向它：
+
+   ```bash
+   cp secrets/ali1688.example.json secrets/ali1688.json
+   sudo chown "$(id -u):10001" secrets/ali1688.json
+   sudo chmod 0640 secrets/ali1688.json
+   # 编辑文件，填入已授权应用和买家账号；不要把内容放入命令行或提交 Git
+   ```
+
+   ```dotenv
+   ALI1688_API_ENABLED=true
+   ALI1688_SECRET_FILE=./secrets/ali1688.json
+   ALI1688_SYNC_INTERVAL_SECONDS=0
+   ```
+
+   先检查和 dry-run，再提交：
+
+   ```bash
+   sudo docker compose run --rm backend python -m app.cli config-doctor
+   sudo docker compose run --rm backend python -m app.cli sync-once --account <account_key> --dry-run
+   sudo docker compose run --rm backend python -m app.cli sync-once --all --dry-run
+   ```
+
+   多账号、令牌轮换、定时器、回滚和 API 验收见 [`ALI1688_OPEN_API.md`](ALI1688_OPEN_API.md)。PDD
+   仍按 Windows 教程运行，不能用 1688 API 命令替代 PDD 浏览器同步。
+
 3. 静态检查并构建：
 
    ```bash

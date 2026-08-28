@@ -1,6 +1,10 @@
-fastapi==0.141.1
-uvicorn[standard]==0.52.3
-python-multipart==0.0.32
+# Hash-pinned official PyPI wheels keep builds reproducible even when a regional
+# simple-index mirror has not yet exposed the current security releases.
+fastapi @ https://files.pythonhosted.org/packages/cb/03/10388a42375ee7e4ac9b94eb2c5c569c8b5795e377e701c9ac3ad63de890/fastapi-0.141.1-py3-none-any.whl#sha256=bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3
+starlette @ https://files.pythonhosted.org/packages/c8/cb/6a6a47d5b464bd08695d254f3da6e7986cc70c9fa5d778eda57538edfe56/starlette-1.6.0-py3-none-any.whl#sha256=a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c
+uvicorn[standard] @ https://files.pythonhosted.org/packages/dc/2b/ebd108734a8204c6b4b93c681c9a38c5273b3ccd5d129fee4ffc1d97772c/uvicorn-0.52.3-py3-none-any.whl#sha256=116af2710dbf47c80f463cd20ee4884b6662f4c9f227d797ddc7279d2fcc2c7c
+python-multipart @ https://files.pythonhosted.org/packages/e1/04/e8135ebd1ad02c56ec633277529b2602ff99ff634be76cdba5744cf554fd/python_multipart-0.0.32-py3-none-any.whl#sha256=ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23
 bcrypt==4.3.0
-httpx2==2.10.0
-pytest==9.0.3
+httpx2 @ https://files.pythonhosted.org/packages/b9/6d/a637d52449d98a6892d9a4dc0262587afdb6a66f201871842dce5a97b1c1/httpx2-2.10.0-py3-none-any.whl#sha256=5e3194a432701e1cc6f69a8b1b2fa199ef907013fede8d9a09a2c5b7b8141a18
+httpcore2 @ https://files.pythonhosted.org/packages/e5/4f/d149104195a35e2853a2fc203a8e3477747e58c80e17dda686dace174383/httpcore2-2.10.0-py3-none-any.whl#sha256=7df06cfb34070cae4f7c89be69dc1095eca138e9704ceffb98d25c1912ab6f01
+pytest @ https://files.pythonhosted.org/packages/d4/24/a372aaf5c9b7208e7112038812994107bc65a84cd00e0354a88c2c77a617/pytest-9.0.3-py3-none-any.whl#sha256=2c5efc453d45394fdd706ade797c0a81091eccd1d6e4bccfcd476e2b8e0ab5d9

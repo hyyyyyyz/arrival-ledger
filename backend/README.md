@@ -27,6 +27,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `SYNC_RATE_LIMIT_PER_HOUR` | 每个 token 每小时最多接受的批次数（1–60） | `6` |
 | `SYNC_MAX_BATCH_ORDERS` | 单批次最大订单数（1–100） | `100` |
 | `SYNC_MAX_BATCH_BYTES` | 单批次请求体最大字节数（4096–2097152） | `262144` |
+| `ALI1688_API_ENABLED` | 启用 1688 服务端官方 API | `false` |
+| `ALI1688_CONFIG_PATH` | 只读 JSON secret 文件路径 | `/run/secrets/ali1688.json` |
+| `ALI1688_SYNC_INTERVAL_SECONDS` | 定时同步间隔；0 关闭 | `0` |
+| `ALI1688_TIMEOUT_SECONDS` / `ALI1688_RETRIES` | API 超时和有限重试 | `15` / `2` |
+| `ALI1688_MAX_PAGES` / `ALI1688_BACKFILL_DAYS` | 每账号单次页数和首次回溯窗口 | `25` / `30` |
 
 初始化规则：只有 `users` 表为空时，服务才会读取 bootstrap 管理员配置并创建密码哈希。之后重启不会用环境变量覆盖账号或密码；数据库已有用户时，可以删除 `BOOTSTRAP_ADMIN_PASSWORD` 后正常启动。若数据库为空且没有提供该密码，服务会拒绝启动，避免产生无人能登录的实例。
 
@@ -43,6 +48,24 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - `PATCH /api/receipts/{id}/tracking`
 - `GET /api/receipts/{id}/photo`
 - `POST /api/sync/v1/batches`（Windows 同步端批次接收，Bearer worker token，幂等/限频/严格校验）
+- `GET /api/sync/v1/status`（已认证的 1688 同步状态，不返回 secret）
+
+## 1688 Open API 运维命令
+
+1688 由 backend 直接调用官方 Open API，不需要桌面环境或浏览器。凭证文件通过 Compose 只读挂载，
+详细申请、配置、令牌轮换、回滚和验收见 [`../docs/ALI1688_OPEN_API.md`](../docs/ALI1688_OPEN_API.md)。
+
+```bash
+docker compose run --rm backend python -m app.cli config-doctor
+docker compose run --rm backend python -m app.cli sync-once --account <account_key> --dry-run
+docker compose run --rm backend python -m app.cli sync-once --all --dry-run
+docker compose run --rm backend python -m app.cli sync-once --account <account_key>
+docker compose run --rm backend python -m app.cli sync-once --all
+```
+
+`config-doctor` 不打印 key/secret/token；`dry-run` 不写订单、批次或游标。首次配置至少先做单账号
+dry-run，再按账号确认后提交。每个账号有独立游标和锁，失败账号不会推进游标；PDD 仍在 Windows
+`sync-agent` 中运行，不能用这些 backend 命令代替 PDD 浏览器验收。
 
 当 `AUTH_REQUIRED=true` 时，除健康检查和登录外均要求服务端会话 Cookie。将其设为 `false` 后，服务会先校验 `TRUSTED_HOSTS` 和 `TRUSTED_LAN_CIDRS`，再把 `TRUSTED_USER_USERNAME` 对应的启用用户作为固定操作人，打开局域网页面即可使用，不再要求账号密码。免登录模式的写请求还必须带内部前端标识头；这不是身份认证，只是降低跨站伪造风险。免登录模式只适用于可信局域网；任何公网、Quick Tunnel 或端口转发前都必须恢复为 `AUTH_REQUIRED=true`。Cookie 为 `HttpOnly`、`SameSite=Lax`，`Secure` 由 `COOKIE_SECURE` 控制。
 

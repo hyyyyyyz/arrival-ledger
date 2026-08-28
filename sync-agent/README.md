@@ -1,8 +1,9 @@
 # sync-agent（到货管家 Windows 同步端）
 
-从用户已经登录的 1688 / 拼多多可见网页低频读取订单，dry-run 预览后把规范化批次
-上传到到货管家自己的 `/api/sync/v1/batches`。本包不调用任何平台官方 API、OAuth、
-抓包或验证码绕过。完整边界见仓库根目录 [`docs/BROWSER_SYNC_SPEC.md`](../docs/BROWSER_SYNC_SPEC.md)。
+本包只从用户已经登录的拼多多可见网页低频读取订单，dry-run 预览后把规范化批次
+上传到到货管家自己的 `/api/sync/v1/batches`。1688 已迁移到后端官方 Open API；本包不调用
+1688 浏览器同步，也不调用任何平台官方 API、OAuth、抓包或验证码绕过。完整边界见
+[`docs/BROWSER_SYNC_SPEC.md`](../docs/BROWSER_SYNC_SPEC.md)。
 
 ## 当前进度（自动化代码完成，Windows 真机验收待执行）
 
@@ -18,8 +19,8 @@
   绝不重新打开网页；`--yes` 缺失、快照完整性校验失败、超过 30 分钟 TTL、或快照 cursor_before
   与当前游标不一致都会拒绝并要求重新 dry-run；空列表不覆盖服务器数据；所有会打开平台页面的
   `login-check`、`capture-page`、dry-run 共用按账号冷却（默认 15 分钟，预留在浏览器启动前落盘）；
-- 1688 买家订单页适配器（旧表格 + 新版语义卡片）；1688 自动同步固定为 list-only，
-  不点击“订单详情”“平台提醒”“查看物流”等动作入口；
+- 历史 1688 适配器代码与 fixture 仍保留用于兼容性测试；1688 的 operational CLI 已禁用，
+  请改用后端官方 API（见 [`docs/ALI1688_OPEN_API.md`](../docs/ALI1688_OPEN_API.md)）；
 - 单次 `capture-page` 诊断：只加载一页，保存固定标签、捕获内匿名 class、ARIA 名称和结构标记，不保存原始 HTML、
   自由文本、截图、Cookie、表单值、URL query，也不翻页或进入详情；
 - 拼多多订单页适配器（卡片式结构：标签提取 + 结构化 class 兜底，`加载更多` 分页）；
@@ -28,9 +29,9 @@
 
 待手工验收（唯一剩余项）：
 
-- 按 [`docs/SYNC_MANUAL_ACCEPTANCE.md`](../docs/SYNC_MANUAL_ACCEPTANCE.md) 在 Windows 真机上执行：login-check 手工登录 → 各平台 dry-run 20–30 条真实订单 → 核对报告 → commit --from-report；
+- 按 [`docs/SYNC_MANUAL_ACCEPTANCE.md`](../docs/SYNC_MANUAL_ACCEPTANCE.md) 在 Windows 真机上仅对 PDD 执行：login-check 手工登录 → dry-run 20–30 条真实订单 → 核对报告 → commit --from-report；1688 改在服务器按 [`docs/ALI1688_OPEN_API.md`](../docs/ALI1688_OPEN_API.md) 验收；
 - 真实页面结构不一致时程序会以 `SCHEMA_CHANGED` 熔断，需按真实页面调整对应 adapter 选择器并补充脱敏 fixture 后重新跑测试；
-- 全部通过后才评估 commit 与 Task Scheduler。
+- PDD 手工验收通过后才评估 Task Scheduler；1688 是否定时由 backend 的独立配置控制。
 
 本包在开发机上不连接真实平台页面；`doctor` 的非离线模式只检查本机 Chromium 是否可启动。
 
@@ -52,11 +53,7 @@ npm ci
 npm run doctor -- --offline                     # 本地自检，不启动浏览器、不联网
 npm run doctor                                  # 额外检查本机 Chromium 是否可启动
 npm run doctor -- --platform pdd                # 只检查 pdd 一项
-npm run login-check -- --platform 1688          # 打开可见浏览器检查登录/风控状态；
-                                                # 未登录时保持窗口，按 Enter 后重新检测
 npm run login-check -- --platform pdd
-npm run capture-page -- --platform 1688        # 一次加载、零详情点击的脱敏结构诊断
-npm run sync-once -- --platform 1688 --mode dry-run
 npm run sync-once -- --platform pdd --mode dry-run
 npm run sync-once -- --platform pdd --mode commit --from-report .\state\snapshot-pdd-pdd-main-<batch_id>.json --yes
 ```
@@ -78,9 +75,7 @@ ARRIVAL_API_BASE_URL=http://192.168.1.5:8766
 ARRIVAL_SYNC_WORKER_KEY=填入本机密钥，不提交 Git
 ARRIVAL_WORKER_ID=win-arrival-01
 PDD_PROFILE_DIR=C:/ArrivalLedger/profiles/pdd
-ALI1688_PROFILE_DIR=C:/ArrivalLedger/profiles/1688
 PDD_ACCOUNT_KEY=pdd-main
-ALI1688_ACCOUNT_KEY=1688-main
 SYNC_MAX_PAGES=5
 SYNC_MAX_RECORDS=30
 SYNC_PAGE_DELAY_MS=2500
@@ -97,7 +92,7 @@ ARRIVAL_LOG_DIR=logs
 - 游标与锁按 `(platform, account_key)` 隔离；`*_ACCOUNT_KEY` 强制规范化为小写，且两个平台必须不同；
   切换账号时修改对应 `*_ACCOUNT_KEY` 即可，不会复用旧账号游标；
 - 配置值“设置了但非法”会直接报错退出（fail-closed），不会静默回退默认值；
-- PDD 与 1688 的 profile 目录必须不同；未显式配置时，两平台默认使用当前 `sync-agent` 目录下的 `profiles/<platform>`；
+- 只有 PDD 需要浏览器 profile；1688 授权配置和游标由后端管理；
 - worker key 的明文只保存在 Windows 本机受 ACL 保护的 `.env.local` 和服务器受限 `.env`；
   数据库只保存其摘要，日志和输出中始终脱敏；
 - 公网隧道使用时 `ARRIVAL_API_BASE_URL` 必须为 `https://`。
@@ -129,7 +124,7 @@ src/
     dom_capture.ts 只保留结构证据的严格清洗器
   adapters/
     base.ts       适配器契约
-    ali1688.ts    1688 只读适配器（旧表格 + 新语义卡片，默认 list-only）
+    ali1688.ts    历史 1688 只读适配器（operational CLI 已禁用）
     pdd.ts        拼多多只读适配器（标签提取 + class 兜底）
   extract/
     text.ts       标签/文本纯函数
@@ -155,4 +150,5 @@ tests/            脱敏 fixture 与单元/适配器测试
 - 同一平台同一 profile 同时只允许一个同步进程（lock 文件）；
 - 只读、低频、手动确认；`login-check` 只保留可见窗口供用户本人处理验证，任何 dry-run/capture
   检测到验证码或风控都会立即熔断，不点击、不刷新、不重试。
-- 1688 出现“系统繁忙”“访问受限”“操作过于频繁”时按风控熔断；程序不刷新、不重试。
+- 1688 不在本 Windows agent 中运行；后端 API 的网络/429/5xx 重试和风控错误见
+  [`docs/ALI1688_OPEN_API.md`](../docs/ALI1688_OPEN_API.md)。

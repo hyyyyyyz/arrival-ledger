@@ -33,10 +33,11 @@
 | 路线 | 状态 |
 |---|---|
 | CSV 批量导入（幂等、忽略 PII、退款/取消明确状态） | 规划中（P1） |
-| Windows 浏览器可见页面同步 PDD/1688（`sync-agent`） | 代码完成，待 Windows 真机手工验收 |
+| 1688 官方 Open API 多账号同步（后端） | 代码完成，待配置真实授权后验收 |
+| Windows 浏览器可见页面同步 PDD（`sync-agent`） | 代码完成，待 Windows 真机手工验收 |
 | 截图 / OCR / 手工录入 | 兜底路径 |
 
-浏览器同步**不调用任何平台官方 API**：在闲置 Windows 上用两个独立 Playwright Chromium profile，由用户手工
+1688 订单使用服务器官方 Open API；PDD 仍使用闲置 Windows 上的 Playwright Chromium profile，由用户手工
 登录，程序只读可见页面，先 dry-run 预览、用户确认后才提交最小必要的结构化订单批次到自家服务器。批次包含
 订单号、商品和运单号，但不包含密码、Cookie、地址、电话或原始页面；同步失败
 不影响拍照收货。
@@ -45,7 +46,8 @@
 
 - 局域网免登录（可信 Wi-Fi）与公网 HTTPS 认证两种模式，公网启用前必须关闭免登录；
 - 照片、数据库只在自家服务器，不保存收件人电话和完整地址；
-- 平台密码、Cookie、登录态只留在 Windows 本机，永不上传、不进日志、不进 Git；
+- PDD 密码、Cookie、登录态只留在 Windows 本机，永不上传、不进日志、不进 Git；1688 的 AppSecret
+  和 access token 只保存在服务器受限、只读挂载的 secret 文件中；
 - 同步接口使用独立 worker token：明文只存在于服务器 `.env`（`SYNC_WORKER_TOKENS`）与 Windows 本机 `.env.local`，数据库只记录 token 摘要，可撤销/轮换。
 
 ## 系统架构
@@ -56,11 +58,12 @@
   ▼
 Ubuntu 服务器（纯 Server，无桌面）
   ├─ Nginx 网关 :8766 ──► FastAPI 业务 API ──► SQLite + 照片目录
+  ├─ 1688 官方 Open API（多应用、多授权账号、独立游标）
   └─ 内部同步接口 /api/sync/v1/batches（只接收 Windows 主动提交的批次）
                       ▲
                       │ 可见页面只读同步（可失效的增强能力）
 闲置 Windows 电脑
-  ├─ 独立 Chromium profile：PDD / 1688（用户手工登录）
+  ├─ 独立 Chromium profile：仅 PDD（用户手工登录）
   └─ sync-agent：Node 20 + TypeScript + Playwright headed
 ```
 
@@ -84,7 +87,13 @@ deploy/scripts/verify.sh http://127.0.0.1:8766
 局域网免登录模式用手机打开 `http://<服务器IP>:8766`；外网/公网必须使用 HTTPS 隧道并保持
 `AUTH_REQUIRED=true`。
 
-## 浏览器订单同步（Windows）
+## 1688 与拼多多订单同步
+
+1688 在服务器使用官方 Open API，支持多个应用和多个授权买家账号；详细配置、令牌轮换、dry-run、
+单账号/全账号同步和定时器见 [`docs/ALI1688_OPEN_API.md`](docs/ALI1688_OPEN_API.md)。Windows 不需要
+安装或登录 1688。
+
+拼多多浏览器订单同步（Windows）
 
 固定流程：
 
@@ -96,15 +105,15 @@ doctor → 必要时 login-check → 等待页面访问冷却 → sync-once --mo
 - 手工验收清单：[`docs/SYNC_MANUAL_ACCEPTANCE.md`](docs/SYNC_MANUAL_ACCEPTANCE.md)
 - 运行与配置说明：[`sync-agent/README.md`](sync-agent/README.md)
 
-首次运行必须在可见窗口手工登录；程序不自动填密码、不绕过验证码、不隐藏窗口；只有手动同步
-验收通过后才允许考虑定时任务。
+首次运行必须在可见窗口手工登录；程序不自动填密码、不绕过验证码、不隐藏窗口；只有手动同步验收
+通过后才允许考虑 PDD 定时任务。1688 定时同步由服务器单独控制，两者互不依赖。
 
 ## 仓库结构
 
 ```text
 backend/     FastAPI + SQLite：收货凭证、认证、订单/包裹数据模型、同步批次接收
 frontend/    Vue 3 微信 H5：拍照、压缩、条码、离线队列、清单
-sync-agent/  Windows 同步端：doctor / login-check / capture-page / sync-once，PDD 与 1688 适配器
+sync-agent/  Windows 同步端：仅 PDD 的 doctor / login-check / capture-page / sync-once
 deploy/      Nginx 模板、备份/验证脚本
 docs/        计划、规格、部署、验收文档
 ```
@@ -128,6 +137,7 @@ cd sync-agent && npm ci && npm test && npm run typecheck && npm run build && npm
 
 - [总体实施计划](PLAN.md) —— 产品结论、数据模型、分阶段计划与验收标准
 - [部署与运维](docs/DEPLOYMENT.md) —— 迁移、备份恢复、公网隧道、回滚、故障排查
+- [1688 官方 Open API 多账号配置](docs/ALI1688_OPEN_API.md)
 - [浏览器同步技术规格](docs/BROWSER_SYNC_SPEC.md)
 - [Windows 手工验收清单](docs/SYNC_MANUAL_ACCEPTANCE.md)
 - [DeepSeek 实现任务单](DEEPSEEK_HANDOFF.md)
@@ -136,6 +146,6 @@ cd sync-agent && npm ci && npm test && npm run typecheck && npm run build && npm
 
 - 服务器已部署在 `192.168.1.5:8766`（局域网免登录；当前公网测试期使用 HTTPS 临时隧道 + 登录）；
 - 拍照收货闭环可用，待真机连续 30 件验收；
-- 平台同步代码已完成于 `feat/browser-sync-mvp` 分支并通过自动化测试，待 Windows 真机
-  验收后合并 main；CSV 导入尚未开始；
+- 1688 Open API 与 PDD 浏览器同步代码已完成于当前功能分支，待真实 1688 授权和 Windows PDD
+  真机验收后合并 main；CSV 导入尚未开始；
 - 详细状态与决策记录见 [PLAN.md](PLAN.md) 第 0 节和变更记录。

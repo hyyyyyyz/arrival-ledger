@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -30,6 +32,9 @@ from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
 from .config import Settings
+from .ali1688_config import Ali1688Config, Ali1688ConfigError, load_config
+from .ali1688_client import ClientLimits
+from .ali1688_sync import ensure_state, sync_config
 from .database import Database
 from .schemas import (
     AuthResponse,
@@ -52,6 +57,9 @@ from .sync_ingest import (
     ingest_sync_batch,
     parse_batch_counts,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -442,6 +450,15 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     async def lifespan(application: FastAPI):
         settings = settings_override or Settings.from_env()
         settings.validate()
+        ali_config = (
+            load_config(settings.ali1688_config_path)
+            if settings.ali1688_api_enabled
+            else Ali1688Config()
+        )
+        if settings.ali1688_api_enabled and not ali_config.enabled:
+            raise Ali1688ConfigError(
+                "ALI1688_API_ENABLED is true but the secret config has no authorized accounts"
+            )
         settings.media_dir.mkdir(parents=True, exist_ok=True)
         (settings.media_dir / ".tmp").mkdir(parents=True, exist_ok=True)
         database = Database(settings.database_path)
@@ -453,9 +470,60 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             sync_worker_tokens=settings.sync_worker_tokens,
             now=db_timestamp(utc_now()),
         )
+        if ali_config.enabled:
+            with database.connect() as connection:
+                for _app, _account in ali_config.accounts():
+                    ensure_state(connection, _account.account_key, db_timestamp(utc_now()))
+                connection.commit()
         application.state.settings = settings
         application.state.database = database
-        yield
+        application.state.ali1688_config = ali_config
+        scheduler_task = None
+        if settings.ali1688_api_enabled and settings.ali1688_sync_interval_seconds > 0 and ali_config.enabled:
+            async def run_scheduler() -> None:
+                while True:
+                    await asyncio.sleep(settings.ali1688_sync_interval_seconds)
+                    sync_task = asyncio.create_task(
+                        asyncio.to_thread(
+                            sync_config,
+                            database,
+                            ali_config,
+                            max_pages=settings.ali1688_max_pages,
+                            backfill_days=settings.ali1688_backfill_days,
+                            client_limits=ClientLimits(
+                                timeout_seconds=settings.ali1688_timeout_seconds,
+                                retries=settings.ali1688_retries,
+                            ),
+                        )
+                    )
+                    try:
+                        await asyncio.shield(sync_task)
+                    except asyncio.CancelledError:
+                        # to_thread cannot be force-cancelled safely. Let the
+                        # current transaction finish or roll back before the
+                        # application shutdown completes.
+                        try:
+                            await sync_task
+                        except Exception:
+                            logger.exception(
+                                "1688 scheduler iteration failed during shutdown"
+                            )
+                        raise
+                    except Exception:
+                        # An unexpected iteration failure must not permanently
+                        # disable future intervals. API/client error messages are
+                        # generic and never contain tokens or response bodies.
+                        logger.exception("1688 scheduler iteration failed")
+            scheduler_task = asyncio.create_task(run_scheduler())
+        try:
+            yield
+        finally:
+            if scheduler_task is not None:
+                scheduler_task.cancel()
+                try:
+                    await scheduler_task
+                except asyncio.CancelledError:
+                    pass
 
     application = FastAPI(
         title="到货管家 API",
@@ -471,6 +539,17 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         if not os.access(_settings(request).media_dir, os.W_OK):
             raise HTTPException(status_code=503, detail="media directory is not writable")
         return {"status": "ok", "database": "ok", "media": "ok"}
+
+    @application.get("/api/sync/v1/status")
+    def official_sync_status(
+        request: Request,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> dict[str, Any]:
+        del user
+        with _database(request).connect() as connection:
+            rows = connection.execute("SELECT account_key, cursor, last_success_at, last_error_at, last_error_code, last_error_message, last_count, updated_at FROM ali1688_sync_state ORDER BY account_key").fetchall()
+        # This is intentionally a public projection; no token/app identifiers are returned.
+        return {"enabled": bool(getattr(request.app.state, "ali1688_config", None) and request.app.state.ali1688_config.enabled), "accounts": [dict(row) for row in rows]}
 
     @application.post("/api/auth/login", response_model=AuthResponse)
     def login(payload: LoginRequest, request: Request, response: Response) -> AuthResponse:
