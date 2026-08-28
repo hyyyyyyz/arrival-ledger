@@ -1,4 +1,4 @@
-import type { AuthSession, Receipt, UploadQueueItem, User } from '@/types'
+import type { AuthSession, DashboardStats, Receipt, UploadQueueItem, User } from '@/types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -93,6 +93,10 @@ export async function logout(): Promise<void> {
 export async function listReceipts(limit = 50): Promise<Receipt[]> {
   const payload = await request<Receipt[] | { items: Receipt[] }>(`/receipts?limit=${limit}`)
   return Array.isArray(payload) ? payload : payload.items
+}
+
+export async function getDashboardStats(): Promise<DashboardStats> {
+  return request<DashboardStats>('/dashboard/stats')
 }
 
 export async function createReceipt(item: UploadQueueItem): Promise<Receipt> {

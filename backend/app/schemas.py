@@ -23,6 +23,36 @@ class AuthResponse(BaseModel):
     auth_required: bool = True
 
 
+class DashboardStatsOut(BaseModel):
+    total_orders: int = Field(ge=0, description="Imported purchase order count")
+    arrival_photos: int = Field(
+        ge=0, description="Canonical READY receipt photo count"
+    )
+    matched_orders: int = Field(
+        ge=0,
+        description="Distinct orders confirmed by a canonical READY photo whose tracking number links to one order",
+    )
+    linked_orders: int = Field(
+        ge=0,
+        description="Distinct orders linked to canonical READY receipts, including candidates",
+    )
+    candidate_photos: int = Field(
+        ge=0,
+        description="Canonical READY photos whose tracking number links to multiple orders",
+    )
+    unlinked_orders: int = Field(
+        ge=0, description="Orders without a confirmed one-order tracking match"
+    )
+    pending_orders: int = Field(
+        ge=0,
+        description="Compatibility alias for unlinked_orders; not a shipment status",
+    )
+    unmatched_photos: int = Field(
+        ge=0, description="Canonical READY photos with no linked purchase order"
+    )
+    account_count: int = Field(ge=0, description="Imported platform account count")
+
+
 class PhotoOut(BaseModel):
     content_type: str
     size: int
@@ -43,8 +73,12 @@ class OrderMatchItemOut(BaseModel):
 
 
 class OrderMatchOut(BaseModel):
+    order_id: str = Field(description="Stable internal purchase order identity")
     platform: Literal["pdd", "1688"]
     platform_order_id: str
+    account_label: str | None = Field(
+        default=None, description="Optional non-secret platform account display label"
+    )
     shop_name: str | None
     courier: str | None
     tracking_no: str

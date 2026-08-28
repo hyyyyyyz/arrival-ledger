@@ -43,12 +43,20 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/auth/me`
+- `GET /api/dashboard/stats`（已认证的首页只读业务统计）
 - `POST /api/receipts`（multipart 照片到货凭证）
 - `GET /api/receipts`
 - `PATCH /api/receipts/{id}/tracking`
 - `GET /api/receipts/{id}/photo`
 - `POST /api/sync/v1/batches`（Windows 同步端批次接收，Bearer worker token，幂等/限频/严格校验）
 - `GET /api/sync/v1/status`（已认证的 1688 同步状态，不返回 secret）
+
+首页统计只把 `evidence_status=READY` 且 `duplicate_of_receipt_id IS NULL` 的首张有效凭证
+算作一次到货，重复拍照不会虚增数字。一个运单号仅关联一个订单时，该订单才计入
+`matched_orders`；关联多个订单的首张有效凭证计入 `candidate_photos`，不能视为已确认到货。
+`linked_orders` 包含确认和候选关联，`unmatched_photos` 表示无任何订单关联的首张有效凭证。
+`unlinked_orders` 是尚无唯一确认关联的订单数；兼容字段 `pending_orders` 与其同值，不代表
+采购或物流平台的“待发货/待到货”状态。
 
 ## 1688 Open API 运维命令
 

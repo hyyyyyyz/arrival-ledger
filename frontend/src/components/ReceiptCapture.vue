@@ -7,6 +7,7 @@ import { compressImage } from '@/services/image'
 import { uploadQueue } from '@/services/uploadQueue'
 import { formatBytes } from '@/utils/format'
 import { createId, getDeviceId } from '@/utils/id'
+import { orderMatchKey, orderMatchSourceLabel } from '@/utils/orderMatch'
 import { isPlausibleTrackingNo, normalizeTrackingNo } from '@/utils/tracking'
 
 const props = defineProps<{
@@ -15,6 +16,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   changed: []
+  serverChanged: []
 }>()
 
 interface CaptureResult {
@@ -132,7 +134,9 @@ async function saveManualTracking(): Promise<void> {
   captureError.value = ''
   try {
     if (latest.value.serverReceiptId !== null) {
-      await updateReceiptTracking(latest.value.serverReceiptId, trackingNo)
+      const patched = await updateReceiptTracking(latest.value.serverReceiptId, trackingNo)
+      latest.value.matches = patched.order_matches || []
+      emit('serverChanged')
     } else {
       await uploadQueue.updateTracking(latest.value.clientEventId, trackingNo)
     }
@@ -168,8 +172,10 @@ async function reconcileSyncedReceipt(receipt: Receipt): Promise<void> {
     try {
       const patched = await updateReceiptTracking(receipt.id, desiredTracking)
       latest.value.trackingNo = patched.tracking_no || desiredTracking
+      latest.value.matches = patched.order_matches || []
       manualTracking.value = latest.value.trackingNo
       reconciliationMessage = '照片与刚补录的单号均已同步'
+      emit('serverChanged')
     } catch (error) {
       latest.value.trackingNo = desiredTracking
       captureError.value = error instanceof Error ? `照片已同步，但单号补录失败：${error.message}` : '照片已同步，但单号补录失败'
@@ -242,8 +248,8 @@ onBeforeUnmount(() => {
         <p>{{ latest.message }}</p>
 
         <div v-if="latest.matches && latest.matches.length" class="capture-matches">
-          <p v-for="match in latest.matches" :key="`${match.platform}-${match.platform_order_id}`" class="match-line">
-            {{ match.confidence === 'CANDIDATE' ? '候选匹配（请人工确认）：' : '已匹配：' }}{{ match.platform }} · {{ match.shop_name || '店铺未知' }}
+          <p v-for="(match, index) in latest.matches" :key="orderMatchKey(match, index)" class="match-line">
+            {{ match.confidence === 'CANDIDATE' ? '候选匹配（请人工确认）：' : '已匹配：' }}{{ orderMatchSourceLabel(match) }}
             <template v-if="match.items && match.items.length">
               — {{ match.items.map((item) => item.title).join('、') }}
             </template>

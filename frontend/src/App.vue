@@ -1,19 +1,29 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import DashboardStats from '@/components/DashboardStats.vue'
 import LoginView from '@/components/LoginView.vue'
 import ReceiptCapture from '@/components/ReceiptCapture.vue'
 import ReceiptList from '@/components/ReceiptList.vue'
 import SyncStatus from '@/components/SyncStatus.vue'
-import type { AuthSession, QueueStats, Receipt, UploadQueueItem, User } from '@/types'
+import type {
+  AuthSession,
+  DashboardStats as DashboardStatsData,
+  QueueStats,
+  Receipt,
+  UploadQueueItem,
+  User,
+} from '@/types'
 import {
   ApiError,
   getCurrentSession,
+  getDashboardStats,
   listReceipts,
   login as loginRequest,
   logout as logoutRequest,
   updateReceiptTracking,
 } from '@/services/api'
 import { uploadQueue } from '@/services/uploadQueue'
+import { createQueuedRefresh } from '@/utils/queuedRefresh'
 import { normalizeTrackingNo } from '@/utils/tracking'
 
 const CACHED_USER_KEY = 'arrival-manager-last-user'
@@ -31,8 +41,13 @@ const activeTab = ref<'capture' | 'records'>('capture')
 const online = ref(navigator.onLine)
 const receipts = ref<Receipt[]>([])
 const receiptsLoading = ref(false)
+const dashboardStats = ref<DashboardStatsData | null>(null)
+const dashboardStatsLoading = ref(false)
+const dashboardStatsError = ref('')
 const queueItems = ref<UploadQueueItem[]>([])
 const queueStats = ref<QueueStats>({ pending: 0, failed: 0, uploading: 0 })
+const dashboardRefresh = createQueuedRefresh()
+let dashboardRequestVersion = 0
 
 const recentReceipts = computed(() => receipts.value.slice(0, 5))
 const recentQueueItems = computed(() => queueItems.value.slice(0, 5))
@@ -51,6 +66,7 @@ function cachedAuthRequired(): boolean {
 }
 
 function activateUser(nextUser: User, offlineFallback = false, requiresAuth = true): void {
+  resetDashboardStats()
   user.value = nextUser
   authRequired.value = requiresAuth
   localStorage.setItem(CACHED_USER_KEY, JSON.stringify(nextUser))
@@ -112,6 +128,7 @@ async function handleLogout(): Promise<void> {
   }
   user.value = null
   receipts.value = []
+  resetDashboardStats()
   queueItems.value = []
   uploadQueue.setAuthenticatedUser(null)
   localStorage.removeItem(CACHED_USER_KEY)
@@ -125,8 +142,39 @@ async function refreshQueueState(): Promise<void> {
   queueStats.value = stats
 }
 
+function resetDashboardStats(): void {
+  dashboardRequestVersion += 1
+  dashboardRefresh.reset()
+  dashboardStats.value = null
+  dashboardStatsLoading.value = false
+  dashboardStatsError.value = ''
+}
+
+async function performDashboardStatsRefresh(): Promise<void> {
+  const requestVersion = dashboardRequestVersion
+
+  dashboardStatsLoading.value = true
+  dashboardStatsError.value = ''
+  try {
+    const nextStats = await getDashboardStats()
+    if (requestVersion === dashboardRequestVersion && user.value) dashboardStats.value = nextStats
+  } catch (error) {
+    if (requestVersion !== dashboardRequestVersion || !user.value) return
+    if (error instanceof ApiError && error.status === 401) handleAuthRequired()
+    else dashboardStatsError.value = '订单统计暂时不可用，不影响拍照收货。'
+  } finally {
+    if (requestVersion === dashboardRequestVersion) dashboardStatsLoading.value = false
+  }
+}
+
+function refreshDashboardStats(): void {
+  if (!user.value || !online.value) return
+  void dashboardRefresh.request(performDashboardStatsRefresh)
+}
+
 async function refreshReceipts(): Promise<void> {
   if (!user.value || !online.value || receiptsLoading.value) return
+  void refreshDashboardStats()
   receiptsLoading.value = true
   try {
     receipts.value = await listReceipts(80)
@@ -153,6 +201,7 @@ async function updateServerTracking(receiptId: string | number, trackingNo: stri
     const updated = await updateReceiptTracking(receiptId, normalizeTrackingNo(trackingNo))
     const index = receipts.value.findIndex((item) => item.id === receiptId)
     if (index >= 0) receipts.value.splice(index, 1, updated)
+    void refreshDashboardStats()
   } catch (error) {
     sessionNotice.value = error instanceof Error ? error.message : '单号更新失败'
   }
@@ -168,12 +217,14 @@ function handleSynced(event: Event): void {
   if (existing >= 0) receipts.value.splice(existing, 1, receipt)
   else receipts.value.unshift(receipt)
   void refreshQueueState()
+  void refreshDashboardStats()
 }
 
 function handleAuthRequired(): void {
   sessionNotice.value = '登录已过期，请重新登录；本机照片不会丢失。'
   authRequired.value = true
   user.value = null
+  resetDashboardStats()
   uploadQueue.setAuthenticatedUser(null)
   localStorage.removeItem(CACHED_USER_KEY)
   localStorage.removeItem(CACHED_AUTH_REQUIRED_KEY)
@@ -251,10 +302,17 @@ onBeforeUnmount(() => {
     <div v-if="sessionNotice" class="notice-banner" role="status">{{ sessionNotice }}</div>
 
     <main class="app-content">
-      <SyncStatus :stats="queueStats" :synced-count="receipts.length" :online="online" @retry="uploadQueue.retryNow()" />
+      <DashboardStats
+        :stats="dashboardStats"
+        :loading="dashboardStatsLoading"
+        :error="dashboardStatsError"
+        :online="online"
+        @retry="refreshDashboardStats"
+      />
+      <SyncStatus :stats="queueStats" :online="online" @retry="uploadQueue.retryNow()" />
 
       <template v-if="activeTab === 'capture'">
-        <ReceiptCapture :user="user" @changed="refreshQueueState" />
+        <ReceiptCapture :user="user" @changed="refreshQueueState" @server-changed="refreshDashboardStats" />
         <ReceiptList
           :receipts="recentReceipts"
           :local-items="recentQueueItems"

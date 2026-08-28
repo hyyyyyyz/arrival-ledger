@@ -3,6 +3,7 @@ import { onBeforeUnmount, ref, watch } from 'vue'
 import type { Receipt, UploadQueueItem } from '@/types'
 import { receiptPhotoUrl } from '@/services/api'
 import { formatDateTime } from '@/utils/format'
+import { orderMatchKey, orderMatchSourceLabel } from '@/utils/orderMatch'
 import { isPlausibleTrackingNo, normalizeTrackingNo } from '@/utils/tracking'
 
 const props = withDefaults(
@@ -141,13 +142,13 @@ function submitServer(receipt: Receipt): void {
           </div>
           <strong :class="{ muted: !receipt.tracking_no }">{{ receipt.tracking_no || '待补快递单号' }}</strong>
           <div v-if="receipt.order_matches && receipt.order_matches.length" class="order-matches">
-            <div v-for="(match, index) in receipt.order_matches" :key="`${match.platform}-${match.platform_order_id}-${index}`" class="order-match">
+            <div v-for="(match, index) in receipt.order_matches" :key="orderMatchKey(match, index)" class="order-match">
               <p>
                 <span class="record-badge matched">{{ match.confidence === 'CANDIDATE' ? '候选匹配' : '已匹配订单' }}</span>
-                {{ match.platform }} · {{ match.shop_name || '店铺未知' }}
+                {{ orderMatchSourceLabel(match) }}
               </p>
               <ul>
-                <li v-for="item in match.items || []" :key="item.title">
+                <li v-for="(item, itemIndex) in match.items || []" :key="`${orderMatchKey(match, index)}-item-${itemIndex}`">
                   {{ item.title }}<template v-if="item.sku_text">（{{ item.sku_text }}）</template>
                   <template v-if="item.quantity"> ×{{ item.quantity }}</template>
                 </li>

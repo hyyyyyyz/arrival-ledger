@@ -3,7 +3,6 @@ import type { QueueStats } from '@/types'
 
 defineProps<{
   stats: QueueStats
-  syncedCount: number
   online: boolean
 }>()
 
@@ -14,10 +13,10 @@ const emit = defineEmits<{
 
 <template>
   <section class="sync-panel" aria-label="同步状态">
-    <div class="sync-item sync-ok">
+    <div class="sync-item" :class="{ 'sync-ok': online }">
       <span class="status-dot"></span>
-      <span>已同步</span>
-      <strong>{{ syncedCount }}</strong>
+      <span>网络</span>
+      <strong>{{ online ? '在线' : '离线' }}</strong>
     </div>
     <div class="sync-item" :class="{ 'sync-warn': stats.pending + stats.uploading > 0 }">
       <span class="status-dot"></span>

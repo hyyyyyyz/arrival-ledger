@@ -78,6 +78,44 @@ def test_cross_platform_tracking_matches_all_orders(
     assert all(match["confidence"] == "CANDIDATE" for match in matches)
 
 
+def test_same_platform_order_id_from_different_accounts_stays_distinct(
+    authenticated_client: TestClient, sync_headers: dict[str, str], jpeg_bytes: bytes
+) -> None:
+    first = batch_payload(
+        "b-same-id-accounts-0001",
+        platform_account_label="拼多多一号账号",
+    )
+    first["orders"][0]["shop_name"] = "账号一店铺"
+    assert post_batch(authenticated_client, first, sync_headers).status_code == 200
+
+    second = batch_payload(
+        "b-same-id-accounts-0002",
+        platform_account_key="pdd-secondary",
+        platform_account_label="拼多多二号账号",
+    )
+    second["orders"][0]["shop_name"] = "账号二店铺"
+    assert post_batch(authenticated_client, second, sync_headers).status_code == 200
+
+    receipt = upload_receipt(
+        authenticated_client,
+        "SF1234567890000",
+        "receipt-same-id-accounts-0001",
+        jpeg_bytes,
+    )
+
+    matches = receipt["order_matches"]
+    assert len(matches) == 2
+    assert len({match["order_id"] for match in matches}) == 2
+    assert all(match["order_id"].isdigit() for match in matches)
+    assert {match["account_label"] for match in matches} == {
+        "拼多多一号账号",
+        "拼多多二号账号",
+    }
+    assert {match["shop_name"] for match in matches} == {"账号一店铺", "账号二店铺"}
+    assert all(match["platform_order_id"] == "260813-0001" for match in matches)
+    assert all(match["confidence"] == "CANDIDATE" for match in matches)
+
+
 def test_single_match_has_exact_confidence(
     authenticated_client: TestClient, sync_headers: dict[str, str], jpeg_bytes: bytes
 ) -> None:

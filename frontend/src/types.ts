@@ -20,8 +20,10 @@ export interface OrderMatchItem {
 }
 
 export interface OrderMatch {
+  order_id?: string
   platform: 'pdd' | '1688' | string
   platform_order_id: string
+  account_label?: string | null
   shop_name?: string | null
   courier?: string | null
   tracking_no?: string | null
@@ -82,6 +84,16 @@ export interface QueueStats {
   pending: number
   failed: number
   uploading: number
+}
+
+export interface DashboardStats {
+  total_orders: number
+  arrival_photos: number
+  matched_orders: number
+  pending_orders: number
+  candidate_photos?: number
+  unmatched_photos: number
+  account_count: number
 }
 
 export interface CompressedImage {

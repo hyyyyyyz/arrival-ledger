@@ -38,6 +38,7 @@ from .ali1688_sync import ensure_state, sync_config
 from .database import Database
 from .schemas import (
     AuthResponse,
+    DashboardStatsOut,
     LoginRequest,
     ReceiptCreateResponse,
     ReceiptListResponse,
@@ -251,11 +252,14 @@ def _order_matches(
     rows = connection.execute(
         """
         SELECT
+            o.id AS order_id,
             pa.platform AS platform,
+            pa.display_label AS account_label,
             o.platform_order_id AS platform_order_id,
             o.shop_name AS shop_name,
             p.courier AS courier,
             p.tracking_no AS tracking_no,
+            oi.id AS item_id,
             oi.title AS item_title,
             oi.sku_text AS item_sku,
             oi.quantity AS item_quantity
@@ -269,21 +273,25 @@ def _order_matches(
         """,
         (tracking_no_normalized,),
     ).fetchall()
-    grouped: dict[str, dict] = {}
+    grouped: dict[int, dict] = {}
+    item_ids: dict[int, set[int]] = {}
     for row in rows:
-        key = f"{row['platform']}|{row['platform_order_id']}"
+        key = row["order_id"]
         match = grouped.get(key)
         if match is None:
             match = {
+                "order_id": str(row["order_id"]),
                 "platform": row["platform"],
                 "platform_order_id": row["platform_order_id"],
+                "account_label": row["account_label"],
                 "shop_name": row["shop_name"],
                 "courier": row["courier"],
                 "tracking_no": row["tracking_no"],
                 "items": [],
             }
             grouped[key] = match
-        if row["item_title"] is not None:
+            item_ids[key] = set()
+        if row["item_title"] is not None and row["item_id"] not in item_ids[key]:
             match["items"].append(
                 {
                     "title": row["item_title"],
@@ -291,6 +299,7 @@ def _order_matches(
                     "quantity": row["item_quantity"],
                 }
             )
+            item_ids[key].add(row["item_id"])
     matches = list(grouped.values())
     confidence: Literal["EXACT", "CANDIDATE"] = "EXACT" if len(matches) <= 1 else "CANDIDATE"
     for match in matches:
@@ -652,6 +661,93 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         return AuthResponse(
             user=user.public(),
             auth_required=_settings(request).auth_required,
+        )
+
+    @application.get("/api/dashboard/stats", response_model=DashboardStatsOut)
+    def dashboard_stats(
+        request: Request,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> DashboardStatsOut:
+        del user
+        with _database(request).connect() as connection:
+            row = connection.execute(
+                """
+                WITH tracking_order_counts AS (
+                    SELECT
+                        packages.tracking_no_normalized AS tracking_no_normalized,
+                        COUNT(DISTINCT links.order_id) AS order_count
+                    FROM packages AS packages
+                    JOIN package_order_links AS links
+                      ON links.package_id = packages.id
+                    JOIN purchase_orders AS orders
+                      ON orders.id = links.order_id
+                    GROUP BY packages.tracking_no_normalized
+                ),
+                ready_receipt_links AS (
+                    SELECT DISTINCT
+                        receipts.id AS receipt_id,
+                        links.order_id AS order_id,
+                        tracking_order_counts.order_count AS order_count
+                    FROM receipt_events AS receipts
+                    JOIN packages AS packages
+                      ON packages.tracking_no_normalized = receipts.tracking_no_normalized
+                    JOIN package_order_links AS links
+                      ON links.package_id = packages.id
+                    JOIN purchase_orders AS orders
+                      ON orders.id = links.order_id
+                    JOIN tracking_order_counts
+                      ON tracking_order_counts.tracking_no_normalized =
+                         receipts.tracking_no_normalized
+                    WHERE receipts.evidence_status = 'READY'
+                      AND receipts.duplicate_of_receipt_id IS NULL
+                )
+                SELECT
+                    (SELECT COUNT(*) FROM purchase_orders) AS total_orders,
+                    (
+                        SELECT COUNT(*) FROM receipt_events
+                        WHERE evidence_status = 'READY'
+                          AND duplicate_of_receipt_id IS NULL
+                    ) AS arrival_photos,
+                    (
+                        SELECT COUNT(DISTINCT order_id)
+                        FROM ready_receipt_links
+                        WHERE order_count = 1
+                    ) AS matched_orders,
+                    (
+                        SELECT COUNT(DISTINCT order_id)
+                        FROM ready_receipt_links
+                    ) AS linked_orders,
+                    (
+                        SELECT COUNT(DISTINCT receipt_id)
+                        FROM ready_receipt_links
+                        WHERE order_count > 1
+                    ) AS candidate_photos,
+                    (
+                        SELECT COUNT(*) FROM receipt_events AS receipts
+                        WHERE receipts.evidence_status = 'READY'
+                          AND receipts.duplicate_of_receipt_id IS NULL
+                          AND NOT EXISTS (
+                              SELECT 1 FROM ready_receipt_links
+                              WHERE ready_receipt_links.receipt_id = receipts.id
+                          )
+                    ) AS unmatched_photos,
+                    (SELECT COUNT(*) FROM platform_accounts) AS account_count
+                """
+            ).fetchone()
+
+        total_orders = row["total_orders"]
+        matched_orders = row["matched_orders"]
+        unlinked_orders = max(total_orders - matched_orders, 0)
+        return DashboardStatsOut(
+            total_orders=total_orders,
+            arrival_photos=row["arrival_photos"],
+            matched_orders=matched_orders,
+            linked_orders=row["linked_orders"],
+            candidate_photos=row["candidate_photos"],
+            unlinked_orders=unlinked_orders,
+            pending_orders=unlinked_orders,
+            unmatched_photos=row["unmatched_photos"],
+            account_count=row["account_count"],
         )
 
     @application.post(
