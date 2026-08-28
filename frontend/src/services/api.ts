@@ -1,4 +1,12 @@
-import type { AuthSession, DashboardStats, Receipt, UploadQueueItem, User } from '@/types'
+import type {
+  AuthSession,
+  DashboardStats,
+  OrderListParams,
+  OrderListResponse,
+  Receipt,
+  UploadQueueItem,
+  User,
+} from '@/types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
 
@@ -97,6 +105,17 @@ export async function listReceipts(limit = 50): Promise<Receipt[]> {
 
 export async function getDashboardStats(): Promise<DashboardStats> {
   return request<DashboardStats>('/dashboard/stats')
+}
+
+export async function listOrders(params: OrderListParams = {}): Promise<OrderListResponse> {
+  const search = new URLSearchParams({
+    limit: String(params.limit ?? 20),
+    offset: String(params.offset ?? 0),
+  })
+  const query = params.query?.trim()
+  if (query) search.set('query', query)
+  if (params.platform) search.set('platform', params.platform)
+  return request<OrderListResponse>(`/orders?${search.toString()}`)
 }
 
 export async function createReceipt(item: UploadQueueItem): Promise<Receipt> {

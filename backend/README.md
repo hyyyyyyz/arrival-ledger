@@ -44,6 +44,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - `POST /api/auth/logout`
 - `GET /api/auth/me`
 - `GET /api/dashboard/stats`（已认证的首页只读业务统计）
+- `GET /api/orders`（已认证的订单列表；支持 `limit`、`offset`、`query`、`platform`）
 - `POST /api/receipts`（multipart 照片到货凭证）
 - `GET /api/receipts`
 - `PATCH /api/receipts/{id}/tracking`
@@ -57,6 +58,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 `linked_orders` 包含确认和候选关联，`unmatched_photos` 表示无任何订单关联的首张有效凭证。
 `unlinked_orders` 是尚无唯一确认关联的订单数；兼容字段 `pending_orders` 与其同值，不代表
 采购或物流平台的“待发货/待到货”状态。
+
+订单列表按 `ordered_at DESC, id DESC` 稳定排序，`platform` 只接受 `pdd` 或 `1688`。
+`query` 可检索订单号、店铺、账号标签、订单状态、商品/SKU、快递和运单号。每单批量返回
+商品和包裹；账号没有显示标签时返回稳定的 `账号 {内部账号 ID}`，搜索也覆盖 `account_key`。
+只有查询词完全由 ASCII 字母、数字、空格或横线组成且标准化后至少 6 位时，才额外启用
+标准化运单号搜索。
+
+同一订单内相同标准化运单号的多行按一个物理包裹返回。包裹的 `arrival_status` 为
+`PENDING`、`ARRIVED` 或 `CANDIDATE`；只有 READY、非重复的首张有效凭证对应的运单号在
+全库唯一关联一个订单时才是 `ARRIVED`。关联多个订单时计入 `candidate_package_count` 和
+`candidate_photo_count`，不会增加 `arrived_package_count` 或 `arrival_photo_count`。
 
 ## 1688 Open API 运维命令
 

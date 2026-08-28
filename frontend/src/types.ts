@@ -96,6 +96,56 @@ export interface DashboardStats {
   account_count: number
 }
 
+export type OrderPlatform = 'pdd' | '1688'
+export type OrderPlatformFilter = '' | OrderPlatform
+
+export interface PurchaseOrderItem {
+  title: string
+  sku_text: string | null
+  quantity: string
+  unit_price: string | null
+}
+
+export interface PurchaseOrderPackage {
+  courier: string | null
+  tracking_no: string
+  package_status: string | null
+  arrival_status: 'PENDING' | 'ARRIVED' | 'CANDIDATE'
+  arrived: boolean
+}
+
+export interface PurchaseOrder {
+  id: string
+  platform: OrderPlatform
+  account_label: string
+  platform_order_id: string
+  ordered_at: string | null
+  order_status: string
+  shop_name: string | null
+  source: string
+  items: PurchaseOrderItem[]
+  packages: PurchaseOrderPackage[]
+  package_count: number
+  arrived_package_count: number
+  arrival_photo_count: number
+  candidate_package_count: number
+  candidate_photo_count: number
+}
+
+export interface OrderListResponse {
+  items: PurchaseOrder[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface OrderListParams {
+  limit?: number
+  offset?: number
+  query?: string
+  platform?: OrderPlatformFilter
+}
+
 export interface CompressedImage {
   blob: Blob
   width: number

@@ -24,6 +24,7 @@ npm run build
 - `POST /api/auth/login`：JSON `{ username, password }`，通过 HttpOnly Cookie 建立会话；
 - `GET /api/auth/me`、`POST /api/auth/logout`；
 - `GET /api/receipts?limit=80`：返回数组或 `{ items: [] }`；
+- `GET /api/orders?limit=20&offset=0&query=&platform=`：分页查询已同步采购订单，不直接访问采购平台；
 - `POST /api/receipts`：multipart，字段为 `client_event_id`、`captured_at`、`input_method`、`device_id`、可选 `tracking_no` 和必填 `photo`；
 - `PATCH /api/receipts/:id/tracking`：JSON `{ tracking_no }`；
 - `GET /api/receipts/:id/photo`：鉴权后的图片响应。

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { getCurrentSession, getDashboardStats } from './api'
+import { getCurrentSession, getDashboardStats, listOrders } from './api'
 
 describe('authentication mode discovery', () => {
   afterEach(() => vi.unstubAllGlobals())
@@ -58,6 +58,38 @@ describe('dashboard statistics', () => {
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/dashboard/stats',
       expect.objectContaining({ credentials: 'include', cache: 'no-store' }),
+    )
+  })
+})
+
+describe('purchase orders', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('uses the default page without sending empty filters', async () => {
+    const payload = { items: [], total: 0, limit: 20, offset: 0 }
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(listOrders()).resolves.toEqual(payload)
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/orders?limit=20&offset=0',
+      expect.objectContaining({ credentials: 'include', cache: 'no-store' }),
+    )
+  })
+
+  it('trims and encodes search, platform, and pagination parameters', async () => {
+    const payload = { items: [], total: 0, limit: 20, offset: 20 }
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(listOrders({ limit: 20, offset: 20, query: '  手机 壳 #1  ', platform: '1688' })).resolves.toEqual(payload)
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/orders?limit=20&offset=20&query=%E6%89%8B%E6%9C%BA+%E5%A3%B3+%231&platform=1688',
+      expect.any(Object),
     )
   })
 })

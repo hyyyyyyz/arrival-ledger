@@ -40,6 +40,8 @@ from .schemas import (
     AuthResponse,
     DashboardStatsOut,
     LoginRequest,
+    PurchaseOrderListResponse,
+    PurchaseOrderOut,
     ReceiptCreateResponse,
     ReceiptListResponse,
     ReceiptOut,
@@ -748,6 +750,350 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             pending_orders=unlinked_orders,
             unmatched_photos=row["unmatched_photos"],
             account_count=row["account_count"],
+        )
+
+    @application.get("/api/orders", response_model=PurchaseOrderListResponse)
+    def list_orders(
+        request: Request,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        query: Annotated[str | None, Query(max_length=128)] = None,
+        platform: Annotated[Literal["pdd", "1688"] | None, Query()] = None,
+    ) -> PurchaseOrderListResponse:
+        del user
+        filters: list[str] = []
+        parameters: dict[str, str | int] = {}
+        if platform is not None:
+            filters.append("accounts.platform = :platform")
+            parameters["platform"] = platform
+
+        search = query.strip() if query is not None else ""
+        if search:
+            parameters["query"] = search
+            search_clauses = [
+                "instr(lower(orders.platform_order_id), lower(:query)) > 0",
+                "instr(lower(COALESCE(orders.shop_name, '')), lower(:query)) > 0",
+                """
+                instr(
+                    lower(
+                        COALESCE(
+                            NULLIF(TRIM(accounts.display_label), ''),
+                            '账号 ' || accounts.id
+                        )
+                    ),
+                    lower(:query)
+                ) > 0
+                """,
+                "instr(lower(accounts.account_key), lower(:query)) > 0",
+                "instr(lower(accounts.platform), lower(:query)) > 0",
+                "instr(lower(orders.order_status), lower(:query)) > 0",
+                """
+                EXISTS (
+                    SELECT 1 FROM order_items AS searched_items
+                    WHERE searched_items.order_id = orders.id
+                      AND (
+                          instr(lower(searched_items.title), lower(:query)) > 0
+                          OR instr(
+                              lower(COALESCE(searched_items.sku_text, '')),
+                              lower(:query)
+                          ) > 0
+                      )
+                )
+                """,
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM package_order_links AS searched_links
+                    JOIN packages AS searched_packages
+                      ON searched_packages.id = searched_links.package_id
+                    WHERE searched_links.order_id = orders.id
+                      AND (
+                          instr(
+                              lower(searched_packages.tracking_no), lower(:query)
+                          ) > 0
+                          OR instr(
+                              lower(COALESCE(searched_packages.courier, '')),
+                              lower(:query)
+                          ) > 0
+                      )
+                )
+                """,
+            ]
+            normalized_search = normalize_tracking_no(search)
+            if (
+                re.fullmatch(r"[A-Za-z0-9 -]+", search) is not None
+                and len(normalized_search) >= 6
+            ):
+                parameters["tracking_query"] = normalized_search
+                search_clauses.append(
+                    """
+                    EXISTS (
+                        SELECT 1
+                        FROM package_order_links AS normalized_links
+                        JOIN packages AS normalized_packages
+                          ON normalized_packages.id = normalized_links.package_id
+                        WHERE normalized_links.order_id = orders.id
+                          AND instr(
+                              normalized_packages.tracking_no_normalized,
+                              :tracking_query
+                          ) > 0
+                    )
+                    """
+                )
+            filters.append("(" + " OR ".join(search_clauses) + ")")
+
+        where_sql = " AND ".join(filters) if filters else "1 = 1"
+        with _database(request).connect() as connection:
+            total = connection.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM purchase_orders AS orders
+                JOIN platform_accounts AS accounts
+                  ON accounts.id = orders.platform_account_id
+                WHERE {where_sql}
+                """,
+                parameters,
+            ).fetchone()["count"]
+
+            page_parameters = {**parameters, "limit": limit, "offset": offset}
+            order_rows = connection.execute(
+                f"""
+                WITH canonical_receipts AS (
+                    SELECT id, tracking_no_normalized
+                    FROM receipt_events
+                    WHERE evidence_status = 'READY'
+                      AND duplicate_of_receipt_id IS NULL
+                ),
+                tracking_order_counts AS (
+                    SELECT
+                        order_packages.tracking_no_normalized,
+                        COUNT(DISTINCT links.order_id) AS order_count
+                    FROM packages AS order_packages
+                    JOIN package_order_links AS links
+                      ON links.package_id = order_packages.id
+                    GROUP BY order_packages.tracking_no_normalized
+                ),
+                order_tracking AS (
+                    SELECT DISTINCT
+                        links.order_id,
+                        order_packages.tracking_no_normalized
+                    FROM package_order_links AS links
+                    JOIN packages AS order_packages
+                      ON order_packages.id = links.package_id
+                )
+                SELECT
+                    orders.id AS id,
+                    accounts.platform AS platform,
+                    COALESCE(
+                        NULLIF(TRIM(accounts.display_label), ''),
+                        '账号 ' || accounts.id
+                    ) AS account_label,
+                    orders.platform_order_id AS platform_order_id,
+                    orders.ordered_at AS ordered_at,
+                    orders.order_status AS order_status,
+                    orders.shop_name AS shop_name,
+                    orders.source AS source,
+                    COUNT(DISTINCT order_tracking.tracking_no_normalized)
+                        AS package_count,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN receipts.id IS NOT NULL
+                             AND tracking_order_counts.order_count = 1
+                            THEN order_tracking.tracking_no_normalized
+                        END
+                    ) AS arrived_package_count,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN receipts.id IS NOT NULL
+                             AND tracking_order_counts.order_count > 1
+                            THEN order_tracking.tracking_no_normalized
+                        END
+                    ) AS candidate_package_count,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN tracking_order_counts.order_count = 1
+                            THEN receipts.id
+                        END
+                    ) AS arrival_photo_count,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN tracking_order_counts.order_count > 1
+                            THEN receipts.id
+                        END
+                    ) AS candidate_photo_count
+                FROM purchase_orders AS orders
+                JOIN platform_accounts AS accounts
+                  ON accounts.id = orders.platform_account_id
+                LEFT JOIN order_tracking
+                  ON order_tracking.order_id = orders.id
+                LEFT JOIN tracking_order_counts
+                  ON tracking_order_counts.tracking_no_normalized =
+                     order_tracking.tracking_no_normalized
+                LEFT JOIN canonical_receipts AS receipts
+                  ON receipts.tracking_no_normalized =
+                     order_tracking.tracking_no_normalized
+                WHERE {where_sql}
+                GROUP BY
+                    orders.id,
+                    accounts.platform,
+                    accounts.id,
+                    accounts.display_label,
+                    orders.platform_order_id,
+                    orders.ordered_at,
+                    orders.order_status,
+                    orders.shop_name,
+                    orders.source
+                ORDER BY orders.ordered_at DESC, orders.id DESC
+                LIMIT :limit OFFSET :offset
+                """,
+                page_parameters,
+            ).fetchall()
+
+            order_ids = [row["id"] for row in order_rows]
+            item_rows: list[sqlite3.Row] = []
+            package_rows: list[sqlite3.Row] = []
+            if order_ids:
+                placeholders = ",".join("?" for _ in order_ids)
+                item_rows = connection.execute(
+                    f"""
+                    SELECT order_id, title, sku_text, quantity, unit_price
+                    FROM order_items
+                    WHERE order_id IN ({placeholders})
+                    ORDER BY order_id, id
+                    """,
+                    order_ids,
+                ).fetchall()
+                package_rows = connection.execute(
+                    f"""
+                    WITH canonical_receipt_tracking AS (
+                        SELECT tracking_no_normalized, COUNT(*) AS photo_count
+                        FROM receipt_events
+                        WHERE evidence_status = 'READY'
+                          AND duplicate_of_receipt_id IS NULL
+                          AND tracking_no_normalized IS NOT NULL
+                        GROUP BY tracking_no_normalized
+                    ),
+                    tracking_order_counts AS (
+                        SELECT
+                            order_packages.tracking_no_normalized,
+                            COUNT(DISTINCT links.order_id) AS order_count
+                        FROM packages AS order_packages
+                        JOIN package_order_links AS links
+                          ON links.package_id = order_packages.id
+                        GROUP BY order_packages.tracking_no_normalized
+                    ),
+                    ranked_order_tracking AS (
+                        SELECT
+                            links.order_id,
+                            order_packages.tracking_no_normalized,
+                            order_packages.id AS representative_package_id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY
+                                    links.order_id,
+                                    order_packages.tracking_no_normalized
+                                ORDER BY
+                                    order_packages.updated_at DESC,
+                                    CASE WHEN order_packages.courier IS NULL
+                                        THEN 0 ELSE 1 END DESC,
+                                    CASE WHEN order_packages.package_status IS NULL
+                                        THEN 0 ELSE 1 END DESC,
+                                    order_packages.id DESC
+                            ) AS representative_rank
+                        FROM package_order_links AS links
+                        JOIN packages AS order_packages
+                          ON order_packages.id = links.package_id
+                        WHERE links.order_id IN ({placeholders})
+                    ),
+                    order_tracking AS (
+                        SELECT
+                            order_id,
+                            tracking_no_normalized,
+                            representative_package_id
+                        FROM ranked_order_tracking
+                        WHERE representative_rank = 1
+                    )
+                    SELECT
+                        order_tracking.order_id AS order_id,
+                        order_packages.id AS package_id,
+                        order_packages.courier AS courier,
+                        order_packages.tracking_no AS tracking_no,
+                        order_packages.package_status AS package_status,
+                        CASE
+                            WHEN canonical_receipt_tracking.tracking_no_normalized IS NULL
+                            THEN 'PENDING'
+                            WHEN tracking_order_counts.order_count = 1
+                            THEN 'ARRIVED'
+                            ELSE 'CANDIDATE'
+                        END AS arrival_status
+                    FROM order_tracking
+                    JOIN packages AS order_packages
+                      ON order_packages.id =
+                         order_tracking.representative_package_id
+                    JOIN tracking_order_counts
+                      ON tracking_order_counts.tracking_no_normalized =
+                         order_tracking.tracking_no_normalized
+                    LEFT JOIN canonical_receipt_tracking
+                      ON canonical_receipt_tracking.tracking_no_normalized =
+                         order_tracking.tracking_no_normalized
+                    ORDER BY
+                        order_tracking.order_id,
+                        order_tracking.representative_package_id
+                    """,
+                    order_ids,
+                ).fetchall()
+
+        items_by_order: dict[int, list[dict[str, str | None]]] = {
+            order_id: [] for order_id in order_ids
+        }
+        for item in item_rows:
+            items_by_order[item["order_id"]].append(
+                {
+                    "title": item["title"],
+                    "sku_text": item["sku_text"],
+                    "quantity": item["quantity"],
+                    "unit_price": item["unit_price"],
+                }
+            )
+
+        packages_by_order: dict[int, list[dict[str, str | bool | None]]] = {
+            order_id: [] for order_id in order_ids
+        }
+        for package in package_rows:
+            packages_by_order[package["order_id"]].append(
+                {
+                    "courier": package["courier"],
+                    "tracking_no": package["tracking_no"],
+                    "package_status": package["package_status"],
+                    "arrival_status": package["arrival_status"],
+                    "arrived": package["arrival_status"] == "ARRIVED",
+                }
+            )
+
+        return PurchaseOrderListResponse(
+            items=[
+                PurchaseOrderOut(
+                    id=str(row["id"]),
+                    platform=row["platform"],
+                    account_label=row["account_label"],
+                    platform_order_id=row["platform_order_id"],
+                    ordered_at=row["ordered_at"],
+                    order_status=row["order_status"],
+                    shop_name=row["shop_name"],
+                    source=row["source"],
+                    items=items_by_order[row["id"]],
+                    packages=packages_by_order[row["id"]],
+                    package_count=row["package_count"],
+                    arrived_package_count=row["arrived_package_count"],
+                    candidate_package_count=row["candidate_package_count"],
+                    arrival_photo_count=row["arrival_photo_count"],
+                    candidate_photo_count=row["candidate_photo_count"],
+                )
+                for row in order_rows
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
         )
 
     @application.post(

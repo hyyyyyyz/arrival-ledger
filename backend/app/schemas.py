@@ -86,6 +86,52 @@ class OrderMatchOut(BaseModel):
     confidence: Literal["EXACT", "CANDIDATE"]
 
 
+class PurchaseOrderItemOut(BaseModel):
+    title: str
+    sku_text: str | None
+    quantity: str
+    unit_price: str | None
+
+
+class PurchaseOrderPackageOut(BaseModel):
+    courier: str | None
+    tracking_no: str
+    package_status: str | None
+    arrival_status: Literal["PENDING", "ARRIVED", "CANDIDATE"]
+    arrived: bool
+
+
+class PurchaseOrderOut(BaseModel):
+    id: str = Field(description="Stable internal purchase order identity")
+    platform: Literal["pdd", "1688"]
+    account_label: str
+    platform_order_id: str
+    ordered_at: datetime | None
+    order_status: str
+    shop_name: str | None
+    source: str
+    items: list[PurchaseOrderItemOut]
+    packages: list[PurchaseOrderPackageOut]
+    package_count: int = Field(ge=0)
+    arrived_package_count: int = Field(ge=0)
+    candidate_package_count: int = Field(ge=0)
+    arrival_photo_count: int = Field(
+        ge=0,
+        description="Canonical READY photos whose tracking number uniquely links to this order",
+    )
+    candidate_photo_count: int = Field(
+        ge=0,
+        description="Canonical READY photos whose tracking number links to multiple orders",
+    )
+
+
+class PurchaseOrderListResponse(BaseModel):
+    items: list[PurchaseOrderOut]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
+
+
 class ReceiptOut(BaseModel):
     id: int
     client_event_id: str

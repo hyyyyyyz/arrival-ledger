@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import DashboardStats from '@/components/DashboardStats.vue'
 import LoginView from '@/components/LoginView.vue'
+import OrderList from '@/components/OrderList.vue'
 import ReceiptCapture from '@/components/ReceiptCapture.vue'
 import ReceiptList from '@/components/ReceiptList.vue'
 import SyncStatus from '@/components/SyncStatus.vue'
@@ -23,6 +24,8 @@ import {
   updateReceiptTracking,
 } from '@/services/api'
 import { uploadQueue } from '@/services/uploadQueue'
+import { useAppTabs } from '@/composables/useAppTabs'
+import { useOrderPage } from '@/composables/useOrderPage'
 import { createQueuedRefresh } from '@/utils/queuedRefresh'
 import { normalizeTrackingNo } from '@/utils/tracking'
 
@@ -37,7 +40,6 @@ const authRequired = ref(true)
 const loginLoading = ref(false)
 const loginError = ref('')
 const sessionNotice = ref('')
-const activeTab = ref<'capture' | 'records'>('capture')
 const online = ref(navigator.onLine)
 const receipts = ref<Receipt[]>([])
 const receiptsLoading = ref(false)
@@ -48,6 +50,30 @@ const queueItems = ref<UploadQueueItem[]>([])
 const queueStats = ref<QueueStats>({ pending: 0, failed: 0, uploading: 0 })
 const dashboardRefresh = createQueuedRefresh()
 let dashboardRequestVersion = 0
+
+const {
+  orders,
+  total: orderTotal,
+  limit: orderLimit,
+  offset: orderOffset,
+  query: orderQuery,
+  platform: orderPlatform,
+  loading: ordersLoading,
+  error: ordersError,
+  activate: activateOrders,
+  search: searchOrders,
+  goToPage: goToOrderPage,
+  refresh: refreshOrders,
+  invalidate: invalidateOrders,
+  reset: resetOrders,
+} = useOrderPage({
+  isOnline: () => online.value,
+  onAuthRequired: () => handleAuthRequired(),
+})
+
+const { activeTab, pageTitle, selectTab, reset: resetActiveTab } = useAppTabs(() => {
+  void activateOrders()
+})
 
 const recentReceipts = computed(() => receipts.value.slice(0, 5))
 const recentQueueItems = computed(() => queueItems.value.slice(0, 5))
@@ -67,6 +93,8 @@ function cachedAuthRequired(): boolean {
 
 function activateUser(nextUser: User, offlineFallback = false, requiresAuth = true): void {
   resetDashboardStats()
+  resetOrders()
+  resetActiveTab()
   user.value = nextUser
   authRequired.value = requiresAuth
   localStorage.setItem(CACHED_USER_KEY, JSON.stringify(nextUser))
@@ -129,6 +157,8 @@ async function handleLogout(): Promise<void> {
   user.value = null
   receipts.value = []
   resetDashboardStats()
+  resetOrders()
+  resetActiveTab()
   queueItems.value = []
   uploadQueue.setAuthenticatedUser(null)
   localStorage.removeItem(CACHED_USER_KEY)
@@ -201,7 +231,7 @@ async function updateServerTracking(receiptId: string | number, trackingNo: stri
     const updated = await updateReceiptTracking(receiptId, normalizeTrackingNo(trackingNo))
     const index = receipts.value.findIndex((item) => item.id === receiptId)
     if (index >= 0) receipts.value.splice(index, 1, updated)
-    void refreshDashboardStats()
+    handleServerReceiptChanged()
   } catch (error) {
     sessionNotice.value = error instanceof Error ? error.message : '单号更新失败'
   }
@@ -217,7 +247,13 @@ function handleSynced(event: Event): void {
   if (existing >= 0) receipts.value.splice(existing, 1, receipt)
   else receipts.value.unshift(receipt)
   void refreshQueueState()
+  handleServerReceiptChanged()
+}
+
+function handleServerReceiptChanged(): void {
   void refreshDashboardStats()
+  invalidateOrders()
+  if (activeTab.value === 'orders') void refreshOrders()
 }
 
 function handleAuthRequired(): void {
@@ -225,6 +261,8 @@ function handleAuthRequired(): void {
   authRequired.value = true
   user.value = null
   resetDashboardStats()
+  resetOrders()
+  resetActiveTab()
   uploadQueue.setAuthenticatedUser(null)
   localStorage.removeItem(CACHED_USER_KEY)
   localStorage.removeItem(CACHED_AUTH_REQUIRED_KEY)
@@ -235,6 +273,7 @@ function handleOnline(): void {
   if (user.value) {
     uploadQueue.setAuthenticatedUser(user.value.id)
     void refreshReceipts()
+    if (activeTab.value === 'orders') void refreshOrders()
   }
 }
 
@@ -287,7 +326,7 @@ onBeforeUnmount(() => {
     <header class="app-header">
       <div>
         <p class="app-kicker">到货管家</p>
-        <h1>{{ activeTab === 'capture' ? '今天收到什么？' : '到货记录' }}</h1>
+        <h1>{{ pageTitle }}</h1>
       </div>
       <button v-if="authRequired" class="user-button" type="button" title="退出登录" @click="handleLogout">
         <span>{{ user.display_name.slice(0, 1) }}</span>
@@ -302,17 +341,19 @@ onBeforeUnmount(() => {
     <div v-if="sessionNotice" class="notice-banner" role="status">{{ sessionNotice }}</div>
 
     <main class="app-content">
-      <DashboardStats
-        :stats="dashboardStats"
-        :loading="dashboardStatsLoading"
-        :error="dashboardStatsError"
-        :online="online"
-        @retry="refreshDashboardStats"
-      />
-      <SyncStatus :stats="queueStats" :online="online" @retry="uploadQueue.retryNow()" />
+      <template v-if="activeTab !== 'orders'">
+        <DashboardStats
+          :stats="dashboardStats"
+          :loading="dashboardStatsLoading"
+          :error="dashboardStatsError"
+          :online="online"
+          @retry="refreshDashboardStats"
+        />
+        <SyncStatus :stats="queueStats" :online="online" @retry="uploadQueue.retryNow()" />
+      </template>
 
       <template v-if="activeTab === 'capture'">
-        <ReceiptCapture :user="user" @changed="refreshQueueState" @server-changed="refreshDashboardStats" />
+        <ReceiptCapture :user="user" @changed="refreshQueueState" @server-changed="handleServerReceiptChanged" />
         <ReceiptList
           :receipts="recentReceipts"
           :local-items="recentQueueItems"
@@ -326,7 +367,7 @@ onBeforeUnmount(() => {
       </template>
 
       <ReceiptList
-        v-else
+        v-else-if="activeTab === 'records'"
         :receipts="receipts"
         :local-items="queueItems"
         :loading="receiptsLoading"
@@ -337,16 +378,36 @@ onBeforeUnmount(() => {
         @update-local="updateLocalTracking"
         @update-server="updateServerTracking"
       />
+
+      <OrderList
+        v-else
+        :orders="orders"
+        :total="orderTotal"
+        :limit="orderLimit"
+        :offset="orderOffset"
+        :query="orderQuery"
+        :platform="orderPlatform"
+        :loading="ordersLoading"
+        :error="ordersError"
+        :online="online"
+        @search="searchOrders"
+        @refresh="refreshOrders"
+        @page="goToOrderPage"
+      />
     </main>
 
     <nav class="bottom-nav" aria-label="主导航">
-      <button type="button" :class="{ active: activeTab === 'capture' }" @click="activeTab = 'capture'">
+      <button type="button" :class="{ active: activeTab === 'capture' }" :aria-current="activeTab === 'capture' ? 'page' : undefined" @click="selectTab('capture')">
         <span aria-hidden="true">＋</span>
         收货
       </button>
-      <button type="button" :class="{ active: activeTab === 'records' }" @click="activeTab = 'records'">
+      <button type="button" :class="{ active: activeTab === 'records' }" :aria-current="activeTab === 'records' ? 'page' : undefined" @click="selectTab('records')">
         <span aria-hidden="true">☷</span>
         记录
+      </button>
+      <button type="button" :class="{ active: activeTab === 'orders' }" :aria-current="activeTab === 'orders' ? 'page' : undefined" @click="selectTab('orders')">
+        <span aria-hidden="true">▤</span>
+        订单
       </button>
     </nav>
   </div>
