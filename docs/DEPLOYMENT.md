@@ -235,7 +235,8 @@ systemctl list-timers arrival-ledger-backup.timer
 
 定时器每天 `03:20` 触发，并带最多 15 分钟随机延迟；备份保存在
 `/var/lib/arrival-ledger/backups`，保留最近 14 天。服务单元已经显式设置生产项目和数据目录，
-执行时会短暂停止后端以获得一致备份，随后恢复并检查健康状态。
+执行时会短暂停止后端以获得一致备份，随后恢复并检查健康状态。每个 `.tar.gz` 归档同时生成
+同名 `.sha256` 文件；恢复前先在备份目录执行 `sha256sum --check 文件名.tar.gz.sha256`。
 
 手工验证：
 

@@ -8,6 +8,8 @@ BACKUP_ROOT="${BACKUP_ROOT:-${DATA_ROOT}/backups}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 FINAL_ARCHIVE="${BACKUP_ROOT}/arrival-ledger-${TIMESTAMP}.tar.gz"
 TEMP_ARCHIVE="${FINAL_ARCHIVE}.partial"
+FINAL_CHECKSUM="${FINAL_ARCHIVE}.sha256"
+TEMP_CHECKSUM="${FINAL_CHECKSUM}.partial"
 BACKEND_WAS_RUNNING=false
 
 cd "${PROJECT_ROOT}"
@@ -19,6 +21,7 @@ fi
 
 restart_backend() {
     rm -f -- "${TEMP_ARCHIVE}"
+    rm -f -- "${TEMP_CHECKSUM}"
     if [[ "${BACKEND_WAS_RUNNING}" == true ]]; then
         sudo docker compose start backend >/dev/null
     fi
@@ -38,6 +41,11 @@ for required_dir in db media uploads; do
 done
 
 sudo tar -C "${DATA_ROOT}" -czf - db media uploads >"${TEMP_ARCHIVE}"
+checksum_line="$(sha256sum -- "${TEMP_ARCHIVE}")"
+printf '%s  %s\n' "${checksum_line%% *}" "$(basename -- "${FINAL_ARCHIVE}")" \
+    >"${TEMP_CHECKSUM}"
 mv -- "${TEMP_ARCHIVE}" "${FINAL_ARCHIVE}"
+mv -- "${TEMP_CHECKSUM}" "${FINAL_CHECKSUM}"
 
 echo "Backup created: ${FINAL_ARCHIVE}"
+echo "Checksum created: ${FINAL_CHECKSUM}"
