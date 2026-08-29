@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { OrderPlatformFilter, PurchaseOrder } from '@/types'
-import { formatDateTime } from '@/utils/format'
 
 const props = defineProps<{
   orders: PurchaseOrder[]
@@ -23,8 +22,7 @@ const emit = defineEmits<{
 
 const draftQuery = ref(props.query)
 const draftPlatform = ref<OrderPlatformFilter>(props.platform)
-const expandedItems = ref<Set<string>>(new Set())
-const expandedPackages = ref<Set<string>>(new Set())
+const expandedOrders = ref<Set<string>>(new Set())
 
 watch(() => props.query, (value) => { draftQuery.value = value })
 watch(() => props.platform, (value) => { draftPlatform.value = value })
@@ -34,82 +32,98 @@ const lastResult = computed(() => Math.min(props.offset + props.orders.length, p
 const hasPrevious = computed(() => props.offset > 0)
 const hasNext = computed(() => props.offset + props.limit < props.total)
 
-const orderStatusLabels: Record<string, string> = {
-  PENDING: '待付款',
-  PAID: '待发货',
-  SHIPPED: '已发货',
-  COMPLETED: '已完成',
-  REFUNDED: '退款或售后',
-  CANCELLED: '已取消',
-  UNKNOWN: '状态待确认',
-}
+type ArrivalTone = 'pending' | 'candidate' | 'partial' | 'received' | 'closed'
 
-const packageStatusLabels: Record<string, string> = {
-  PENDING: '待揽收',
-  PAID: '待发货',
-  SHIPPED: '运输中',
-  IN_TRANSIT: '运输中',
-  DELIVERED: '已签收',
-  COMPLETED: '已完成',
-  CANCELLED: '已取消',
+interface ArrivalSummary {
+  tone: ArrivalTone
+  icon: string
+  label: string
+  detail: string
 }
 
 function platformLabel(platform: PurchaseOrder['platform']): string {
   return platform === '1688' ? '1688' : '拼多多'
 }
 
-function orderStatusLabel(status: string): string {
-  const normalized = status.trim().toUpperCase()
-  return orderStatusLabels[normalized] || status || '状态待确认'
-}
-
-function orderStatusClass(status: string): string {
-  const normalized = status.trim().toUpperCase()
-  if (normalized === 'COMPLETED') return 'complete'
-  if (normalized === 'CANCELLED' || normalized === 'REFUNDED') return 'closed'
-  if (normalized === 'SHIPPED') return 'shipped'
-  return 'pending'
-}
-
-function packageStatusLabel(orderPackage: PurchaseOrder['packages'][number]): string {
-  if (orderPackage.arrival_status === 'ARRIVED') return '已到货'
-  if (orderPackage.arrival_status === 'CANDIDATE') return '照片待确认'
-  const status = orderPackage.package_status
-  if (!status) return '物流状态待同步'
-  return packageStatusLabels[status.trim().toUpperCase()] || status
-}
-
-function packageArrivalClass(orderPackage: PurchaseOrder['packages'][number]): string {
-  if (orderPackage.arrival_status === 'ARRIVED') return 'arrived'
-  if (orderPackage.arrival_status === 'CANDIDATE') return 'candidate'
-  return ''
-}
-
-function sourceLabel(source: string): string {
-  if (source === 'ALI1688_API') return '1688 开放平台同步'
-  if (source === 'WINDOWS_BROWSER') return '浏览器同步'
-  return source
-}
-
-function unitPriceLabel(price: string | null): string {
-  if (!price) return ''
-  return /^[¥￥]/.test(price) ? price : `¥${price}`
-}
-
 function visibleItems(order: PurchaseOrder) {
-  return expandedItems.value.has(order.id) ? order.items : order.items.slice(0, 3)
+  return expandedOrders.value.has(order.id) ? order.items : order.items.slice(0, 2)
 }
 
 function visiblePackages(order: PurchaseOrder) {
-  return expandedPackages.value.has(order.id) ? order.packages : order.packages.slice(0, 3)
+  return expandedOrders.value.has(order.id) ? order.packages : order.packages.slice(0, 2)
 }
 
-function toggleExpanded(target: 'items' | 'packages', orderId: string): void {
-  const current = target === 'items' ? expandedItems : expandedPackages
-  const next = new Set(current.value)
+function toggleExpanded(orderId: string): void {
+  const next = new Set(expandedOrders.value)
   if (next.has(orderId)) next.delete(orderId)
   else next.add(orderId)
-  current.value = next
+  expandedOrders.value = next
+}
+
+function hasHiddenDetails(order: PurchaseOrder): boolean {
+  return order.items.length > 2 || order.packages.length > 2
+}
+
+function hiddenDetailsLabel(order: PurchaseOrder): string {
+  if (expandedOrders.value.has(order.id)) return '收起其余内容'
+  const parts: string[] = []
+  if (order.items.length > 2) parts.push(`${order.items.length - 2} 项商品`)
+  if (order.packages.length > 2) parts.push(`${order.packages.length - 2} 个包裹`)
+  return `展开其余 ${parts.join('、')}`
+}
+
+function arrivalSummary(order: PurchaseOrder): ArrivalSummary {
+  const total = order.package_count
+  const arrived = order.arrived_package_count
+  if (total > 0 && arrived >= total) {
+    return { tone: 'received', icon: '✓', label: '已收货', detail: `${arrived}/${total} 个包裹` }
+  }
+  if (arrived > 0) {
+    const candidateDetail = order.candidate_package_count > 0
+      ? ` · ${order.candidate_package_count} 待确认`
+      : ''
+    return {
+      tone: 'partial',
+      icon: '◐',
+      label: '部分收货',
+      detail: total > 0
+        ? `${arrived}/${total} 个包裹${candidateDetail}`
+        : `${arrived} 个包裹${candidateDetail}`,
+    }
+  }
+  if (order.candidate_package_count > 0) {
+    return {
+      tone: 'candidate',
+      icon: '?',
+      label: '待确认',
+      detail: `${order.candidate_package_count} 个包裹照片待确认`,
+    }
+  }
+  const normalizedOrderStatus = order.order_status.trim().toUpperCase()
+  if (normalizedOrderStatus === 'CANCELLED' || normalizedOrderStatus === 'REFUNDED') {
+    return {
+      tone: 'closed',
+      icon: '—',
+      label: '无需收货',
+      detail: normalizedOrderStatus === 'CANCELLED' ? '订单已取消' : '退款或售后',
+    }
+  }
+  return {
+    tone: 'pending',
+    icon: '!',
+    label: '未收货',
+    detail: total > 0 ? `0/${total} 个包裹` : '物流待同步',
+  }
+}
+
+function packageArrivalLabel(orderPackage: PurchaseOrder['packages'][number]): string {
+  if (orderPackage.arrival_status === 'ARRIVED') return '已收货'
+  if (orderPackage.arrival_status === 'CANDIDATE') return '待确认'
+  return '未收货'
+}
+
+function packageArrivalTone(orderPackage: PurchaseOrder['packages'][number]): string {
+  return orderPackage.arrival_status.toLowerCase()
 }
 
 function submitSearch(): void {
@@ -175,88 +189,73 @@ function applyPlatform(platform: OrderPlatformFilter): void {
     </div>
 
     <div v-else-if="orders.length" class="orders-list">
-      <article v-for="order in orders" :key="order.id" class="purchase-order-card">
-        <div class="purchase-order-topline">
-          <div class="order-badges">
-            <span class="platform-badge" :class="`platform-${order.platform}`">{{ platformLabel(order.platform) }}</span>
-            <span class="order-status" :class="`status-${orderStatusClass(order.order_status)}`" :title="order.order_status">
-              {{ orderStatusLabel(order.order_status) }}
-            </span>
+      <article
+        v-for="order in orders"
+        :key="order.id"
+        class="purchase-order-card"
+        :class="`arrival-${arrivalSummary(order).tone}`"
+        :aria-labelledby="`order-${order.id}-number`"
+      >
+        <header class="compact-order-header">
+          <div class="compact-order-identity">
+            <div>
+              <span class="compact-order-label">订单号</span>
+              <span class="platform-badge" :class="`platform-${order.platform}`">{{ platformLabel(order.platform) }}</span>
+            </div>
+            <strong :id="`order-${order.id}-number`" class="purchase-order-number">{{ order.platform_order_id }}</strong>
           </div>
-          <time>{{ formatDateTime(order.ordered_at) }}</time>
-        </div>
-
-        <strong class="purchase-order-number">订单 {{ order.platform_order_id }}</strong>
-        <div class="purchase-order-meta">
-          <span v-if="order.account_label">账号：{{ order.account_label }}</span>
-          <span v-if="order.shop_name">店铺：{{ order.shop_name }}</span>
-          <span>来源：{{ sourceLabel(order.source) }}</span>
-        </div>
-
-        <section class="order-arrival-progress" aria-label="订单到货进度">
-          <div>
-            <span>到货进度</span>
-            <strong>{{ order.package_count ? `${order.arrived_package_count}/${order.package_count} 个包裹` : '暂无包裹' }}</strong>
+          <div
+            class="order-arrival-state"
+            :class="`state-${arrivalSummary(order).tone}`"
+            :aria-label="`收货状态：${arrivalSummary(order).label}，${arrivalSummary(order).detail}`"
+          >
+            <span aria-hidden="true">{{ arrivalSummary(order).icon }}</span>
+            <div>
+              <strong>{{ arrivalSummary(order).label }}</strong>
+              <small>{{ arrivalSummary(order).detail }}</small>
+            </div>
           </div>
-          <progress
-            :value="order.arrived_package_count"
-            :max="Math.max(order.package_count, 1)"
-            :aria-label="`${order.arrived_package_count}/${order.package_count} 个包裹已到货`"
-          ></progress>
-          <small>
-            有效到货凭证 {{ order.arrival_photo_count }} 张
-            <template v-if="order.candidate_photo_count"> · 待确认照片 {{ order.candidate_photo_count }} 张</template>
-          </small>
-          <p v-if="order.candidate_package_count" class="candidate-arrival-note">
-            {{ order.candidate_package_count }} 个包裹有候选照片，确认前不计入已到货
-          </p>
-        </section>
+        </header>
 
-        <section class="order-card-section">
-          <h3>商品 <small>共 {{ order.items.length }} 项</small></h3>
-          <ul v-if="order.items.length" class="order-items-list">
-            <li v-for="(item, index) in visibleItems(order)" :key="`${item.title}-${item.sku_text || ''}-${index}`">
-              <div>
+        <section class="compact-order-section" aria-label="商品">
+          <h3>商品</h3>
+          <div v-if="order.items.length" class="compact-order-rows">
+            <div v-for="(item, index) in visibleItems(order)" :key="`${item.title}-${item.sku_text || ''}-${index}`" class="compact-product-row">
+              <p>
                 <strong>{{ item.title }}</strong>
                 <small v-if="item.sku_text">{{ item.sku_text }}</small>
-              </div>
-              <span>×{{ item.quantity }}<template v-if="item.unit_price"> · {{ unitPriceLabel(item.unit_price) }}</template></span>
-            </li>
-          </ul>
+              </p>
+              <span>×{{ item.quantity }}</span>
+            </div>
+          </div>
           <p v-else class="order-section-empty">商品明细待同步</p>
-          <button
-            v-if="order.items.length > 3"
-            class="order-expand-button"
-            type="button"
-            :aria-expanded="expandedItems.has(order.id)"
-            @click="toggleExpanded('items', order.id)"
-          >
-            {{ expandedItems.has(order.id) ? '收起商品' : `查看全部 ${order.items.length} 项商品` }}
-          </button>
         </section>
 
-        <section class="order-card-section order-logistics">
-          <h3>物流 <small>共 {{ order.package_count }} 个包裹</small></h3>
-          <div v-if="order.packages.length" class="order-packages-list">
-            <div v-for="(orderPackage, index) in visiblePackages(order)" :key="`${orderPackage.tracking_no}-${index}`" class="order-package">
-              <div>
+        <section class="compact-order-section" aria-label="物流">
+          <h3>物流</h3>
+          <div v-if="order.packages.length" class="compact-order-rows">
+            <div v-for="(orderPackage, index) in visiblePackages(order)" :key="`${orderPackage.tracking_no}-${index}`" class="compact-logistics-row">
+              <p>
                 <strong>{{ orderPackage.courier || '物流公司待同步' }}</strong>
-                <small>{{ orderPackage.tracking_no }}</small>
-              </div>
-              <span :class="packageArrivalClass(orderPackage)">{{ packageStatusLabel(orderPackage) }}</span>
+                <small>{{ orderPackage.tracking_no || '运单号待同步' }}</small>
+              </p>
+              <span class="package-arrival-state" :class="`package-${packageArrivalTone(orderPackage)}`">
+                {{ packageArrivalLabel(orderPackage) }}
+              </span>
             </div>
           </div>
           <p v-else class="order-section-empty">暂无物流信息</p>
-          <button
-            v-if="order.packages.length > 3"
-            class="order-expand-button"
-            type="button"
-            :aria-expanded="expandedPackages.has(order.id)"
-            @click="toggleExpanded('packages', order.id)"
-          >
-            {{ expandedPackages.has(order.id) ? '收起物流' : `查看全部 ${order.packages.length} 个包裹` }}
-          </button>
         </section>
+
+        <button
+          v-if="hasHiddenDetails(order)"
+          class="compact-order-toggle"
+          type="button"
+          :aria-expanded="expandedOrders.has(order.id)"
+          @click="toggleExpanded(order.id)"
+        >
+          {{ hiddenDetailsLabel(order) }}
+        </button>
       </article>
     </div>
 
