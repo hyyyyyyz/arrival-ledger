@@ -67,6 +67,20 @@ CREATE INDEX IF NOT EXISTS idx_receipts_recent
 CREATE INDEX IF NOT EXISTS idx_receipts_tracking
     ON receipt_events(tracking_no_normalized);
 
+CREATE TABLE IF NOT EXISTS receipt_change_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_event_id TEXT NOT NULL UNIQUE,
+    receipt_id INTEGER NOT NULL REFERENCES receipt_events(id) ON DELETE CASCADE,
+    actor_user_id INTEGER NOT NULL REFERENCES users(id),
+    action TEXT NOT NULL CHECK (action IN ('TRACKING_UPDATE')),
+    previous_tracking_no TEXT,
+    new_tracking_no TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_receipt_change_events_receipt
+    ON receipt_change_events(receipt_id, id DESC);
+
 CREATE TABLE IF NOT EXISTS sync_worker_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_digest TEXT NOT NULL UNIQUE,
@@ -102,6 +116,54 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
 
 CREATE INDEX IF NOT EXISTS idx_purchase_orders_status
     ON purchase_orders(order_status);
+
+CREATE TABLE IF NOT EXISTS order_arrival_overrides (
+    order_id INTEGER PRIMARY KEY REFERENCES purchase_orders(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'RECEIVED')),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    actor_user_id INTEGER NOT NULL REFERENCES users(id),
+    reason TEXT,
+    changed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS order_arrival_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_event_id TEXT NOT NULL UNIQUE,
+    order_id INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
+    actor_user_id INTEGER NOT NULL REFERENCES users(id),
+    action TEXT NOT NULL CHECK (action IN ('MARK_RECEIVED', 'MARK_PENDING')),
+    previous_effective_status TEXT NOT NULL
+        CHECK (previous_effective_status IN ('PENDING', 'REVIEW', 'RECEIVED')),
+    new_effective_status TEXT NOT NULL
+        CHECK (new_effective_status IN ('PENDING', 'RECEIVED')),
+    previous_override_status TEXT
+        CHECK (previous_override_status IS NULL OR previous_override_status IN ('PENDING', 'RECEIVED')),
+    new_override_status TEXT NOT NULL
+        CHECK (new_override_status IN ('PENDING', 'RECEIVED')),
+    previous_revision INTEGER NOT NULL CHECK (previous_revision >= 0),
+    new_revision INTEGER NOT NULL CHECK (new_revision > 0),
+    reason TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_arrival_events_order
+    ON order_arrival_events(order_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS user_management_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_user_id INTEGER NOT NULL REFERENCES users(id),
+    actor_username TEXT NOT NULL,
+    actor_display_name TEXT NOT NULL,
+    target_user_id INTEGER NOT NULL REFERENCES users(id),
+    target_username TEXT NOT NULL,
+    target_display_name TEXT NOT NULL,
+    target_role TEXT NOT NULL CHECK (target_role IN ('ADMIN', 'RECEIVER')),
+    action TEXT NOT NULL CHECK (action IN ('CREATE', 'ACTIVATE', 'DEACTIVATE')),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_management_events_recent
+    ON user_management_events(created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS order_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -297,6 +359,94 @@ def _migration_ali1688_sync_state(connection: sqlite3.Connection) -> None:
         )
     """)
     connection.execute("CREATE INDEX IF NOT EXISTS idx_ali1688_sync_runs_account ON ali1688_sync_runs(account_key, started_at DESC)")
+
+
+def _migration_responsibility_and_manual_arrival(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS order_arrival_overrides (
+            order_id INTEGER PRIMARY KEY
+                REFERENCES purchase_orders(id) ON DELETE CASCADE,
+            status TEXT NOT NULL CHECK (status IN ('PENDING', 'RECEIVED')),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            actor_user_id INTEGER NOT NULL REFERENCES users(id),
+            reason TEXT,
+            changed_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS order_arrival_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_event_id TEXT NOT NULL UNIQUE,
+            order_id INTEGER NOT NULL
+                REFERENCES purchase_orders(id) ON DELETE CASCADE,
+            actor_user_id INTEGER NOT NULL REFERENCES users(id),
+            action TEXT NOT NULL
+                CHECK (action IN ('MARK_RECEIVED', 'MARK_PENDING')),
+            previous_effective_status TEXT NOT NULL
+                CHECK (previous_effective_status IN ('PENDING', 'REVIEW', 'RECEIVED')),
+            new_effective_status TEXT NOT NULL
+                CHECK (new_effective_status IN ('PENDING', 'RECEIVED')),
+            previous_override_status TEXT
+                CHECK (
+                    previous_override_status IS NULL
+                    OR previous_override_status IN ('PENDING', 'RECEIVED')
+                ),
+            new_override_status TEXT NOT NULL
+                CHECK (new_override_status IN ('PENDING', 'RECEIVED')),
+            previous_revision INTEGER NOT NULL CHECK (previous_revision >= 0),
+            new_revision INTEGER NOT NULL CHECK (new_revision > 0),
+            reason TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        CREATE INDEX IF NOT EXISTS idx_order_arrival_events_order
+            ON order_arrival_events(order_id, id DESC)
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS receipt_change_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_event_id TEXT NOT NULL UNIQUE,
+            receipt_id INTEGER NOT NULL
+                REFERENCES receipt_events(id) ON DELETE CASCADE,
+            actor_user_id INTEGER NOT NULL REFERENCES users(id),
+            action TEXT NOT NULL CHECK (action IN ('TRACKING_UPDATE')),
+            previous_tracking_no TEXT,
+            new_tracking_no TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        CREATE INDEX IF NOT EXISTS idx_receipt_change_events_receipt
+            ON receipt_change_events(receipt_id, id DESC)
+    """)
+
+
+def _migration_user_management_audit(connection: sqlite3.Connection) -> None:
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS user_management_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_user_id INTEGER NOT NULL REFERENCES users(id),
+            actor_username TEXT NOT NULL,
+            actor_display_name TEXT NOT NULL,
+            target_user_id INTEGER NOT NULL REFERENCES users(id),
+            target_username TEXT NOT NULL,
+            target_display_name TEXT NOT NULL,
+            target_role TEXT NOT NULL
+                CHECK (target_role IN ('ADMIN', 'RECEIVER')),
+            action TEXT NOT NULL
+                CHECK (action IN ('CREATE', 'ACTIVATE', 'DEACTIVATE')),
+            created_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        CREATE INDEX IF NOT EXISTS idx_user_management_events_recent
+            ON user_management_events(created_at DESC, id DESC)
+    """)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial_schema", apply=_migration_initial_schema),
     Migration(version=2, name="item_identity", apply=_migration_item_identity),
@@ -309,6 +459,16 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=4,
         name="ali1688_sync_state",
         apply=_migration_ali1688_sync_state,
+    ),
+    Migration(
+        version=5,
+        name="responsibility_and_manual_arrival",
+        apply=_migration_responsibility_and_manual_arrival,
+    ),
+    Migration(
+        version=6,
+        name="user_management_audit",
+        apply=_migration_user_management_audit,
     ),
 )
 

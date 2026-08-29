@@ -3,14 +3,17 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import DashboardStats from '@/components/DashboardStats.vue'
 import LoginView from '@/components/LoginView.vue'
 import OrderList from '@/components/OrderList.vue'
+import PeopleManagement from '@/components/PeopleManagement.vue'
 import ReceiptCapture from '@/components/ReceiptCapture.vue'
 import ReceiptList from '@/components/ReceiptList.vue'
 import SyncStatus from '@/components/SyncStatus.vue'
 import type {
   AuthSession,
   DashboardStats as DashboardStatsData,
+  PurchaseOrder,
   QueueStats,
   Receipt,
+  ReceiptTrackingUpdateInput,
   UploadQueueItem,
   User,
 } from '@/types'
@@ -67,6 +70,7 @@ const {
   goToPage: goToOrderPage,
   refresh: refreshOrders,
   invalidate: invalidateOrders,
+  replaceOrder,
   reset: resetOrders,
 } = useOrderPage({
   isOnline: () => online.value,
@@ -228,14 +232,33 @@ async function updateLocalTracking(clientEventId: string, trackingNo: string): P
   }
 }
 
-async function updateServerTracking(receiptId: string | number, trackingNo: string): Promise<void> {
+async function updateServerTracking(input: ReceiptTrackingUpdateInput): Promise<Receipt> {
   try {
-    const updated = await updateReceiptTracking(receiptId, normalizeTrackingNo(trackingNo))
-    const index = receipts.value.findIndex((item) => item.id === receiptId)
+    const updated = await updateReceiptTracking(
+      input.receiptId,
+      normalizeTrackingNo(input.trackingNo),
+      input.expectedTrackingNo,
+      input.clientEventId,
+    )
+    const index = receipts.value.findIndex((item) => String(item.id) === String(input.receiptId))
     if (index >= 0) receipts.value.splice(index, 1, updated)
     handleServerReceiptChanged()
+    return updated
   } catch (error) {
-    sessionNotice.value = error instanceof Error ? error.message : '单号更新失败'
+    if (error instanceof ApiError && error.status === 401) handleAuthRequired()
+    else if (error instanceof ApiError && error.status === 409) {
+      try {
+        receipts.value = await listReceipts(80)
+      } catch {
+        // Keep the editor open with the last known value; a stale retry will safely conflict again.
+      }
+      const current = receipts.value.find((item) => String(item.id) === String(input.receiptId))
+      throw new ApiError(409, error.message, {
+        current_tracking_no: current?.tracking_no ?? null,
+        server_error: error.details,
+      })
+    } else sessionNotice.value = error instanceof Error ? error.message : '单号更新失败'
+    throw error
   }
 }
 
@@ -255,6 +278,12 @@ function handleSynced(event: Event): void {
 function handleServerReceiptChanged(): void {
   void refreshDashboardStats()
   invalidateOrders()
+  if (activeTab.value === 'orders') void refreshOrders()
+}
+
+function handleManualOrderChanged(order: PurchaseOrder): void {
+  replaceOrder(order)
+  void refreshDashboardStats()
   if (activeTab.value === 'orders') void refreshOrders()
 }
 
@@ -349,7 +378,12 @@ onBeforeUnmount(() => {
     <main class="app-content">
       <template v-if="activeTab === 'capture'">
         <SyncStatus :stats="queueStats" :online="online" @retry="uploadQueue.retryNow()" />
-        <ReceiptCapture :user="user" @changed="refreshQueueState" @server-changed="handleServerReceiptChanged" />
+        <ReceiptCapture
+          :user="user"
+          :save-server-tracking="updateServerTracking"
+          @changed="refreshQueueState"
+          @server-changed="handleServerReceiptChanged"
+        />
         <DashboardStats
           :stats="dashboardStats"
           :loading="dashboardStatsLoading"
@@ -361,12 +395,12 @@ onBeforeUnmount(() => {
           :receipts="recentReceipts"
           :local-items="recentQueueItems"
           :loading="receiptsLoading"
+          :save-server-tracking="updateServerTracking"
           title="最近到货"
           @refresh="refreshReceipts"
           @capture="selectTab('capture')"
           @retry="uploadQueue.retryNow"
           @update-local="updateLocalTracking"
-          @update-server="updateServerTracking"
         />
       </template>
 
@@ -376,15 +410,22 @@ onBeforeUnmount(() => {
           :receipts="receipts"
           :local-items="queueItems"
           :loading="receiptsLoading"
+          :save-server-tracking="updateServerTracking"
           title="全部记录"
           empty-text="还没有可查看的到货记录。"
           @refresh="refreshReceipts"
           @capture="selectTab('capture')"
           @retry="uploadQueue.retryNow"
           @update-local="updateLocalTracking"
-          @update-server="updateServerTracking"
         />
       </template>
+
+      <PeopleManagement
+        v-else-if="activeTab === 'people' && user.role === 'ADMIN'"
+        :current-user="user"
+        :online="online"
+        @auth-required="handleAuthRequired"
+      />
 
       <OrderList
         v-else
@@ -402,10 +443,12 @@ onBeforeUnmount(() => {
         @search="searchOrders"
         @refresh="refreshOrders"
         @page="goToOrderPage"
+        @manual-changed="handleManualOrderChanged"
+        @auth-required="handleAuthRequired"
       />
     </main>
 
-    <nav class="bottom-nav" aria-label="主导航">
+    <nav class="bottom-nav" :class="{ 'has-admin': user.role === 'ADMIN' }" aria-label="主导航">
       <div class="desktop-brand" aria-hidden="true">
         <span><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg></span>
         <div><strong>到货管家</strong><small>现场收货台账</small></div>
@@ -421,6 +464,10 @@ onBeforeUnmount(() => {
       <button type="button" :class="{ active: activeTab === 'orders' }" :aria-current="activeTab === 'orders' ? 'page' : undefined" @click="selectTab('orders')">
         <span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5" /></svg></span>
         <strong>订单</strong>
+      </button>
+      <button v-if="user.role === 'ADMIN'" type="button" :class="{ active: activeTab === 'people' }" :aria-current="activeTab === 'people' ? 'page' : undefined" @click="selectTab('people')">
+        <span aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3" /><path d="M4 19v-2a5 5 0 0 1 10 0v2M16 8h4M18 6v4" /></svg></span>
+        <strong>人员</strong>
       </button>
     </nav>
   </div>

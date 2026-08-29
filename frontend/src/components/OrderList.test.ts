@@ -1,9 +1,34 @@
-import { renderToString } from '@vue/server-renderer'
-import { createSSRApp } from 'vue'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+// @vitest-environment happy-dom
 
-import type { PurchaseOrder } from '@/types'
+import { renderToString } from '@vue/server-renderer'
+import { createSSRApp, nextTick } from 'vue'
+import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { OrderArrivalFilter, OrderPlatformFilter, PurchaseOrder } from '@/types'
+import { ApiError, updateOrderArrivalStatus } from '@/services/api'
 import OrderList from './OrderList.vue'
+
+const componentMocks = vi.hoisted(() => ({
+  createId: vi.fn(() => 'manual-client-event-stable-0001'),
+  updateOrderArrivalStatus: vi.fn(),
+}))
+
+vi.mock('@/utils/id', () => ({ createId: componentMocks.createId }))
+vi.mock('@/services/api', () => ({
+  ApiError: class ApiError extends Error {
+    readonly status: number
+    readonly details: unknown
+
+    constructor(status: number, message: string, details?: unknown) {
+      super(message)
+      this.name = 'ApiError'
+      this.status = status
+      this.details = details
+    }
+  },
+  updateOrderArrivalStatus: componentMocks.updateOrderArrivalStatus,
+}))
 
 function purchaseOrder(overrides: Partial<PurchaseOrder> = {}): PurchaseOrder {
   return {
@@ -36,7 +61,21 @@ function purchaseOrder(overrides: Partial<PurchaseOrder> = {}): PurchaseOrder {
   }
 }
 
-function props(overrides: Record<string, unknown> = {}) {
+interface OrderListProps extends Record<string, unknown> {
+  orders: PurchaseOrder[]
+  total: number
+  limit: number
+  offset: number
+  query: string
+  platform: OrderPlatformFilter
+  arrivalStatus: OrderArrivalFilter
+  loading: boolean
+  error: string
+  lastSyncedAt: string | null
+  online: boolean
+}
+
+function props(overrides: Partial<OrderListProps> = {}): OrderListProps {
   return {
     orders: [purchaseOrder()],
     total: 41,
@@ -54,6 +93,11 @@ function props(overrides: Record<string, unknown> = {}) {
 }
 
 describe('OrderList', () => {
+  beforeEach(() => {
+    componentMocks.createId.mockClear()
+    componentMocks.updateOrderArrivalStatus.mockReset()
+  })
+
   afterEach(() => {
     vi.useRealTimers()
   })
@@ -141,6 +185,130 @@ describe('OrderList', () => {
     expect(cancelled).toContain('arrival-closed')
     expect(cancelled).toContain('收货状态：无需收货，订单已取消')
     expect(cancelled).not.toContain('arrival-pending')
+    expect(cancelled).not.toContain('人工标记已收货')
+
+    const cancelledWithEvidence = await renderToString(createSSRApp(OrderList, props({
+      orders: [purchaseOrder({
+        order_status: 'CANCELLED',
+        effective_arrival_status: 'CLOSED',
+        packages: [{ courier: '顺丰速运', tracking_no: 'SF-CLOSED', package_status: 'DELIVERED', arrival_status: 'ARRIVED', arrived: true }],
+        package_count: 1,
+        arrived_package_count: 1,
+        arrival_photo_count: 1,
+        candidate_package_count: 0,
+      })],
+    })))
+    expect(cancelledWithEvidence).toContain('arrival-closed')
+    expect(cancelledWithEvidence).toContain('收货状态：无需收货，订单已取消')
+    expect(cancelledWithEvidence).not.toContain('收货状态：已收货')
+    expect(cancelledWithEvidence).not.toContain('人工撤销收货')
+  })
+
+  it('renders reversible manual corrections with an accountable audit label', async () => {
+    const manuallyReceived = await renderToString(createSSRApp(OrderList, props({
+      orders: [purchaseOrder({
+        effective_arrival_status: 'RECEIVED',
+        evidence_arrival_status: 'PENDING',
+        arrival_source: 'MANUAL',
+        responsible_user: { id: 7, username: 'receiver', display_name: '张三', role: 'RECEIVER' },
+        manual_revision: 2,
+        changed_at: '2026-08-30T12:00:00Z',
+        packages: [{ courier: '顺丰速运', tracking_no: 'SF-PENDING', package_status: 'SHIPPED', arrival_status: 'PENDING', arrived: false }],
+        package_count: 1,
+        arrived_package_count: 0,
+        candidate_package_count: 0,
+      })],
+    })))
+
+    expect(manuallyReceived).toContain('收货状态：已收货，人工确认')
+    expect(manuallyReceived).toContain('人工确认收货 · 张三')
+    expect(manuallyReceived).toContain('人工撤销收货')
+    expect(manuallyReceived).not.toContain('确认标记为已收货？')
+
+    const manuallyUndone = await renderToString(createSSRApp(OrderList, props({
+      orders: [purchaseOrder({
+        effective_arrival_status: 'PENDING',
+        evidence_arrival_status: 'RECEIVED',
+        arrival_source: 'MANUAL',
+        responsible_user: { id: 8, username: 'auditor', display_name: '李四', role: 'ADMIN' },
+        manual_revision: 4,
+        changed_at: '2026-08-30T12:30:00Z',
+      })],
+    })))
+
+    expect(manuallyUndone).toContain('收货状态：未收货，人工撤销')
+    expect(manuallyUndone).toContain('人工撤销收货 · 李四')
+    expect(manuallyUndone).toContain('人工标记已收货')
+  })
+
+  it('reuses one event id after an uncertain network failure', async () => {
+    vi.mocked(updateOrderArrivalStatus)
+      .mockRejectedValueOnce(new ApiError(0, '网络不可用'))
+      .mockResolvedValueOnce({
+        order_id: '91',
+        effective_arrival_status: 'RECEIVED',
+        evidence_arrival_status: 'PENDING',
+        arrival_source: 'MANUAL',
+        responsible_user: { id: 1, username: 'admin', display_name: '管理员' },
+        manual_revision: 1,
+        changed_at: '2026-08-30T12:00:00Z',
+        audit_event_id: 1,
+        idempotent_replay: false,
+      })
+    const wrapper = mount(OrderList, { props: props({
+      orders: [purchaseOrder({
+        effective_arrival_status: 'PENDING',
+        evidence_arrival_status: 'PENDING',
+        arrival_source: 'AUTO',
+        manual_revision: 0,
+      })],
+    }) })
+
+    await wrapper.get('.manual-correction-button').trigger('click')
+    await nextTick()
+    await wrapper.get('.confirmation-dialog .confirm').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('网络不可用')
+    expect(wrapper.find('.confirmation-dialog').exists()).toBe(true)
+
+    await wrapper.get('.confirmation-dialog .confirm').trigger('click')
+    await flushPromises()
+    expect(vi.mocked(updateOrderArrivalStatus).mock.calls).toEqual([
+      ['91', 'RECEIVED', 0, 'manual-client-event-stable-0001'],
+      ['91', 'RECEIVED', 0, 'manual-client-event-stable-0001'],
+    ])
+    expect(wrapper.emitted('manualChanged')).toHaveLength(1)
+  })
+
+  it('closes the correction and requests re-authentication on 401', async () => {
+    vi.mocked(updateOrderArrivalStatus).mockRejectedValueOnce(
+      new ApiError(401, '登录已过期'),
+    )
+    const wrapper = mount(OrderList, { props: props() })
+
+    await wrapper.get('.manual-correction-button').trigger('click')
+    await nextTick()
+    await wrapper.get('.confirmation-dialog .confirm').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('authRequired')).toHaveLength(1)
+    expect(wrapper.find('.confirmation-dialog').exists()).toBe(false)
+  })
+
+  it('refreshes instead of overwriting a concurrent correction on 409', async () => {
+    vi.mocked(updateOrderArrivalStatus).mockRejectedValueOnce(
+      new ApiError(409, 'arrival status changed concurrently'),
+    )
+    const wrapper = mount(OrderList, { props: props() })
+
+    await wrapper.get('.manual-correction-button').trigger('click')
+    await nextTick()
+    await wrapper.get('.confirmation-dialog .confirm').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('refresh')).toHaveLength(1)
+    expect(wrapper.find('.confirmation-dialog').exists()).toBe(false)
+    expect(wrapper.text()).toContain('订单状态已被其他人修改')
   })
 
   it('keeps missing product and logistics data compact and explicit', async () => {

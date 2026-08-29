@@ -40,15 +40,25 @@ from .schemas import (
     AuthResponse,
     DashboardStatsOut,
     LoginRequest,
+    OrderArrivalAuditEventOut,
+    OrderArrivalAuditListResponse,
+    OrderArrivalStateOut,
+    OrderArrivalStatusUpdate,
     PurchaseOrderListResponse,
     PurchaseOrderOut,
     ReceiptCreateResponse,
     ReceiptListResponse,
     ReceiptOut,
     TrackingUpdate,
+    UserActivationUpdate,
+    UserCreate,
+    UserListResponse,
+    UserManagementAuditEventOut,
+    UserManagementAuditListResponse,
     UserOut,
 )
 from .security import (
+    hash_password,
     new_session_token,
     session_token_digest,
     verify_password,
@@ -128,6 +138,7 @@ class AuthenticatedUser:
     display_name: str
     role: str
     session_id: str
+    last_login_at: datetime | None = None
 
     def public(self) -> UserOut:
         return UserOut(
@@ -135,6 +146,8 @@ class AuthenticatedUser:
             username=self.username,
             display_name=self.display_name,
             role=self.role,
+            is_active=True,
+            last_login_at=self.last_login_at,
         )
 
 
@@ -178,7 +191,7 @@ def require_user(request: Request) -> AuthenticatedUser:
         with database.connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, username, display_name, role, is_active
+                SELECT id, username, display_name, role, is_active, last_login_at
                 FROM users WHERE username = ?
                 """,
                 (settings.trusted_user_username.strip(),),
@@ -194,6 +207,7 @@ def require_user(request: Request) -> AuthenticatedUser:
             display_name=row["display_name"],
             role=row["role"],
             session_id="trusted-lan",
+            last_login_at=row["last_login_at"],
         )
 
     token = request.cookies.get(settings.cookie_name)
@@ -206,7 +220,8 @@ def require_user(request: Request) -> AuthenticatedUser:
             """
             SELECT
                 s.id AS session_id, s.expires_at,
-                u.id, u.username, u.display_name, u.role, u.is_active
+                u.id, u.username, u.display_name, u.role, u.is_active,
+                u.last_login_at
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token_digest = ? AND s.revoked_at IS NULL
@@ -230,7 +245,16 @@ def require_user(request: Request) -> AuthenticatedUser:
         display_name=row["display_name"],
         role=row["role"],
         session_id=row["session_id"],
+        last_login_at=row["last_login_at"],
     )
+
+
+def require_admin(
+    user: Annotated[AuthenticatedUser, Depends(require_user)],
+) -> AuthenticatedUser:
+    if user.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="administrator access required")
+    return user
 
 
 RECEIPT_SELECT = """
@@ -239,10 +263,26 @@ SELECT
     u.username AS operator_username,
     u.display_name AS operator_display_name,
     u.role AS operator_role,
+    u.is_active AS operator_is_active,
+    modifier.id AS modifier_user_id,
+    modifier.username AS modifier_username,
+    modifier.display_name AS modifier_display_name,
+    modifier.role AS modifier_role,
+    modifier.is_active AS modifier_is_active,
+    latest_change.created_at AS last_modified_at,
     duplicate.server_received_at AS duplicate_server_received_at
 FROM receipt_events r
 JOIN users u ON u.id = r.operator_user_id
 LEFT JOIN receipt_events duplicate ON duplicate.id = r.duplicate_of_receipt_id
+LEFT JOIN receipt_change_events AS latest_change
+  ON latest_change.id = (
+      SELECT changes.id
+      FROM receipt_change_events AS changes
+      WHERE changes.receipt_id = r.id
+      ORDER BY changes.id DESC
+      LIMIT 1
+  )
+LEFT JOIN users AS modifier ON modifier.id = latest_change.actor_user_id
 """
 
 
@@ -338,7 +378,20 @@ def _receipt_from_row(connection: sqlite3.Connection, row: sqlite3.Row) -> Recei
             username=row["operator_username"],
             display_name=row["operator_display_name"],
             role=row["operator_role"],
+            is_active=bool(row["operator_is_active"]),
         ),
+        last_modified_by=(
+            UserOut(
+                id=row["modifier_user_id"],
+                username=row["modifier_username"],
+                display_name=row["modifier_display_name"],
+                role=row["modifier_role"],
+                is_active=bool(row["modifier_is_active"]),
+            )
+            if row["modifier_user_id"] is not None
+            else None
+        ),
+        last_modified_at=row["last_modified_at"],
         photo={
             "content_type": row["photo_content_type"],
             "size": row["photo_size"],
@@ -362,6 +415,194 @@ def _fetch_receipt(
     return connection.execute(
         RECEIPT_SELECT + " WHERE r.client_event_id = ?", (client_event_id,)
     ).fetchone()
+
+
+ORDER_ARRIVAL_STATE_SELECT = """
+WITH canonical_receipts AS (
+    SELECT
+        receipts.id,
+        receipts.tracking_no_normalized,
+        receipts.operator_user_id AS responsible_user_id,
+        receipts.server_received_at AS responsibility_at
+    FROM receipt_events AS receipts
+    WHERE receipts.evidence_status = 'READY'
+      AND receipts.duplicate_of_receipt_id IS NULL
+),
+tracking_order_counts AS (
+    SELECT
+        packages.tracking_no_normalized,
+        COUNT(DISTINCT links.order_id) AS order_count
+    FROM packages
+    JOIN package_order_links AS links ON links.package_id = packages.id
+    GROUP BY packages.tracking_no_normalized
+),
+order_tracking AS (
+    SELECT DISTINCT links.order_id, packages.tracking_no_normalized
+    FROM package_order_links AS links
+    JOIN packages ON packages.id = links.package_id
+    WHERE links.order_id = ?
+),
+arrival_metrics AS (
+    SELECT
+        order_tracking.order_id,
+        COUNT(DISTINCT order_tracking.tracking_no_normalized) AS package_count,
+        COUNT(DISTINCT CASE
+            WHEN receipts.id IS NOT NULL AND counts.order_count = 1
+            THEN order_tracking.tracking_no_normalized END
+        ) AS arrived_package_count,
+        COUNT(DISTINCT CASE
+            WHEN receipts.id IS NOT NULL AND counts.order_count > 1
+            THEN order_tracking.tracking_no_normalized END
+        ) AS candidate_package_count
+    FROM order_tracking
+    LEFT JOIN tracking_order_counts AS counts
+      ON counts.tracking_no_normalized = order_tracking.tracking_no_normalized
+    LEFT JOIN canonical_receipts AS receipts
+      ON receipts.tracking_no_normalized = order_tracking.tracking_no_normalized
+    GROUP BY order_tracking.order_id
+),
+latest_receipt AS (
+    SELECT receipts.responsible_user_id, receipts.responsibility_at
+    FROM canonical_receipts AS receipts
+    JOIN packages
+      ON packages.tracking_no_normalized = receipts.tracking_no_normalized
+    JOIN package_order_links AS links ON links.package_id = packages.id
+    WHERE links.order_id = ?
+    ORDER BY receipts.responsibility_at DESC, receipts.id DESC
+    LIMIT 1
+),
+evidence AS (
+    SELECT
+        orders.id AS order_id,
+        orders.order_status AS order_status,
+        orders.updated_at AS order_updated_at,
+        CASE
+            WHEN COALESCE(metrics.package_count, 0) > 0
+             AND COALESCE(metrics.arrived_package_count, 0) >=
+                 COALESCE(metrics.package_count, 0)
+            THEN 'RECEIVED'
+            WHEN (
+                COALESCE(metrics.arrived_package_count, 0) > 0
+                AND COALESCE(metrics.arrived_package_count, 0) <
+                    COALESCE(metrics.package_count, 0)
+            ) OR COALESCE(metrics.candidate_package_count, 0) > 0
+            THEN 'REVIEW'
+            ELSE 'PENDING'
+        END AS evidence_arrival_status
+    FROM purchase_orders AS orders
+    LEFT JOIN arrival_metrics AS metrics ON metrics.order_id = orders.id
+    WHERE orders.id = ?
+)
+SELECT
+    evidence.order_id,
+    evidence.evidence_arrival_status,
+    CASE
+        WHEN UPPER(TRIM(evidence.order_status)) IN ('CANCELLED', 'REFUNDED')
+        THEN 'CLOSED'
+        ELSE COALESCE(overrides.status, evidence.evidence_arrival_status)
+    END AS effective_arrival_status,
+    CASE
+        WHEN UPPER(TRIM(evidence.order_status)) IN ('CANCELLED', 'REFUNDED')
+        THEN 'AUTO'
+        WHEN overrides.order_id IS NULL THEN 'AUTO'
+        ELSE 'MANUAL'
+    END AS arrival_source,
+    COALESCE(overrides.revision, 0) AS manual_revision,
+    CASE
+        WHEN UPPER(TRIM(evidence.order_status)) IN ('CANCELLED', 'REFUNDED')
+        THEN evidence.order_updated_at
+        WHEN overrides.order_id IS NULL THEN latest_receipt.responsibility_at
+        ELSE overrides.changed_at
+    END AS changed_at,
+    responsible.id AS responsible_user_id,
+    responsible.username AS responsible_username,
+    responsible.display_name AS responsible_display_name,
+    responsible.role AS responsible_role,
+    responsible.is_active AS responsible_is_active
+FROM evidence
+LEFT JOIN order_arrival_overrides AS overrides
+  ON overrides.order_id = evidence.order_id
+LEFT JOIN latest_receipt ON 1 = 1
+LEFT JOIN users AS responsible
+  ON responsible.id = CASE
+      WHEN UPPER(TRIM(evidence.order_status)) IN ('CANCELLED', 'REFUNDED') THEN NULL
+      WHEN overrides.order_id IS NULL THEN latest_receipt.responsible_user_id
+      ELSE overrides.actor_user_id
+  END
+"""
+
+
+def _fetch_order_arrival_state(
+    connection: sqlite3.Connection,
+    order_id: int,
+    *,
+    audit_event_id: int | None = None,
+    idempotent_replay: bool = False,
+) -> OrderArrivalStateOut | None:
+    row = connection.execute(
+        ORDER_ARRIVAL_STATE_SELECT,
+        (order_id, order_id, order_id),
+    ).fetchone()
+    if row is None:
+        return None
+    responsible = None
+    if row["responsible_user_id"] is not None:
+        responsible = UserOut(
+            id=row["responsible_user_id"],
+            username=row["responsible_username"],
+            display_name=row["responsible_display_name"],
+            role=row["responsible_role"],
+            is_active=bool(row["responsible_is_active"]),
+        )
+    return OrderArrivalStateOut(
+        order_id=str(row["order_id"]),
+        effective_arrival_status=row["effective_arrival_status"],
+        evidence_arrival_status=row["evidence_arrival_status"],
+        arrival_source=row["arrival_source"],
+        responsible_user=responsible,
+        manual_revision=row["manual_revision"],
+        changed_at=row["changed_at"],
+        audit_event_id=audit_event_id,
+        idempotent_replay=idempotent_replay,
+    )
+
+
+def _arrival_audit_from_row(row: sqlite3.Row) -> OrderArrivalAuditEventOut:
+    return OrderArrivalAuditEventOut(
+        id=row["id"],
+        client_event_id=row["client_event_id"],
+        order_id=str(row["order_id"]),
+        actor=UserOut(
+            id=row["actor_user_id"],
+            username=row["actor_username"],
+            display_name=row["actor_display_name"],
+            role=row["actor_role"],
+            is_active=bool(row["actor_is_active"]),
+        ),
+        action=row["action"],
+        previous_effective_status=row["previous_effective_status"],
+        new_effective_status=row["new_effective_status"],
+        previous_override_status=row["previous_override_status"],
+        new_override_status=row["new_override_status"],
+        previous_revision=row["previous_revision"],
+        new_revision=row["new_revision"],
+        reason=row["reason"],
+        created_at=row["created_at"],
+    )
+
+
+def _validate_strong_password(password: str) -> None:
+    categories = (
+        any(character.islower() for character in password),
+        any(character.isupper() for character in password),
+        any(character.isdigit() for character in password),
+        any(not character.isalnum() for character in password),
+    )
+    if len(password) < 12 or sum(categories) < 3:
+        raise HTTPException(
+            status_code=422,
+            detail="password must be at least 12 characters and use three character classes",
+        )
 
 
 IMAGE_TYPES: dict[str, tuple[str, str]] = {
@@ -568,9 +809,15 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         database = _database(request)
         username = payload.username.strip()
         with database.connect() as connection:
+            # Login and account activation changes share the same SQLite write
+            # lock.  Whichever starts first completes atomically: a later
+            # deactivation revokes the just-created session, while a login that
+            # starts after deactivation observes the inactive account.
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
-                SELECT id, username, display_name, role, password_hash, is_active
+                SELECT id, username, display_name, role, password_hash, is_active,
+                       last_login_at
                 FROM users WHERE username = ?
                 """,
                 (username,),
@@ -580,6 +827,18 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 or not row["is_active"]
                 or not verify_password(payload.password, row["password_hash"])
             ):
+                connection.rollback()
+                raise HTTPException(status_code=401, detail="invalid username or password")
+
+            # Keep this second check next to the session INSERT.  It documents
+            # and enforces the invariant even if the authentication work above
+            # is later refactored to release/reacquire locks.
+            active = connection.execute(
+                "SELECT is_active FROM users WHERE id = ?",
+                (row["id"],),
+            ).fetchone()
+            if active is None or not active["is_active"]:
+                connection.rollback()
                 raise HTTPException(status_code=401, detail="invalid username or password")
 
             now = utc_now()
@@ -624,6 +883,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 username=row["username"],
                 display_name=row["display_name"],
                 role=row["role"],
+                last_login_at=now,
             ),
             auth_required=settings.auth_required,
         )
@@ -663,6 +923,255 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         return AuthResponse(
             user=user.public(),
             auth_required=_settings(request).auth_required,
+        )
+
+    @application.get("/api/users", response_model=UserListResponse)
+    def list_users(
+        request: Request,
+        admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+    ) -> UserListResponse:
+        del admin
+        with _database(request).connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    users.id,
+                    users.username,
+                    users.display_name,
+                    users.role,
+                    users.is_active,
+                    MAX(sessions.created_at) AS last_login_at
+                FROM users
+                LEFT JOIN sessions ON sessions.user_id = users.id
+                GROUP BY users.id
+                ORDER BY users.is_active DESC,
+                         users.display_name COLLATE NOCASE,
+                         users.id
+                """
+            ).fetchall()
+        return UserListResponse(
+            items=[
+                UserOut(
+                    id=row["id"],
+                    username=row["username"],
+                    display_name=row["display_name"],
+                    role=row["role"],
+                    is_active=bool(row["is_active"]),
+                    last_login_at=row["last_login_at"],
+                )
+                for row in rows
+            ],
+            total=len(rows),
+        )
+
+    @application.post("/api/users", response_model=UserOut, status_code=201)
+    def create_user(
+        payload: UserCreate,
+        request: Request,
+        admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+    ) -> UserOut:
+        username = payload.username.strip()
+        display_name = payload.display_name.strip()
+        if re.fullmatch(r"[\w.@+-]{3,64}", username, flags=re.UNICODE) is None:
+            raise HTTPException(
+                status_code=422,
+                detail="username may contain letters, numbers, _, ., @, + and -",
+            )
+        if not display_name:
+            raise HTTPException(status_code=422, detail="display_name is required")
+        _validate_strong_password(payload.password)
+        timestamp = db_timestamp(utc_now())
+        password_hash = hash_password(payload.password)
+        with _database(request).connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                actor = connection.execute(
+                    """
+                    SELECT id, username, display_name
+                    FROM users
+                    WHERE id = ? AND role = 'ADMIN' AND is_active = 1
+                    """,
+                    (admin.id,),
+                ).fetchone()
+                if actor is None:
+                    connection.rollback()
+                    raise HTTPException(
+                        status_code=401,
+                        detail="administrator session is no longer active",
+                    )
+                cursor = connection.execute(
+                    """
+                    INSERT INTO users(
+                        username, display_name, role, password_hash,
+                        is_active, created_at
+                    ) VALUES (?, ?, ?, ?, 1, ?)
+                    """,
+                    (
+                        username,
+                        display_name,
+                        payload.role,
+                        password_hash,
+                        timestamp,
+                    ),
+                )
+                user_id = cursor.lastrowid
+                connection.execute(
+                    """
+                    INSERT INTO user_management_events(
+                        actor_user_id, actor_username, actor_display_name,
+                        target_user_id, target_username, target_display_name,
+                        target_role, action, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATE', ?)
+                    """,
+                    (
+                        actor["id"],
+                        actor["username"],
+                        actor["display_name"],
+                        user_id,
+                        username,
+                        display_name,
+                        payload.role,
+                        timestamp,
+                    ),
+                )
+                connection.commit()
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise HTTPException(status_code=409, detail="username already exists") from exc
+        return UserOut(
+            id=user_id,
+            username=username,
+            display_name=display_name,
+            role=payload.role,
+            is_active=True,
+            last_login_at=None,
+        )
+
+    @application.get(
+        "/api/users/audit-events",
+        response_model=UserManagementAuditListResponse,
+    )
+    def list_user_management_audit_events(
+        request: Request,
+        admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> UserManagementAuditListResponse:
+        del admin
+        with _database(request).connect() as connection:
+            total = connection.execute(
+                "SELECT COUNT(*) AS count FROM user_management_events"
+            ).fetchone()["count"]
+            rows = connection.execute(
+                """
+                SELECT
+                    id, actor_user_id, actor_username, actor_display_name,
+                    target_user_id, target_username, target_display_name,
+                    target_role, action, created_at
+                FROM user_management_events
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            ).fetchall()
+        return UserManagementAuditListResponse(
+            items=[UserManagementAuditEventOut(**dict(row)) for row in rows],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+    @application.patch("/api/users/{user_id}", response_model=UserOut)
+    def update_user_activation(
+        user_id: int,
+        payload: UserActivationUpdate,
+        request: Request,
+        admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+    ) -> UserOut:
+        with _database(request).connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            actor = connection.execute(
+                """
+                SELECT id, username, display_name
+                FROM users
+                WHERE id = ? AND role = 'ADMIN' AND is_active = 1
+                """,
+                (admin.id,),
+            ).fetchone()
+            if actor is None:
+                connection.rollback()
+                raise HTTPException(
+                    status_code=401,
+                    detail="administrator session is no longer active",
+                )
+            row = connection.execute(
+                """
+                SELECT id, username, display_name, role, is_active, last_login_at
+                FROM users WHERE id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise HTTPException(status_code=404, detail="user not found")
+            if not payload.is_active and user_id == admin.id:
+                connection.rollback()
+                raise HTTPException(status_code=409, detail="cannot deactivate your own user")
+            if not payload.is_active and row["role"] == "ADMIN" and row["is_active"]:
+                active_admins = connection.execute(
+                    """
+                    SELECT COUNT(*) AS count FROM users
+                    WHERE role = 'ADMIN' AND is_active = 1
+                    """
+                ).fetchone()["count"]
+                if active_admins <= 1:
+                    connection.rollback()
+                    raise HTTPException(
+                        status_code=409,
+                        detail="cannot deactivate the last active administrator",
+                    )
+            if bool(row["is_active"]) != payload.is_active:
+                timestamp = db_timestamp(utc_now())
+                connection.execute(
+                    "UPDATE users SET is_active = ? WHERE id = ?",
+                    (int(payload.is_active), user_id),
+                )
+                if not payload.is_active:
+                    connection.execute(
+                        """
+                        UPDATE sessions SET revoked_at = ?
+                        WHERE user_id = ? AND revoked_at IS NULL
+                        """,
+                        (timestamp, user_id),
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO user_management_events(
+                        actor_user_id, actor_username, actor_display_name,
+                        target_user_id, target_username, target_display_name,
+                        target_role, action, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        actor["id"],
+                        actor["username"],
+                        actor["display_name"],
+                        row["id"],
+                        row["username"],
+                        row["display_name"],
+                        row["role"],
+                        "ACTIVATE" if payload.is_active else "DEACTIVATE",
+                        timestamp,
+                    ),
+                )
+            connection.commit()
+        return UserOut(
+            id=row["id"],
+            username=row["username"],
+            display_name=row["display_name"],
+            role=row["role"],
+            is_active=payload.is_active,
+            last_login_at=row["last_login_at"],
         )
 
     @application.get("/api/dashboard/stats", response_model=DashboardStatsOut)
@@ -727,6 +1236,36 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                          order_tracking.tracking_no_normalized
                     GROUP BY order_tracking.order_id
                 ),
+                order_effective_arrivals AS (
+                    SELECT
+                        orders.id AS order_id,
+                        CASE
+                            WHEN UPPER(TRIM(orders.order_status))
+                                 IN ('CANCELLED', 'REFUNDED')
+                            THEN 'CLOSED'
+                            ELSE COALESCE(
+                                overrides.status,
+                                CASE
+                                WHEN COALESCE(metrics.package_count, 0) > 0
+                                 AND COALESCE(metrics.arrived_package_count, 0) >=
+                                     COALESCE(metrics.package_count, 0)
+                                THEN 'RECEIVED'
+                                WHEN (
+                                    COALESCE(metrics.arrived_package_count, 0) > 0
+                                    AND COALESCE(metrics.arrived_package_count, 0) <
+                                        COALESCE(metrics.package_count, 0)
+                                ) OR COALESCE(metrics.candidate_package_count, 0) > 0
+                                THEN 'REVIEW'
+                                    ELSE 'PENDING'
+                                END
+                            )
+                        END AS effective_arrival_status
+                    FROM purchase_orders AS orders
+                    LEFT JOIN order_arrival_metrics AS metrics
+                      ON metrics.order_id = orders.id
+                    LEFT JOIN order_arrival_overrides AS overrides
+                      ON overrides.order_id = orders.id
+                ),
                 ready_receipt_links AS (
                     SELECT DISTINCT
                         receipts.id AS receipt_id,
@@ -760,34 +1299,25 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                     (
                         SELECT COUNT(*)
                         FROM purchase_orders AS orders
-                        JOIN order_arrival_metrics AS metrics
-                          ON metrics.order_id = orders.id
-                        WHERE metrics.package_count > 0
-                          AND metrics.arrived_package_count >= metrics.package_count
+                        JOIN order_effective_arrivals AS arrivals
+                          ON arrivals.order_id = orders.id
+                        WHERE arrivals.effective_arrival_status = 'RECEIVED'
                     ) AS received_orders,
                     (
                         SELECT COUNT(*)
                         FROM purchase_orders AS orders
-                        LEFT JOIN order_arrival_metrics AS metrics
-                          ON metrics.order_id = orders.id
-                        WHERE (
-                            (
-                                COALESCE(metrics.arrived_package_count, 0) > 0
-                                AND COALESCE(metrics.arrived_package_count, 0) <
-                                    COALESCE(metrics.package_count, 0)
-                            )
-                            OR COALESCE(metrics.candidate_package_count, 0) > 0
-                        )
+                        JOIN order_effective_arrivals AS arrivals
+                          ON arrivals.order_id = orders.id
+                        WHERE arrivals.effective_arrival_status = 'REVIEW'
                     ) AS review_orders,
                     (
                         SELECT COUNT(*)
                         FROM purchase_orders AS orders
-                        LEFT JOIN order_arrival_metrics AS metrics
-                          ON metrics.order_id = orders.id
+                        JOIN order_effective_arrivals AS arrivals
+                          ON arrivals.order_id = orders.id
                         WHERE UPPER(TRIM(orders.order_status))
                                   NOT IN ('CANCELLED', 'REFUNDED')
-                          AND COALESCE(metrics.arrived_package_count, 0) = 0
-                          AND COALESCE(metrics.candidate_package_count, 0) = 0
+                          AND arrivals.effective_arrival_status = 'PENDING'
                     ) AS pending_orders,
                     (
                         SELECT COUNT(DISTINCT order_id)
@@ -923,32 +1453,14 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             filters.append("(" + " OR ".join(search_clauses) + ")")
 
         if arrival_status == "received":
-            filters.append(
-                """
-                COALESCE(arrival_metrics.package_count, 0) > 0
-                AND COALESCE(arrival_metrics.arrived_package_count, 0) >=
-                    COALESCE(arrival_metrics.package_count, 0)
-                """
-            )
+            filters.append("arrival_states.effective_arrival_status = 'RECEIVED'")
         elif arrival_status == "review":
-            filters.append(
-                """
-                (
-                    (
-                        COALESCE(arrival_metrics.arrived_package_count, 0) > 0
-                        AND COALESCE(arrival_metrics.arrived_package_count, 0) <
-                            COALESCE(arrival_metrics.package_count, 0)
-                    )
-                    OR COALESCE(arrival_metrics.candidate_package_count, 0) > 0
-                )
-                """
-            )
+            filters.append("arrival_states.effective_arrival_status = 'REVIEW'")
         elif arrival_status == "pending":
             filters.append(
                 """
                 UPPER(TRIM(orders.order_status)) NOT IN ('CANCELLED', 'REFUNDED')
-                AND COALESCE(arrival_metrics.arrived_package_count, 0) = 0
-                AND COALESCE(arrival_metrics.candidate_package_count, 0) = 0
+                AND arrival_states.effective_arrival_status = 'PENDING'
                 """
             )
 
@@ -956,10 +1468,14 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         sync_parameters: dict[str, str | None] = {"sync_platform": platform}
         order_metrics_ctes = """
             canonical_receipts AS (
-                SELECT id, tracking_no_normalized
-                FROM receipt_events
-                WHERE evidence_status = 'READY'
-                  AND duplicate_of_receipt_id IS NULL
+                SELECT
+                    receipts.id,
+                    receipts.tracking_no_normalized,
+                    receipts.operator_user_id AS responsible_user_id,
+                    receipts.server_received_at AS responsibility_at
+                FROM receipt_events AS receipts
+                WHERE receipts.evidence_status = 'READY'
+                  AND receipts.duplicate_of_receipt_id IS NULL
             ),
             tracking_order_counts AS (
                 SELECT
@@ -1017,6 +1533,100 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                   ON receipts.tracking_no_normalized =
                      order_tracking.tracking_no_normalized
                 GROUP BY order_tracking.order_id
+            ),
+            order_receipt_candidates AS (
+                SELECT
+                    links.order_id AS order_id,
+                    receipts.responsible_user_id AS responsible_user_id,
+                    receipts.responsibility_at AS responsibility_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY links.order_id
+                        ORDER BY receipts.responsibility_at DESC, receipts.id DESC
+                    ) AS receipt_rank
+                FROM canonical_receipts AS receipts
+                JOIN packages AS receipt_packages
+                  ON receipt_packages.tracking_no_normalized =
+                     receipts.tracking_no_normalized
+                JOIN package_order_links AS links
+                  ON links.package_id = receipt_packages.id
+            ),
+            latest_order_receipts AS (
+                SELECT order_id, responsible_user_id, responsibility_at
+                FROM order_receipt_candidates
+                WHERE receipt_rank = 1
+            ),
+            order_evidence_states AS (
+                SELECT
+                    state_orders.id AS order_id,
+                    state_orders.order_status AS order_status,
+                    state_orders.updated_at AS order_updated_at,
+                    COALESCE(metrics.package_count, 0) AS package_count,
+                    COALESCE(metrics.arrived_package_count, 0)
+                        AS arrived_package_count,
+                    COALESCE(metrics.candidate_package_count, 0)
+                        AS candidate_package_count,
+                    COALESCE(metrics.arrival_photo_count, 0)
+                        AS arrival_photo_count,
+                    COALESCE(metrics.candidate_photo_count, 0)
+                        AS candidate_photo_count,
+                    CASE
+                        WHEN COALESCE(metrics.package_count, 0) > 0
+                         AND COALESCE(metrics.arrived_package_count, 0) >=
+                             COALESCE(metrics.package_count, 0)
+                        THEN 'RECEIVED'
+                        WHEN (
+                            COALESCE(metrics.arrived_package_count, 0) > 0
+                            AND COALESCE(metrics.arrived_package_count, 0) <
+                                COALESCE(metrics.package_count, 0)
+                        ) OR COALESCE(metrics.candidate_package_count, 0) > 0
+                        THEN 'REVIEW'
+                        ELSE 'PENDING'
+                    END AS evidence_arrival_status
+                FROM purchase_orders AS state_orders
+                LEFT JOIN order_arrival_metrics AS metrics
+                  ON metrics.order_id = state_orders.id
+            ),
+            order_arrival_states AS (
+                SELECT
+                    evidence.*,
+                    CASE
+                        WHEN UPPER(TRIM(evidence.order_status))
+                             IN ('CANCELLED', 'REFUNDED')
+                        THEN 'CLOSED'
+                        ELSE COALESCE(
+                            overrides.status,
+                            evidence.evidence_arrival_status
+                        )
+                    END AS effective_arrival_status,
+                    CASE
+                        WHEN UPPER(TRIM(evidence.order_status))
+                             IN ('CANCELLED', 'REFUNDED')
+                        THEN 'AUTO'
+                        WHEN overrides.order_id IS NULL THEN 'AUTO'
+                        ELSE 'MANUAL'
+                    END AS arrival_source,
+                    COALESCE(overrides.revision, 0) AS manual_revision,
+                    CASE
+                        WHEN UPPER(TRIM(evidence.order_status))
+                             IN ('CANCELLED', 'REFUNDED')
+                        THEN NULL
+                        WHEN overrides.order_id IS NULL
+                        THEN latest_receipts.responsible_user_id
+                        ELSE overrides.actor_user_id
+                    END AS responsible_user_id,
+                    CASE
+                        WHEN UPPER(TRIM(evidence.order_status))
+                             IN ('CANCELLED', 'REFUNDED')
+                        THEN evidence.order_updated_at
+                        WHEN overrides.order_id IS NULL
+                        THEN latest_receipts.responsibility_at
+                        ELSE overrides.changed_at
+                    END AS changed_at
+                FROM order_evidence_states AS evidence
+                LEFT JOIN order_arrival_overrides AS overrides
+                  ON overrides.order_id = evidence.order_id
+                LEFT JOIN latest_order_receipts AS latest_receipts
+                  ON latest_receipts.order_id = evidence.order_id
             )
         """
         with _database(request).connect() as connection:
@@ -1082,8 +1692,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 FROM purchase_orders AS orders
                 JOIN platform_accounts AS accounts
                   ON accounts.id = orders.platform_account_id
-                LEFT JOIN order_arrival_metrics AS arrival_metrics
-                  ON arrival_metrics.order_id = orders.id
+                JOIN order_arrival_states AS arrival_states
+                  ON arrival_states.order_id = orders.id
                 WHERE {where_sql}
                 """,
                 parameters,
@@ -1105,20 +1715,30 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                     orders.order_status AS order_status,
                     orders.shop_name AS shop_name,
                     orders.source AS source,
-                    COALESCE(arrival_metrics.package_count, 0) AS package_count,
-                    COALESCE(arrival_metrics.arrived_package_count, 0)
-                        AS arrived_package_count,
-                    COALESCE(arrival_metrics.candidate_package_count, 0)
-                        AS candidate_package_count,
-                    COALESCE(arrival_metrics.arrival_photo_count, 0)
-                        AS arrival_photo_count,
-                    COALESCE(arrival_metrics.candidate_photo_count, 0)
-                        AS candidate_photo_count
+                    arrival_states.package_count AS package_count,
+                    arrival_states.arrived_package_count AS arrived_package_count,
+                    arrival_states.candidate_package_count AS candidate_package_count,
+                    arrival_states.arrival_photo_count AS arrival_photo_count,
+                    arrival_states.candidate_photo_count AS candidate_photo_count,
+                    arrival_states.evidence_arrival_status
+                        AS evidence_arrival_status,
+                    arrival_states.effective_arrival_status
+                        AS effective_arrival_status,
+                    arrival_states.arrival_source AS arrival_source,
+                    arrival_states.manual_revision AS manual_revision,
+                    arrival_states.changed_at AS changed_at,
+                    responsible.id AS responsible_user_id,
+                    responsible.username AS responsible_username,
+                    responsible.display_name AS responsible_display_name,
+                    responsible.role AS responsible_role,
+                    responsible.is_active AS responsible_is_active
                 FROM purchase_orders AS orders
                 JOIN platform_accounts AS accounts
                   ON accounts.id = orders.platform_account_id
-                LEFT JOIN order_arrival_metrics AS arrival_metrics
-                  ON arrival_metrics.order_id = orders.id
+                JOIN order_arrival_states AS arrival_states
+                  ON arrival_states.order_id = orders.id
+                LEFT JOIN users AS responsible
+                  ON responsible.id = arrival_states.responsible_user_id
                 WHERE {where_sql}
                 ORDER BY orders.ordered_at DESC, orders.id DESC
                 LIMIT :limit OFFSET :offset
@@ -1264,6 +1884,22 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                     candidate_package_count=row["candidate_package_count"],
                     arrival_photo_count=row["arrival_photo_count"],
                     candidate_photo_count=row["candidate_photo_count"],
+                    effective_arrival_status=row["effective_arrival_status"],
+                    evidence_arrival_status=row["evidence_arrival_status"],
+                    arrival_source=row["arrival_source"],
+                    responsible_user=(
+                        UserOut(
+                            id=row["responsible_user_id"],
+                            username=row["responsible_username"],
+                            display_name=row["responsible_display_name"],
+                            role=row["responsible_role"],
+                            is_active=bool(row["responsible_is_active"]),
+                        )
+                        if row["responsible_user_id"] is not None
+                        else None
+                    ),
+                    manual_revision=row["manual_revision"],
+                    changed_at=row["changed_at"],
                 )
                 for row in order_rows
             ],
@@ -1271,6 +1907,206 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             limit=limit,
             offset=offset,
             last_synced_at=last_synced_at,
+        )
+
+    @application.patch(
+        "/api/orders/{order_id}/arrival-status",
+        response_model=OrderArrivalStateOut,
+    )
+    def update_order_arrival_status(
+        order_id: int,
+        payload: OrderArrivalStatusUpdate,
+        request: Request,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> OrderArrivalStateOut:
+        client_event_id = _validate_form_text(
+            "client_event_id", payload.client_event_id, minimum=8, maximum=128
+        )
+        reason = payload.reason.strip() if payload.reason is not None else None
+        reason = reason or None
+        database = _database(request)
+        with database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay = connection.execute(
+                """
+                SELECT
+                    id, order_id, new_override_status, reason,
+                    previous_revision, new_revision
+                FROM order_arrival_events
+                WHERE client_event_id = ?
+                """,
+                (client_event_id,),
+            ).fetchone()
+            if replay is not None:
+                if (
+                    replay["order_id"] != order_id
+                    or replay["new_override_status"] != payload.status
+                    or replay["reason"] != reason
+                    or replay["previous_revision"] != payload.expected_revision
+                ):
+                    connection.rollback()
+                    raise HTTPException(
+                        status_code=409,
+                        detail="client_event_id was already used for another change",
+                    )
+                state_out = _fetch_order_arrival_state(
+                    connection,
+                    order_id,
+                    audit_event_id=replay["id"],
+                    idempotent_replay=True,
+                )
+                if state_out is None:
+                    connection.rollback()
+                    raise HTTPException(status_code=404, detail="order not found")
+                if state_out.manual_revision != replay["new_revision"]:
+                    connection.rollback()
+                    raise HTTPException(
+                        status_code=409,
+                        detail="order changed after the original request; refresh before retrying",
+                    )
+                if state_out.effective_arrival_status == "CLOSED":
+                    connection.rollback()
+                    raise HTTPException(
+                        status_code=409,
+                        detail="closed orders cannot be manually marked as received or pending",
+                    )
+                connection.rollback()
+                return state_out
+
+            current = _fetch_order_arrival_state(connection, order_id)
+            if current is None:
+                connection.rollback()
+                raise HTTPException(status_code=404, detail="order not found")
+            if current.effective_arrival_status == "CLOSED":
+                connection.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="closed orders cannot be manually marked as received or pending",
+                )
+            if current.manual_revision != payload.expected_revision:
+                connection.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "arrival status changed concurrently; reload the order "
+                        f"(current revision {current.manual_revision})"
+                    ),
+                )
+
+            previous_override = connection.execute(
+                """
+                SELECT status, revision
+                FROM order_arrival_overrides WHERE order_id = ?
+                """,
+                (order_id,),
+            ).fetchone()
+            previous_override_status = (
+                previous_override["status"] if previous_override is not None else None
+            )
+            new_revision = current.manual_revision + 1
+            changed_at = db_timestamp(utc_now())
+            connection.execute(
+                """
+                INSERT INTO order_arrival_overrides(
+                    order_id, status, revision, actor_user_id, reason, changed_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(order_id) DO UPDATE SET
+                    status = excluded.status,
+                    revision = excluded.revision,
+                    actor_user_id = excluded.actor_user_id,
+                    reason = excluded.reason,
+                    changed_at = excluded.changed_at
+                """,
+                (
+                    order_id,
+                    payload.status,
+                    new_revision,
+                    user.id,
+                    reason,
+                    changed_at,
+                ),
+            )
+            cursor = connection.execute(
+                """
+                INSERT INTO order_arrival_events(
+                    client_event_id, order_id, actor_user_id, action,
+                    previous_effective_status, new_effective_status,
+                    previous_override_status, new_override_status,
+                    previous_revision, new_revision, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    client_event_id,
+                    order_id,
+                    user.id,
+                    "MARK_RECEIVED" if payload.status == "RECEIVED" else "MARK_PENDING",
+                    current.effective_arrival_status,
+                    payload.status,
+                    previous_override_status,
+                    payload.status,
+                    current.manual_revision,
+                    new_revision,
+                    reason,
+                    changed_at,
+                ),
+            )
+            audit_event_id = cursor.lastrowid
+            connection.commit()
+            state_out = _fetch_order_arrival_state(
+                connection,
+                order_id,
+                audit_event_id=audit_event_id,
+            )
+        if state_out is None:
+            raise HTTPException(status_code=404, detail="order not found")
+        return state_out
+
+    @application.get(
+        "/api/orders/{order_id}/arrival-history",
+        response_model=OrderArrivalAuditListResponse,
+    )
+    def order_arrival_history(
+        order_id: int,
+        request: Request,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> OrderArrivalAuditListResponse:
+        del user
+        with _database(request).connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM purchase_orders WHERE id = ?", (order_id,)
+            ).fetchone()
+            if exists is None:
+                raise HTTPException(status_code=404, detail="order not found")
+            total = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM order_arrival_events WHERE order_id = ?
+                """,
+                (order_id,),
+            ).fetchone()["count"]
+            rows = connection.execute(
+                """
+                SELECT
+                    events.*,
+                    actors.username AS actor_username,
+                    actors.display_name AS actor_display_name,
+                    actors.role AS actor_role,
+                    actors.is_active AS actor_is_active
+                FROM order_arrival_events AS events
+                JOIN users AS actors ON actors.id = events.actor_user_id
+                WHERE events.order_id = ?
+                ORDER BY events.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (order_id, limit, offset),
+            ).fetchall()
+        return OrderArrivalAuditListResponse(
+            items=[_arrival_audit_from_row(row) for row in rows],
+            total=total,
+            limit=limit,
+            offset=offset,
         )
 
     @application.post(
@@ -1448,29 +2284,102 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         request: Request,
         user: Annotated[AuthenticatedUser, Depends(require_user)],
     ) -> ReceiptOut:
-        del user
         tracking_no = payload.tracking_no.strip()
         normalized = normalize_tracking_no(tracking_no)
         if not normalized:
             raise HTTPException(status_code=422, detail="tracking_no has no letters or digits")
+        expected_tracking_no = payload.expected_tracking_no
+        client_event_id = _validate_form_text(
+            "client_event_id",
+            payload.client_event_id,
+            minimum=8,
+            maximum=128,
+        )
         with _database(request).connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            replay = connection.execute(
+                """
+                SELECT id, receipt_id, previous_tracking_no, new_tracking_no
+                FROM receipt_change_events WHERE client_event_id = ?
+                """,
+                (client_event_id,),
+            ).fetchone()
+            if replay is not None:
+                if (
+                    replay["receipt_id"] != receipt_id
+                    or replay["previous_tracking_no"] != expected_tracking_no
+                    or replay["new_tracking_no"] != tracking_no
+                ):
+                    connection.rollback()
+                    raise HTTPException(
+                        status_code=409,
+                        detail="client_event_id was already used for another change",
+                    )
+                row = _fetch_receipt(connection, receipt_id=receipt_id)
+                if row is None:
+                    connection.rollback()
+                    raise HTTPException(status_code=404, detail="receipt not found")
+                if row["tracking_no"] != replay["new_tracking_no"]:
+                    connection.rollback()
+                    raise HTTPException(
+                        status_code=409,
+                        detail="tracking number changed after the original request; refresh before retrying",
+                    )
+                connection.rollback()
+                return _receipt_from_row(connection, row)
             previous = connection.execute(
-                "SELECT tracking_no_normalized FROM receipt_events WHERE id = ?",
+                """
+                SELECT tracking_no, tracking_no_normalized
+                FROM receipt_events WHERE id = ?
+                """,
                 (receipt_id,),
             ).fetchone()
             if previous is None:
+                connection.rollback()
                 raise HTTPException(status_code=404, detail="receipt not found")
+            if previous["tracking_no"] != expected_tracking_no:
+                connection.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="tracking number changed; refresh before retrying",
+                )
+            changed_at = db_timestamp(utc_now())
             cursor = connection.execute(
                 """
                 UPDATE receipt_events
                 SET tracking_no = ?, tracking_no_normalized = ?, updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND tracking_no IS ?
                 """,
-                (tracking_no, normalized, db_timestamp(utc_now()), receipt_id),
+                (
+                    tracking_no,
+                    normalized,
+                    changed_at,
+                    receipt_id,
+                    expected_tracking_no,
+                ),
             )
             if cursor.rowcount == 0:
-                raise HTTPException(status_code=404, detail="receipt not found")
+                connection.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="tracking number changed; refresh before retrying",
+                )
+            connection.execute(
+                """
+                INSERT INTO receipt_change_events(
+                    client_event_id, receipt_id, actor_user_id, action,
+                    previous_tracking_no, new_tracking_no, created_at
+                ) VALUES (?, ?, ?, 'TRACKING_UPDATE', ?, ?, ?)
+                """,
+                (
+                    client_event_id,
+                    receipt_id,
+                    user.id,
+                    previous["tracking_no"],
+                    tracking_no,
+                    changed_at,
+                ),
+            )
             recompute_tracking_duplicates(
                 connection, previous["tracking_no_normalized"]
             )

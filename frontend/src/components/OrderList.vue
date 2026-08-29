@@ -1,6 +1,9 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { OrderArrivalFilter, OrderPlatformFilter, PurchaseOrder } from '@/types'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ApiError, updateOrderArrivalStatus } from '@/services/api'
+import type { ManualArrivalStatus, OrderArrivalFilter, OrderPlatformFilter, PurchaseOrder } from '@/types'
+import { formatDateTime } from '@/utils/format'
+import { createId } from '@/utils/id'
 
 const props = defineProps<{
   orders: PurchaseOrder[]
@@ -20,6 +23,8 @@ const emit = defineEmits<{
   search: [query: string, platform: OrderPlatformFilter, arrivalStatus: OrderArrivalFilter]
   refresh: []
   page: [offset: number]
+  manualChanged: [order: PurchaseOrder]
+  authRequired: []
 }>()
 
 const draftQuery = ref(props.query)
@@ -27,6 +32,10 @@ const draftPlatform = ref<OrderPlatformFilter>(props.platform)
 const draftArrivalStatus = ref<OrderArrivalFilter>(props.arrivalStatus)
 const expandedOrders = ref<Set<string>>(new Set())
 const freshnessNow = ref(Date.now())
+const pendingCorrection = ref<{ order: PurchaseOrder; status: ManualArrivalStatus; clientEventId: string } | null>(null)
+const savingOrderId = ref<string | null>(null)
+const actionErrors = ref<Record<string, string>>({})
+const confirmationDialog = ref<HTMLElement | null>(null)
 let freshnessTimer: ReturnType<typeof setInterval> | undefined
 
 onMounted(() => {
@@ -117,6 +126,22 @@ function hiddenDetailsLabel(order: PurchaseOrder): string {
 }
 
 function arrivalSummary(order: PurchaseOrder): ArrivalSummary {
+  const normalizedOrderStatus = order.order_status.trim().toUpperCase()
+  if (order.effective_arrival_status === 'CLOSED' || normalizedOrderStatus === 'CANCELLED' || normalizedOrderStatus === 'REFUNDED') {
+    return {
+      tone: 'closed',
+      label: '无需收货',
+      detail: normalizedOrderStatus === 'CANCELLED' ? '订单已取消' : '退款或售后',
+    }
+  }
+  if (order.arrival_source === 'MANUAL') {
+    if (order.effective_arrival_status === 'RECEIVED') {
+      return { tone: 'received', label: '已收货', detail: '人工确认' }
+    }
+    if (order.effective_arrival_status === 'PENDING') {
+      return { tone: 'pending', label: '未收货', detail: '人工撤销' }
+    }
+  }
   const total = order.package_count
   const arrived = order.arrived_package_count
   if (total > 0 && arrived >= total) {
@@ -141,18 +166,84 @@ function arrivalSummary(order: PurchaseOrder): ArrivalSummary {
       detail: `${order.candidate_package_count} 个包裹照片待确认`,
     }
   }
-  const normalizedOrderStatus = order.order_status.trim().toUpperCase()
-  if (normalizedOrderStatus === 'CANCELLED' || normalizedOrderStatus === 'REFUNDED') {
-    return {
-      tone: 'closed',
-      label: '无需收货',
-      detail: normalizedOrderStatus === 'CANCELLED' ? '订单已取消' : '退款或售后',
-    }
-  }
   return {
     tone: 'pending',
     label: '未收货',
     detail: total > 0 ? `0/${total} 个包裹` : '物流待同步',
+  }
+}
+
+function isClosed(order: PurchaseOrder): boolean {
+  const status = order.order_status.trim().toUpperCase()
+  return status === 'CANCELLED' || status === 'REFUNDED' || order.effective_arrival_status === 'CLOSED'
+}
+
+function nextCorrectionStatus(order: PurchaseOrder): ManualArrivalStatus {
+  return arrivalSummary(order).tone === 'received' ? 'PENDING' : 'RECEIVED'
+}
+
+function correctionButtonLabel(order: PurchaseOrder): string {
+  return nextCorrectionStatus(order) === 'RECEIVED' ? '人工标记已收货' : '人工撤销收货'
+}
+
+function correctionAuditLabel(order: PurchaseOrder): string {
+  return order.effective_arrival_status === 'RECEIVED' ? '人工确认收货' : '人工撤销收货'
+}
+
+function responsibleName(order: PurchaseOrder): string {
+  return order.responsible_user?.display_name || '操作人待同步'
+}
+
+async function askCorrection(order: PurchaseOrder): Promise<void> {
+  if (isClosed(order) || savingOrderId.value !== null) return
+  pendingCorrection.value = { order, status: nextCorrectionStatus(order), clientEventId: createId() }
+  delete actionErrors.value[order.id]
+  await nextTick()
+  confirmationDialog.value?.focus()
+}
+
+function closeCorrection(): void {
+  if (savingOrderId.value !== null) return
+  pendingCorrection.value = null
+}
+
+async function confirmCorrection(): Promise<void> {
+  const correction = pendingCorrection.value
+  if (!correction || savingOrderId.value !== null) return
+  const orderId = correction.order.id
+  savingOrderId.value = orderId
+  delete actionErrors.value[orderId]
+  try {
+    const update = await updateOrderArrivalStatus(
+      orderId,
+      correction.status,
+      correction.order.manual_revision ?? 0,
+      correction.clientEventId,
+    )
+    const updated: PurchaseOrder = {
+      ...correction.order,
+      effective_arrival_status: update.effective_arrival_status,
+      evidence_arrival_status: update.evidence_arrival_status,
+      arrival_source: update.arrival_source,
+      responsible_user: update.responsible_user,
+      manual_revision: update.manual_revision,
+      changed_at: update.changed_at,
+    }
+    pendingCorrection.value = null
+    emit('manualChanged', updated)
+  } catch (reason) {
+    if (reason instanceof ApiError && reason.status === 401) {
+      pendingCorrection.value = null
+      emit('authRequired')
+    } else if (reason instanceof ApiError && reason.status === 409) {
+      actionErrors.value[orderId] = '订单状态已被其他人修改，请刷新后重试。'
+      pendingCorrection.value = null
+      emit('refresh')
+    } else {
+      actionErrors.value[orderId] = reason instanceof Error ? reason.message : '人工纠正保存失败，请重试。'
+    }
+  } finally {
+    savingOrderId.value = null
   }
 }
 
@@ -318,6 +409,31 @@ function applyArrivalStatus(arrivalStatus: OrderArrivalFilter): void {
           <p v-else class="order-section-empty">暂无物流信息</p>
         </section>
 
+        <footer class="manual-correction-row">
+          <p v-if="order.arrival_source === 'MANUAL'" class="order-audit-line">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h4" /></svg>
+            <span>
+              {{ correctionAuditLabel(order) }} · {{ responsibleName(order) }}<template v-if="order.changed_at"> · {{ formatDateTime(order.changed_at) }}</template>
+            </span>
+          </p>
+          <p v-else-if="order.responsible_user" class="order-audit-line">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7.5h3l1.5-2h7l1.5 2h3v11H4Z" /><circle cx="12" cy="13" r="3" /></svg>
+            <span>照片凭证 · 拍摄人 {{ responsibleName(order) }}<template v-if="order.changed_at"> · {{ formatDateTime(order.changed_at) }}</template></span>
+          </p>
+          <button
+            v-if="!isClosed(order)"
+            class="manual-correction-button"
+            :class="{ undo: nextCorrectionStatus(order) === 'PENDING' }"
+            type="button"
+            :disabled="savingOrderId !== null || !online"
+            @click="askCorrection(order)"
+          >
+            <span v-if="savingOrderId === order.id" class="spinner" aria-hidden="true"></span>
+            {{ savingOrderId === order.id ? '保存中…' : correctionButtonLabel(order) }}
+          </button>
+          <p v-if="actionErrors[order.id]" class="order-action-error" role="alert">{{ actionErrors[order.id] }}</p>
+        </footer>
+
       </article>
     </div>
 
@@ -333,5 +449,41 @@ function applyArrivalStatus(arrivalStatus: OrderArrivalFilter): void {
         <button type="button" :disabled="loading || !hasNext" @click="emit('page', offset + limit)">下一页</button>
       </div>
     </footer>
+
+    <div v-if="pendingCorrection" class="modal-backdrop" @click.self="closeCorrection">
+      <section
+        ref="confirmationDialog"
+        class="confirmation-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="order-correction-title"
+        tabindex="-1"
+        @keydown.esc="closeCorrection"
+      >
+        <span class="dialog-icon" :class="{ danger: pendingCorrection.status === 'PENDING' }" aria-hidden="true">
+          <svg v-if="pendingCorrection.status === 'RECEIVED'" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="m8 12 2.5 2.5L16 9" /></svg>
+          <svg v-else viewBox="0 0 24 24"><path d="M12 9v4m0 4h.01M4.9 19h14.2a2 2 0 0 0 1.73-3L13.73 3.7a2 2 0 0 0-3.46 0L3.17 16A2 2 0 0 0 4.9 19Z" /></svg>
+        </span>
+        <p class="eyebrow">人工纠正</p>
+        <h3 id="order-correction-title">{{ pendingCorrection.status === 'RECEIVED' ? '确认标记为已收货？' : '确认撤销收货状态？' }}</h3>
+        <p class="dialog-order-number">订单 {{ pendingCorrection.order.platform_order_id }}</p>
+        <p v-if="pendingCorrection.status === 'RECEIVED'">这会覆盖当前系统判断并标记整单已收货，不会新增或删除到货照片。</p>
+        <p v-else>这会覆盖当前系统判断并把整单改为未收货，已有到货照片仍会保留。</p>
+        <p class="dialog-accountability">系统将记录当前登录账号、操作时间和修改前后状态，可供之后追责和还原。</p>
+        <p v-if="actionErrors[pendingCorrection.order.id]" class="dialog-error" role="alert">{{ actionErrors[pendingCorrection.order.id] }}</p>
+        <div class="dialog-actions">
+          <button type="button" :disabled="savingOrderId !== null" @click="closeCorrection">取消</button>
+          <button
+            class="confirm"
+            :class="{ danger: pendingCorrection.status === 'PENDING' }"
+            type="button"
+            :disabled="savingOrderId !== null"
+            @click="confirmCorrection"
+          >
+            {{ savingOrderId !== null ? '保存中…' : pendingCorrection.status === 'RECEIVED' ? '确认已收货' : '确认撤销' }}
+          </button>
+        </div>
+      </section>
+    </div>
   </section>
 </template>

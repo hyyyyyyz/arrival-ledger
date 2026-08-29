@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from test_sync_api import batch_payload, post_batch
 
 
 def login(client: TestClient) -> None:
@@ -177,7 +179,221 @@ def test_photo_read_and_tracking_patch(
 
     patched = authenticated_client.patch(
         f"/api/receipts/{receipt['id']}/tracking",
-        json={"tracking_no": "  ZTO-9988  "},
+        json={
+            "tracking_no": "  ZTO-9988  ",
+            "expected_tracking_no": None,
+            "client_event_id": "tracking-change-patch-0001",
+        },
     )
     assert patched.status_code == 200
     assert patched.json()["tracking_no"] == "ZTO-9988"
+
+
+def test_receipt_tracking_change_keeps_photographer_and_audits_modifier(
+    authenticated_client: TestClient,
+    jpeg_bytes: bytes,
+    sync_headers: dict[str, str],
+) -> None:
+    order_payload = batch_payload("batch-tracking-responsibility-0001")
+    order_payload["orders"][0]["platform_order_id"] = "TRACKING-RESPONSIBILITY-ORDER"
+    order_payload["orders"][0]["packages"] = [
+        {
+            "courier": "圆通速递",
+            "tracking_no": "YT-NEW-002",
+            "status": "SHIPPED",
+        }
+    ]
+    assert post_batch(authenticated_client, order_payload, sync_headers).status_code == 200
+
+    created_user = authenticated_client.post(
+        "/api/users",
+        json={
+            "username": "tracking.receiver",
+            "display_name": "运单修正员",
+            "password": "Tracking-Strong-2026!",
+            "role": "RECEIVER",
+        },
+    )
+    assert created_user.status_code == 201
+    receipt = authenticated_client.post(
+        "/api/receipts",
+        data=receipt_form("event-tracking-audit-0001", "SF-OLD-001"),
+        files={"photo": ("parcel.jpg", jpeg_bytes, "image/jpeg")},
+    ).json()["receipt"]
+    assert receipt["operator"]["username"] == "admin"
+    assert receipt["last_modified_by"] is None
+
+    authenticated_client.post("/api/auth/logout")
+    assert authenticated_client.post(
+        "/api/auth/login",
+        json={
+            "username": "tracking.receiver",
+            "password": "Tracking-Strong-2026!",
+        },
+    ).status_code == 200
+    payload = {
+        "tracking_no": "YT-NEW-002",
+        "expected_tracking_no": "SF-OLD-001",
+        "client_event_id": "tracking-change-event-0001",
+    }
+    changed = authenticated_client.patch(
+        f"/api/receipts/{receipt['id']}/tracking", json=payload
+    )
+    assert changed.status_code == 200
+    changed_body = changed.json()
+    assert changed_body["operator"]["username"] == "admin"
+    assert changed_body["last_modified_by"]["username"] == "tracking.receiver"
+    assert changed_body["last_modified_at"] is not None
+
+    replay = authenticated_client.patch(
+        f"/api/receipts/{receipt['id']}/tracking", json=payload
+    )
+    assert replay.status_code == 200
+    reused = authenticated_client.patch(
+        f"/api/receipts/{receipt['id']}/tracking",
+        json={**payload, "tracking_no": "ZTO-OTHER-003"},
+    )
+    assert reused.status_code == 409
+    listed = authenticated_client.get("/api/receipts").json()["items"][0]
+    assert listed["operator"]["username"] == "admin"
+    assert listed["last_modified_by"]["username"] == "tracking.receiver"
+    order = authenticated_client.get(
+        "/api/orders", params={"query": "TRACKING-RESPONSIBILITY-ORDER"}
+    ).json()["items"][0]
+    assert order["effective_arrival_status"] == "RECEIVED"
+    assert order["arrival_source"] == "AUTO"
+    assert order["responsible_user"]["username"] == "admin"
+    assert order["changed_at"] == receipt["server_received_at"]
+    with authenticated_client.app.state.database.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS count FROM receipt_change_events"
+        ).fetchone()["count"] == 1
+
+
+def test_tracking_update_rejects_stale_expected_value_and_supports_safe_replay(
+    authenticated_client: TestClient,
+    jpeg_bytes: bytes,
+) -> None:
+    receipt = authenticated_client.post(
+        "/api/receipts",
+        data=receipt_form("event-tracking-lock-0001", "SF-LOCK-001"),
+        files={"photo": ("parcel.jpg", jpeg_bytes, "image/jpeg")},
+    ).json()["receipt"]
+    first_payload = {
+        "tracking_no": "YT-LOCK-002",
+        "expected_tracking_no": "SF-LOCK-001",
+        "client_event_id": "tracking-lock-change-0001",
+    }
+    first = authenticated_client.patch(
+        f"/api/receipts/{receipt['id']}/tracking",
+        json=first_payload,
+    )
+    assert first.status_code == 200
+    assert first.json()["tracking_no"] == "YT-LOCK-002"
+
+    stale = authenticated_client.patch(
+        f"/api/receipts/{receipt['id']}/tracking",
+        json={
+            "tracking_no": "ZTO-LOCK-003",
+            "expected_tracking_no": "SF-LOCK-001",
+            "client_event_id": "tracking-lock-change-0002",
+        },
+    )
+    assert stale.status_code == 409
+    assert authenticated_client.get("/api/receipts").json()["items"][0][
+        "tracking_no"
+    ] == "YT-LOCK-002"
+
+    replay = authenticated_client.patch(
+        f"/api/receipts/{receipt['id']}/tracking",
+        json=first_payload,
+    )
+    assert replay.status_code == 200
+    assert replay.json()["tracking_no"] == "YT-LOCK-002"
+    conflicting_replay = authenticated_client.patch(
+        f"/api/receipts/{receipt['id']}/tracking",
+        json={**first_payload, "expected_tracking_no": None},
+    )
+    assert conflicting_replay.status_code == 409
+
+    second = authenticated_client.patch(
+        f"/api/receipts/{receipt['id']}/tracking",
+        json={
+            "tracking_no": "ZTO-LOCK-003",
+            "expected_tracking_no": "YT-LOCK-002",
+            "client_event_id": "tracking-lock-change-0003",
+        },
+    )
+    assert second.status_code == 200
+    superseded_replay = authenticated_client.patch(
+        f"/api/receipts/{receipt['id']}/tracking",
+        json=first_payload,
+    )
+    assert superseded_replay.status_code == 409
+
+    missing_contract = authenticated_client.patch(
+        f"/api/receipts/{receipt['id']}/tracking",
+        json={"tracking_no": "ZTO-LOCK-003"},
+    )
+    assert missing_contract.status_code == 422
+    with authenticated_client.app.state.database.connect() as connection:
+        events = connection.execute(
+            """
+            SELECT previous_tracking_no, new_tracking_no
+            FROM receipt_change_events WHERE receipt_id = ?
+            ORDER BY id
+            """,
+            (receipt["id"],),
+        ).fetchall()
+    assert [tuple(event) for event in events] == [
+        ("SF-LOCK-001", "YT-LOCK-002"),
+        ("YT-LOCK-002", "ZTO-LOCK-003"),
+    ]
+
+
+def test_concurrent_tracking_corrections_allow_exactly_one_winner(
+    authenticated_client: TestClient,
+    jpeg_bytes: bytes,
+) -> None:
+    receipt = authenticated_client.post(
+        "/api/receipts",
+        data=receipt_form("event-tracking-race-0001", "SF-RACE-001"),
+        files={"photo": ("parcel.jpg", jpeg_bytes, "image/jpeg")},
+    ).json()["receipt"]
+
+    def correct(tracking_no: str, event_id: str):
+        return authenticated_client.patch(
+            f"/api/receipts/{receipt['id']}/tracking",
+            json={
+                "tracking_no": tracking_no,
+                "expected_tracking_no": "SF-RACE-001",
+                "client_event_id": event_id,
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(
+            executor.map(
+                lambda arguments: correct(*arguments),
+                (
+                    ("YT-RACE-002", "tracking-race-change-0001"),
+                    ("ZTO-RACE-003", "tracking-race-change-0002"),
+                ),
+            )
+        )
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    winner = next(
+        response.json()["tracking_no"]
+        for response in responses
+        if response.status_code == 200
+    )
+    listed = authenticated_client.get("/api/receipts").json()["items"][0]
+    assert listed["tracking_no"] == winner
+    with authenticated_client.app.state.database.connect() as connection:
+        assert connection.execute(
+            """
+            SELECT COUNT(*) AS count FROM receipt_change_events
+            WHERE receipt_id = ?
+            """,
+            (receipt["id"],),
+        ).fetchone()["count"] == 1

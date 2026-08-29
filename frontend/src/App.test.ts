@@ -18,6 +18,10 @@ describe('App order-tab behavior', () => {
     expect(tabs.pageTitle.value).toBe('采购订单')
     expect(activateOrders).toHaveBeenCalledTimes(1)
 
+    tabs.selectTab('people')
+    expect(tabs.pageTitle.value).toBe('人员管理')
+    expect(activateOrders).toHaveBeenCalledTimes(1)
+
     tabs.reset()
     expect(tabs.activeTab.value).toBe('capture')
   })

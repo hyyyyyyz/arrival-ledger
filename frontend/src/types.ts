@@ -3,6 +3,21 @@ export interface User {
   username: string
   display_name: string
   role?: 'ADMIN' | 'RECEIVER' | string
+  is_active?: boolean
+  created_at?: string | null
+  last_login_at?: string | null
+}
+
+export interface ManagedUser extends User {
+  role: 'ADMIN' | 'RECEIVER'
+  is_active: boolean
+}
+
+export interface CreateUserInput {
+  username: string
+  display_name: string
+  password: string
+  role: 'ADMIN' | 'RECEIVER'
 }
 
 export interface AuthSession {
@@ -53,9 +68,18 @@ export interface Receipt {
   platform?: string | null
   operator_display_name?: string | null
   operator?: { display_name?: string | null } | null
+  last_modified_at?: string | null
+  last_modified_by?: { display_name?: string | null } | null
   is_duplicate?: boolean
   duplicate_of?: Receipt | null
   order_matches?: OrderMatch[]
+}
+
+export interface ReceiptTrackingUpdateInput {
+  receiptId: string | number
+  trackingNo: string
+  expectedTrackingNo: string | null
+  clientEventId: string
 }
 
 export type BarcodeState = 'PROCESSING' | 'FOUND' | 'NOT_FOUND' | 'MANUAL'
@@ -132,6 +156,26 @@ export interface PurchaseOrder {
   arrival_photo_count: number
   candidate_package_count: number
   candidate_photo_count: number
+  effective_arrival_status?: 'PENDING' | 'REVIEW' | 'RECEIVED' | 'CLOSED'
+  evidence_arrival_status?: 'PENDING' | 'REVIEW' | 'RECEIVED'
+  arrival_source?: 'AUTO' | 'MANUAL'
+  responsible_user?: User | null
+  manual_revision?: number
+  changed_at?: string | null
+}
+
+export type ManualArrivalStatus = 'RECEIVED' | 'PENDING'
+
+export interface ManualArrivalUpdate {
+  order_id: string
+  effective_arrival_status: 'PENDING' | 'REVIEW' | 'RECEIVED' | 'CLOSED'
+  evidence_arrival_status: 'PENDING' | 'REVIEW' | 'RECEIVED'
+  arrival_source: 'AUTO' | 'MANUAL'
+  responsible_user: User | null
+  manual_revision: number
+  changed_at: string | null
+  audit_event_id: string | number | null
+  idempotent_replay: boolean
 }
 
 export interface OrderListResponse {

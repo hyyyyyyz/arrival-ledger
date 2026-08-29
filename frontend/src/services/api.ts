@@ -1,6 +1,10 @@
 import type {
   AuthSession,
+  CreateUserInput,
   DashboardStats,
+  ManagedUser,
+  ManualArrivalUpdate,
+  ManualArrivalStatus,
   OrderListParams,
   OrderListResponse,
   Receipt,
@@ -80,6 +84,10 @@ function unwrapReceipt(payload: Receipt | { receipt: Receipt }): Receipt {
   return 'receipt' in payload ? payload.receipt : payload
 }
 
+function unwrapUser(payload: ManagedUser | { user: ManagedUser }): ManagedUser {
+  return 'user' in payload ? payload.user : payload
+}
+
 export async function login(username: string, password: string): Promise<AuthSession> {
   const payload = await request<AuthPayload>('/auth/login', {
     method: 'POST',
@@ -119,6 +127,52 @@ export async function listOrders(params: OrderListParams = {}): Promise<OrderLis
   return request<OrderListResponse>(`/orders?${search.toString()}`)
 }
 
+export async function updateOrderArrivalStatus(
+  orderId: string,
+  status: ManualArrivalStatus,
+  expectedRevision: number,
+  clientEventId: string,
+): Promise<ManualArrivalUpdate> {
+  return request<ManualArrivalUpdate>(
+    `/orders/${encodeURIComponent(orderId)}/arrival-status`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status,
+        expected_revision: expectedRevision,
+        client_event_id: clientEventId,
+      }),
+    },
+  )
+}
+
+export async function listUsers(): Promise<ManagedUser[]> {
+  const payload = await request<ManagedUser[] | { items: ManagedUser[] }>('/users')
+  return Array.isArray(payload) ? payload : payload.items
+}
+
+export async function createUser(input: CreateUserInput): Promise<ManagedUser> {
+  const payload = await request<ManagedUser | { user: ManagedUser }>('/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  return unwrapUser(payload)
+}
+
+export async function setUserActive(userId: string | number, isActive: boolean): Promise<ManagedUser> {
+  const payload = await request<ManagedUser | { user: ManagedUser }>(
+    `/users/${encodeURIComponent(String(userId))}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_active: isActive }),
+    },
+  )
+  return unwrapUser(payload)
+}
+
 export async function createReceipt(item: UploadQueueItem): Promise<Receipt> {
   const body = new FormData()
   body.append('client_event_id', item.clientEventId)
@@ -135,11 +189,20 @@ export async function createReceipt(item: UploadQueueItem): Promise<Receipt> {
   return unwrapReceipt(payload)
 }
 
-export async function updateReceiptTracking(receiptId: string | number, trackingNo: string): Promise<Receipt> {
+export async function updateReceiptTracking(
+  receiptId: string | number,
+  trackingNo: string,
+  expectedTrackingNo: string | null,
+  clientEventId: string,
+): Promise<Receipt> {
   const payload = await request<Receipt | { receipt: Receipt }>(`/receipts/${receiptId}/tracking`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tracking_no: trackingNo }),
+    body: JSON.stringify({
+      tracking_no: trackingNo,
+      expected_tracking_no: expectedTrackingNo,
+      client_event_id: clientEventId,
+    }),
   })
   return unwrapReceipt(payload)
 }

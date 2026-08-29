@@ -26,7 +26,7 @@ npm run build
 - `GET /api/receipts?limit=80`：返回数组或 `{ items: [] }`；
 - `GET /api/orders?limit=20&offset=0&query=&platform=`：分页查询已同步采购订单，不直接访问采购平台；
 - `POST /api/receipts`：multipart，字段为 `client_event_id`、`captured_at`、`input_method`、`device_id`、可选 `tracking_no` 和必填 `photo`；
-- `PATCH /api/receipts/:id/tracking`：JSON `{ tracking_no }`；
+- `PATCH /api/receipts/:id/tracking`：JSON `{ tracking_no, expected_tracking_no, client_event_id }`；同一次用户修改在网络重试时必须复用 `client_event_id`，`409` 后刷新记录再由用户确认重试；
 - `GET /api/receipts/:id/photo`：鉴权后的图片响应。
 
 前端兼容 API 将用户/收货响应直接返回，或分别包装为 `{ user }` / `{ receipt }` 的形式。

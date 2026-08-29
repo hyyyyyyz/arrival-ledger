@@ -3,12 +3,22 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _validate_bcrypt_password_bytes(value: str) -> str:
+    if len(value.encode("utf-8")) > 72:
+        raise ValueError("password must not exceed 72 UTF-8 bytes")
+    return value
 
 
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
+
+    _password_fits_bcrypt = field_validator("password")(
+        _validate_bcrypt_password_bytes
+    )
 
 
 class UserOut(BaseModel):
@@ -16,6 +26,48 @@ class UserOut(BaseModel):
     username: str
     display_name: str
     role: Literal["ADMIN", "RECEIVER"]
+    is_active: bool = True
+    last_login_at: datetime | None = None
+
+
+class UserListResponse(BaseModel):
+    items: list[UserOut]
+    total: int = Field(ge=0)
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    display_name: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=12, max_length=256)
+    role: Literal["ADMIN", "RECEIVER"] = "RECEIVER"
+
+    _password_fits_bcrypt = field_validator("password")(
+        _validate_bcrypt_password_bytes
+    )
+
+
+class UserActivationUpdate(BaseModel):
+    is_active: bool
+
+
+class UserManagementAuditEventOut(BaseModel):
+    id: int
+    actor_user_id: int
+    actor_username: str
+    actor_display_name: str
+    target_user_id: int
+    target_username: str
+    target_display_name: str
+    target_role: Literal["ADMIN", "RECEIVER"]
+    action: Literal["CREATE", "ACTIVATE", "DEACTIVATE"]
+    created_at: datetime
+
+
+class UserManagementAuditListResponse(BaseModel):
+    items: list[UserManagementAuditEventOut]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
 
 
 class AuthResponse(BaseModel):
@@ -109,6 +161,48 @@ class PurchaseOrderPackageOut(BaseModel):
     arrived: bool
 
 
+class OrderArrivalStatusUpdate(BaseModel):
+    status: Literal["PENDING", "RECEIVED"]
+    expected_revision: int = Field(ge=0)
+    client_event_id: str = Field(min_length=8, max_length=128)
+    reason: str | None = Field(default=None, max_length=256)
+
+
+class OrderArrivalStateOut(BaseModel):
+    order_id: str
+    effective_arrival_status: Literal["PENDING", "REVIEW", "RECEIVED", "CLOSED"]
+    evidence_arrival_status: Literal["PENDING", "REVIEW", "RECEIVED"]
+    arrival_source: Literal["AUTO", "MANUAL"]
+    responsible_user: UserOut | None
+    manual_revision: int = Field(ge=0)
+    changed_at: datetime | None
+    audit_event_id: int | None = None
+    idempotent_replay: bool = False
+
+
+class OrderArrivalAuditEventOut(BaseModel):
+    id: int
+    client_event_id: str
+    order_id: str
+    actor: UserOut
+    action: Literal["MARK_RECEIVED", "MARK_PENDING"]
+    previous_effective_status: Literal["PENDING", "REVIEW", "RECEIVED"]
+    new_effective_status: Literal["PENDING", "RECEIVED"]
+    previous_override_status: Literal["PENDING", "RECEIVED"] | None
+    new_override_status: Literal["PENDING", "RECEIVED"]
+    previous_revision: int = Field(ge=0)
+    new_revision: int = Field(ge=1)
+    reason: str | None
+    created_at: datetime
+
+
+class OrderArrivalAuditListResponse(BaseModel):
+    items: list[OrderArrivalAuditEventOut]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
+
+
 class PurchaseOrderOut(BaseModel):
     id: str = Field(description="Stable internal purchase order identity")
     platform: Literal["pdd", "1688"]
@@ -131,6 +225,12 @@ class PurchaseOrderOut(BaseModel):
         ge=0,
         description="Canonical READY photos whose tracking number links to multiple orders",
     )
+    effective_arrival_status: Literal["PENDING", "REVIEW", "RECEIVED", "CLOSED"]
+    evidence_arrival_status: Literal["PENDING", "REVIEW", "RECEIVED"]
+    arrival_source: Literal["AUTO", "MANUAL"]
+    responsible_user: UserOut | None
+    manual_revision: int = Field(ge=0)
+    changed_at: datetime | None
 
 
 class PurchaseOrderListResponse(BaseModel):
@@ -159,6 +259,8 @@ class ReceiptOut(BaseModel):
     duplicate_of_id: int | None = None
     duplicate_of: DuplicateOfOut | None = None
     operator: UserOut
+    last_modified_by: UserOut | None = None
+    last_modified_at: datetime | None = None
     photo: PhotoOut
     order_matches: list[OrderMatchOut] = []
 
@@ -178,3 +280,5 @@ class ReceiptListResponse(BaseModel):
 
 class TrackingUpdate(BaseModel):
     tracking_no: str = Field(min_length=1, max_length=128)
+    expected_tracking_no: str | None = Field(max_length=128)
+    client_event_id: str = Field(min_length=8, max_length=128)

@@ -25,15 +25,21 @@
 - 服务端以 `client_event_id` 幂等，保存 SHA-256、服务器接收时间、设备 ID；
 - 重复运单号提示首次确认时间和原照片，不重复计数；
 - 上传成功后按运单号显示已匹配的平台/店铺/商品（候选匹配会明确标注）。
+- 每位同事使用独立账号；照片、运单修正和人工收货纠正均记录责任人与服务器时间；
+- 订单可人工在“未收货/已收货”之间纠正，照片证据与人工结论分层保存，操作可审计；
+- 管理员可在手机端新增、停用和重新启用公司人员账号，停用不会抹掉历史责任记录。
 
 > 待认领区、待补单号区、按平台/单号/关键词搜索、撤销与重新匹配属于 P0 阶段规划，尚未实现。
+
+人员责任与人工纠正的使用及数据语义见
+[`docs/RESPONSIBILITY_AND_MANUAL_ARRIVAL.md`](docs/RESPONSIBILITY_AND_MANUAL_ARRIVAL.md)。
 
 ### 订单数据
 
 | 路线 | 状态 |
 |---|---|
 | CSV 批量导入（幂等、忽略 PII、退款/取消明确状态） | 规划中（P1） |
-| 1688 官方 Open API 多账号同步（后端） | 代码完成，待配置真实授权后验收 |
+| 1688 官方 Open API 多账号同步（后端） | 已在生产配置首个授权账号；可继续追加账号 |
 | Windows 浏览器可见页面同步 PDD（`sync-agent`） | 代码完成，待 Windows 真机手工验收 |
 | 截图 / OCR / 手工录入 | 兜底路径 |
 
@@ -138,14 +144,15 @@ cd sync-agent && npm ci && npm test && npm run typecheck && npm run build && npm
 - [总体实施计划](PLAN.md) —— 产品结论、数据模型、分阶段计划与验收标准
 - [部署与运维](docs/DEPLOYMENT.md) —— 迁移、备份恢复、公网隧道、回滚、故障排查
 - [1688 官方 Open API 多账号配置](docs/ALI1688_OPEN_API.md)
+- [人员责任与人工收货纠正](docs/RESPONSIBILITY_AND_MANUAL_ARRIVAL.md)
 - [浏览器同步技术规格](docs/BROWSER_SYNC_SPEC.md)
 - [Windows 手工验收清单](docs/SYNC_MANUAL_ACCEPTANCE.md)
 - [DeepSeek 实现任务单](DEEPSEEK_HANDOFF.md)
 
 ## 项目状态
 
-- 服务器已部署在 `192.168.1.5:8766`（局域网免登录；当前公网测试期使用 HTTPS 临时隧道 + 登录）；
-- 拍照收货闭环可用，待真机连续 30 件验收；
-- 1688 Open API 与 PDD 浏览器同步代码已完成于当前功能分支，待真实 1688 授权和 Windows PDD
-  真机验收后合并 main；CSV 导入尚未开始；
+- 当前生产入口使用公网 HTTPS，服务器部署与回滚流程见 `docs/DEPLOYMENT.md`；
+- 1688 Open API 已通过首个真实采购账号导入订单，多账号可在同一应用授权上继续追加；
+- 拍照收货、人工状态纠正和人员责任审计已完成代码与自动测试，仍需按实际仓库流程持续真机验收；
+- PDD 浏览器同步代码已完成但尚待真机验收；CSV 导入尚未开始；
 - 详细状态与决策记录见 [PLAN.md](PLAN.md) 第 0 节和变更记录。

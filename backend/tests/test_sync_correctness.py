@@ -434,7 +434,17 @@ def test_migration_upgrades_old_database_and_keeps_receipts(
         migrations = connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in migrations] == [1, 2, 3, 4]
+        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6]
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert "order_arrival_overrides" in tables
+        assert "order_arrival_events" in tables
+        assert "receipt_change_events" in tables
+        assert "user_management_events" in tables
 
 
 def test_fp_item_title_sku_change_with_package_is_safe(
@@ -537,7 +547,7 @@ def test_legacy_nonnull_links_are_nullified_and_deduped_on_upgrade(
         migrations = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in migrations] == [1, 2, 3, 4]
+        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6]
 
 
 def test_failed_migration_leaves_no_partial_schema(tmp_path) -> None:
@@ -583,3 +593,131 @@ def test_failed_migration_leaves_no_partial_schema(tmp_path) -> None:
         assert "half_baked_table" not in tables
         assert "users" in tables
         assert "receipt_events" in tables
+
+
+def test_responsibility_migration_upgrades_version_four_database(tmp_path) -> None:
+    path = tmp_path / "responsibility-v4" / "arrival.db"
+    path.parent.mkdir(parents=True)
+    raw = sqlite3.connect(path)
+    raw.row_factory = sqlite3.Row
+    _exec_script_in_tx(raw, SCHEMA)
+    raw.execute("DROP TABLE order_arrival_events")
+    raw.execute("DROP TABLE order_arrival_overrides")
+    raw.execute("DROP TABLE receipt_change_events")
+    raw.execute(
+        """
+        CREATE TABLE schema_migrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            version INTEGER NOT NULL,
+            name TEXT NOT NULL UNIQUE,
+            applied_at TEXT NOT NULL
+        )
+        """
+    )
+    for version, name in (
+        (1, "initial_schema"),
+        (2, "item_identity"),
+        (3, "package_links_order_level"),
+        (4, "ali1688_sync_state"),
+    ):
+        raw.execute(
+            """
+            INSERT INTO schema_migrations(version, name, applied_at)
+            VALUES (?, ?, '2026-08-01T00:00:00.000Z')
+            """,
+            (version, name),
+        )
+    raw.commit()
+    raw.close()
+
+    Database(path).initialize(
+        bootstrap_username="admin",
+        bootstrap_password="correct horse battery staple",
+        bootstrap_display_name="管理员",
+        session_secret="test-session-secret-that-is-long-enough",
+        sync_worker_tokens=(),
+        now="2026-08-30T00:00:00.000Z",
+    )
+
+    database = Database(path)
+    with database.connect() as connection:
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert {
+            "order_arrival_overrides",
+            "order_arrival_events",
+            "receipt_change_events",
+        } <= tables
+        migrations = connection.execute(
+            "SELECT version, name FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert [(row["version"], row["name"]) for row in migrations][-2:] == [
+            (5, "responsibility_and_manual_arrival"),
+            (6, "user_management_audit"),
+        ]
+
+
+def test_user_audit_migration_upgrades_version_five_database(tmp_path) -> None:
+    path = tmp_path / "user-audit-v5" / "arrival.db"
+    path.parent.mkdir(parents=True)
+    raw = sqlite3.connect(path)
+    raw.row_factory = sqlite3.Row
+    _exec_script_in_tx(raw, SCHEMA)
+    raw.execute("DROP TABLE user_management_events")
+    raw.execute(
+        """
+        CREATE TABLE schema_migrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            version INTEGER NOT NULL,
+            name TEXT NOT NULL UNIQUE,
+            applied_at TEXT NOT NULL
+        )
+        """
+    )
+    for version, name in (
+        (1, "initial_schema"),
+        (2, "item_identity"),
+        (3, "package_links_order_level"),
+        (4, "ali1688_sync_state"),
+        (5, "responsibility_and_manual_arrival"),
+    ):
+        raw.execute(
+            """
+            INSERT INTO schema_migrations(version, name, applied_at)
+            VALUES (?, ?, '2026-08-01T00:00:00.000Z')
+            """,
+            (version, name),
+        )
+    raw.commit()
+    raw.close()
+
+    Database(path).initialize(
+        bootstrap_username="admin",
+        bootstrap_password="correct horse battery staple",
+        bootstrap_display_name="管理员",
+        session_secret="test-session-secret-that-is-long-enough",
+        sync_worker_tokens=(),
+        now="2026-08-30T00:00:00.000Z",
+    )
+
+    with Database(path).connect() as connection:
+        assert connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name = 'user_management_events'
+            """
+        ).fetchone() is not None
+        last_migration = connection.execute(
+            """
+            SELECT version, name FROM schema_migrations
+            ORDER BY version DESC LIMIT 1
+            """
+        ).fetchone()
+        assert (last_migration["version"], last_migration["name"]) == (
+            6,
+            "user_management_audit",
+        )

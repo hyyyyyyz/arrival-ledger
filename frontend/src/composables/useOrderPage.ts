@@ -135,6 +135,12 @@ export function useOrderPage(options: OrderPageOptions) {
     invalidated.value = true
   }
 
+  function replaceOrder(updated: PurchaseOrder): void {
+    const index = orders.value.findIndex((order) => order.id === updated.id)
+    if (index >= 0) orders.value.splice(index, 1, updated)
+    invalidate()
+  }
+
   function reset(): void {
     requestVersion += 1
     invalidationVersion += 1
@@ -172,6 +178,7 @@ export function useOrderPage(options: OrderPageOptions) {
     goToPage,
     refresh,
     invalidate,
+    replaceOrder,
     reset,
   }
 }

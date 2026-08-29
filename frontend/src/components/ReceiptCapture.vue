@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import type { OrderMatch, Receipt, UploadQueueItem, User } from '@/types'
-import { updateReceiptTracking } from '@/services/api'
+import type { OrderMatch, Receipt, ReceiptTrackingUpdateInput, UploadQueueItem, User } from '@/types'
+import { ApiError } from '@/services/api'
 import { recognizeTrackingNo } from '@/services/barcode'
 import { compressImage } from '@/services/image'
 import { uploadQueue } from '@/services/uploadQueue'
@@ -12,6 +12,7 @@ import { isPlausibleTrackingNo, normalizeTrackingNo } from '@/utils/tracking'
 
 const props = defineProps<{
   user: User
+  saveServerTracking: (input: ReceiptTrackingUpdateInput) => Promise<Receipt>
 }>()
 
 const emit = defineEmits<{
@@ -23,6 +24,9 @@ interface CaptureResult {
   clientEventId: string
   previewUrl: string
   trackingNo: string
+  serverTrackingNo: string | null
+  trackingEditEventId: string | null
+  trackingEditDesired: string | null
   serverReceiptId: string | number | null
   duplicate: boolean
   stage: 'ANALYZING' | 'QUEUED' | 'SYNCED' | 'ERROR'
@@ -86,6 +90,9 @@ async function handleFile(event: Event): Promise<void> {
       clientEventId,
       previewUrl,
       trackingNo: '',
+      serverTrackingNo: null,
+      trackingEditEventId: null,
+      trackingEditDesired: null,
       serverReceiptId: null,
       duplicate: false,
       stage: 'ANALYZING',
@@ -134,8 +141,20 @@ async function saveManualTracking(): Promise<void> {
   captureError.value = ''
   try {
     if (latest.value.serverReceiptId !== null) {
-      const patched = await updateReceiptTracking(latest.value.serverReceiptId, trackingNo)
+      if (!latest.value.trackingEditEventId || latest.value.trackingEditDesired !== trackingNo) {
+        latest.value.trackingEditEventId = createId()
+        latest.value.trackingEditDesired = trackingNo
+      }
+      const patched = await props.saveServerTracking({
+        receiptId: latest.value.serverReceiptId,
+        trackingNo,
+        expectedTrackingNo: latest.value.serverTrackingNo,
+        clientEventId: latest.value.trackingEditEventId,
+      })
       latest.value.matches = patched.order_matches || []
+      latest.value.serverTrackingNo = patched.tracking_no ?? null
+      latest.value.trackingEditEventId = null
+      latest.value.trackingEditDesired = null
       emit('serverChanged')
     } else {
       await uploadQueue.updateTracking(latest.value.clientEventId, trackingNo)
@@ -145,7 +164,19 @@ async function saveManualTracking(): Promise<void> {
     notifySuccess()
     emit('changed')
   } catch (error) {
-    captureError.value = error instanceof Error ? error.message : '补录失败，请稍后重试'
+    if (error instanceof ApiError && error.status === 409) {
+      const details = error.details && typeof error.details === 'object'
+        ? error.details as Record<string, unknown>
+        : null
+      if (latest.value && details && (typeof details.current_tracking_no === 'string' || details.current_tracking_no === null)) {
+        latest.value.serverTrackingNo = details.current_tracking_no as string | null
+      }
+      captureError.value = '这条记录已被其他人修改，记录列表已刷新。请核对后再次保存。'
+    } else if (error instanceof ApiError && error.status === 0) {
+      captureError.value = '网络结果不确定，修改尚未确认；请重试，系统不会重复记录。'
+    } else {
+      captureError.value = error instanceof Error ? error.message : '补录失败，请稍后重试'
+    }
   } finally {
     manualSaving.value = false
   }
@@ -163,6 +194,7 @@ async function reconcileSyncedReceipt(receipt: Receipt): Promise<void> {
   const uploadedTracking = normalizeTrackingNo(receipt.tracking_no || '')
 
   latest.value.serverReceiptId = receipt.id
+  latest.value.serverTrackingNo = receipt.tracking_no ?? null
   latest.value.stage = 'SYNCED'
   latest.value.duplicate = Boolean(receipt.is_duplicate)
   latest.value.matches = receipt.order_matches || []
@@ -170,15 +202,39 @@ async function reconcileSyncedReceipt(receipt: Receipt): Promise<void> {
 
   if (desiredTracking && desiredTracking !== uploadedTracking) {
     try {
-      const patched = await updateReceiptTracking(receipt.id, desiredTracking)
+      if (!latest.value.trackingEditEventId || latest.value.trackingEditDesired !== desiredTracking) {
+        latest.value.trackingEditEventId = createId()
+        latest.value.trackingEditDesired = desiredTracking
+      }
+      const patched = await props.saveServerTracking({
+        receiptId: receipt.id,
+        trackingNo: desiredTracking,
+        expectedTrackingNo: receipt.tracking_no ?? null,
+        clientEventId: latest.value.trackingEditEventId,
+      })
       latest.value.trackingNo = patched.tracking_no || desiredTracking
+      latest.value.serverTrackingNo = patched.tracking_no ?? null
+      latest.value.trackingEditEventId = null
+      latest.value.trackingEditDesired = null
       latest.value.matches = patched.order_matches || []
       manualTracking.value = latest.value.trackingNo
       reconciliationMessage = '照片与刚补录的单号均已同步'
       emit('serverChanged')
     } catch (error) {
       latest.value.trackingNo = desiredTracking
-      captureError.value = error instanceof Error ? `照片已同步，但单号补录失败：${error.message}` : '照片已同步，但单号补录失败'
+      if (error instanceof ApiError && error.status === 0) {
+        captureError.value = '照片已同步，但单号修改结果尚未确认；请重试，系统不会重复记录。'
+      } else if (error instanceof ApiError && error.status === 409) {
+        const details = error.details && typeof error.details === 'object'
+          ? error.details as Record<string, unknown>
+          : null
+        if (details && (typeof details.current_tracking_no === 'string' || details.current_tracking_no === null)) {
+          latest.value.serverTrackingNo = details.current_tracking_no as string | null
+        }
+        captureError.value = '照片已同步，但单号已被其他人修改；请核对记录列表后再次保存。'
+      } else {
+        captureError.value = error instanceof Error ? `照片已同步，但单号补录失败：${error.message}` : '照片已同步，但单号补录失败'
+      }
       reconciliationMessage = '照片已保存；请再次点击补录，确保单号同步'
     }
   } else if (receipt.tracking_no) {
