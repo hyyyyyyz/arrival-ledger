@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Arrival Ledger backup every day
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=arrival-ledger-backup.service
+
+[Install]
+WantedBy=timers.target

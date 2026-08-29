@@ -1,0 +1,16 @@
+[Unit]
+Description=Arrival Ledger consistent daily backup
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/opt/arrival-ledger/docker-compose.yml
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/arrival-ledger
+Environment=DATA_ROOT=/var/lib/arrival-ledger
+Environment=BACKUP_ROOT=/var/lib/arrival-ledger/backups
+UMask=0077
+ExecStart=/opt/arrival-ledger/deploy/scripts/backup.sh
+ExecStartPost=/bin/bash -c 'for i in {1..30}; do /usr/bin/curl -fsS http://127.0.0.1:8766/api/health >/dev/null && exit 0; /usr/bin/sleep 2; done; exit 1'
+ExecStartPost=/usr/bin/find /var/lib/arrival-ledger/backups -maxdepth 1 -type f -name arrival-ledger-*.tar.gz -mtime +13 -delete
+TimeoutStartSec=30min
