@@ -23,6 +23,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   refresh: []
+  capture: []
   retry: [clientEventId: string]
   updateLocal: [clientEventId: string, trackingNo: string]
   updateServer: [receiptId: string | number, trackingNo: string]
@@ -109,6 +110,10 @@ function submitServer(receipt: Receipt): void {
         <div class="receipt-body">
           <div class="receipt-topline">
             <span class="record-badge" :class="item.uploadState.toLowerCase()">
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path v-if="item.uploadState === 'FAILED'" d="M12 4 21 20H3Zm0 5v5m0 3h.01" />
+                <template v-else><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></template>
+              </svg>
               {{ item.uploadState === 'UPLOADING' ? '上传中' : item.uploadState === 'FAILED' ? '同步失败' : item.readyToUpload ? '待上传' : '识别中' }}
             </span>
             <time>{{ formatDateTime(item.occurredAt) }}</time>
@@ -137,14 +142,20 @@ function submitServer(receipt: Receipt): void {
         <img :src="receiptPhotoUrl(receipt)" alt="包裹到货照片" loading="lazy" />
         <div class="receipt-body">
           <div class="receipt-topline">
-            <span class="record-badge ready">{{ receipt.evidence_status === 'READY' ? '凭证完整' : receipt.evidence_status || '已同步' }}</span>
+            <span class="record-badge ready">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="m8 12 2.5 2.5L16 9" /></svg>
+              {{ receipt.evidence_status === 'READY' ? '凭证完整' : receipt.evidence_status || '已同步' }}
+            </span>
             <time>{{ formatDateTime(receiptTime(receipt)) }}</time>
           </div>
           <strong :class="{ muted: !receipt.tracking_no }">{{ receipt.tracking_no || '待补快递单号' }}</strong>
           <div v-if="receipt.order_matches && receipt.order_matches.length" class="order-matches">
             <div v-for="(match, index) in receipt.order_matches" :key="orderMatchKey(match, index)" class="order-match">
               <p>
-                <span class="record-badge matched">{{ match.confidence === 'CANDIDATE' ? '候选匹配' : '已匹配订单' }}</span>
+                <span class="record-badge matched">
+                  <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 12.5 11.5 15 16 9" /></svg>
+                  {{ match.confidence === 'CANDIDATE' ? '候选匹配' : '已匹配订单' }}
+                </span>
                 {{ orderMatchSourceLabel(match) }}
               </p>
               <ul>
@@ -181,8 +192,11 @@ function submitServer(receipt: Receipt): void {
     </div>
 
     <div v-if="!loading && !receipts.length && !localItems.length" class="empty-state">
-      <span aria-hidden="true">□</span>
+      <span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h12v18H6zM9 8h6M9 12h6M9 16h4" /></svg></span>
+      <strong>还没有收货记录</strong>
       <p>{{ emptyText }}</p>
+      <small>请在“收货”页点击“拍照收货”，完成后会自动显示在这里。</small>
+      <button class="empty-state-action" type="button" @click="emit('capture')">去拍摄包裹</button>
     </div>
   </section>
 </template>

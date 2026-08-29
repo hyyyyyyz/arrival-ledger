@@ -20,7 +20,12 @@ function formatCount(value: number | undefined): string {
 
 function pendingReviewCount(stats: DashboardStats | null): number | undefined {
   if (!stats) return undefined
-  return (stats.candidate_photos ?? 0) + stats.unmatched_photos
+  return (stats.review_orders ?? 0) + stats.unmatched_photos
+}
+
+function receivedOrderCount(stats: DashboardStats | null): number | undefined {
+  if (!stats) return undefined
+  return stats.received_orders ?? Math.max(0, stats.total_orders - stats.pending_orders)
 }
 </script>
 
@@ -28,8 +33,8 @@ function pendingReviewCount(stats: DashboardStats | null): number | undefined {
   <section class="dashboard-panel" aria-labelledby="dashboard-title" :aria-busy="loading">
     <header class="dashboard-heading">
       <div>
-        <p class="eyebrow">订单概览</p>
-        <h2 id="dashboard-title">采购与到货</h2>
+        <p class="eyebrow">今日台账</p>
+        <h2 id="dashboard-title">收货概览</h2>
       </div>
       <span v-if="loading" class="dashboard-updating" role="status">
         <span class="spinner" aria-hidden="true"></span>
@@ -39,24 +44,24 @@ function pendingReviewCount(stats: DashboardStats | null): number | undefined {
 
     <div class="dashboard-grid">
       <article class="dashboard-card dashboard-orders">
-        <span>采购订单</span>
+        <span>总订单</span>
         <strong>{{ formatCount(stats?.total_orders) }}</strong>
-        <small>已导入订单</small>
+        <small>已同步采购订单</small>
       </article>
-      <article class="dashboard-card dashboard-arrivals">
-        <span>到货照片</span>
-        <strong>{{ formatCount(stats?.arrival_photos) }}</strong>
-        <small>去重后的有效首次凭证</small>
+      <article class="dashboard-card dashboard-pending">
+        <span>未收货</span>
+        <strong>{{ formatCount(stats?.pending_orders) }}</strong>
+        <small>仍需拍照确认</small>
       </article>
-      <article class="dashboard-card dashboard-matched">
-        <span>已确认关联</span>
-        <strong>{{ formatCount(stats?.matched_orders) }}</strong>
-        <small>照片已关联订单</small>
+      <article class="dashboard-card dashboard-received">
+        <span>已收货</span>
+        <strong>{{ formatCount(receivedOrderCount(stats)) }}</strong>
+        <small>{{ formatCount(stats?.arrival_photos) }} 张到货凭证</small>
       </article>
       <article class="dashboard-card dashboard-review">
-        <span>待确认照片</span>
+        <span>待处理</span>
         <strong>{{ formatCount(pendingReviewCount(stats)) }}</strong>
-        <small>候选或未关联</small>
+        <small>部分收货、候选或未匹配</small>
       </article>
     </div>
 

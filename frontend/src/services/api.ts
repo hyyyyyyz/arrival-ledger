@@ -115,6 +115,7 @@ export async function listOrders(params: OrderListParams = {}): Promise<OrderLis
   const query = params.query?.trim()
   if (query) search.set('query', query)
   if (params.platform) search.set('platform', params.platform)
+  if (params.arrival_status) search.set('arrival_status', params.arrival_status)
   return request<OrderListResponse>(`/orders?${search.toString()}`)
 }
 

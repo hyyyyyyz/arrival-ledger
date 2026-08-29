@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import type { OrderListParams, OrderListResponse, OrderPlatformFilter, PurchaseOrder } from '@/types'
+import type { OrderArrivalFilter, OrderListParams, OrderListResponse, OrderPlatformFilter, PurchaseOrder } from '@/types'
 import { ApiError, listOrders } from '@/services/api'
 
 interface OrderPageOptions {
@@ -7,6 +7,12 @@ interface OrderPageOptions {
   onAuthRequired: () => void
   request?: (params: OrderListParams) => Promise<OrderListResponse>
   pageSize?: number
+}
+
+interface OrderFilters {
+  query: string
+  platform: OrderPlatformFilter
+  arrivalStatus: OrderArrivalFilter
 }
 
 export function useOrderPage(options: OrderPageOptions) {
@@ -17,18 +23,32 @@ export function useOrderPage(options: OrderPageOptions) {
   const offset = ref(0)
   const query = ref('')
   const platform = ref<OrderPlatformFilter>('')
+  const arrivalStatus = ref<OrderArrivalFilter>('')
   const loading = ref(false)
   const error = ref('')
+  const lastSyncedAt = ref<string | null>(null)
   const activated = ref(false)
   const loaded = ref(false)
   const invalidated = ref(false)
   let requestVersion = 0
   let invalidationVersion = 0
 
-  async function load(nextOffset = offset.value): Promise<void> {
+  function appliedFilters(): OrderFilters {
+    return {
+      query: query.value,
+      platform: platform.value,
+      arrivalStatus: arrivalStatus.value,
+    }
+  }
+
+  async function load(
+    nextOffset = offset.value,
+    filters: OrderFilters = appliedFilters(),
+    applyFilters = false,
+  ): Promise<boolean> {
     if (!options.isOnline()) {
       error.value = '当前离线，联网后可查看采购订单。'
-      return
+      return false
     }
 
     const activeVersion = ++requestVersion
@@ -39,19 +59,32 @@ export function useOrderPage(options: OrderPageOptions) {
       const response = await request({
         limit: limit.value,
         offset: Math.max(0, nextOffset),
-        query: query.value,
-        platform: platform.value,
+        query: filters.query,
+        platform: filters.platform,
+        arrival_status: filters.arrivalStatus,
       })
-      if (activeVersion !== requestVersion) return
+      if (activeVersion !== requestVersion) return false
+
+      if (response.total > 0 && response.offset >= response.total) {
+        const lastValidOffset = Math.floor((response.total - 1) / response.limit) * response.limit
+        return await load(lastValidOffset, filters, applyFilters)
+      }
 
       orders.value = response.items
       total.value = response.total
       limit.value = response.limit
       offset.value = response.offset
+      if (applyFilters) {
+        query.value = filters.query
+        platform.value = filters.platform
+        arrivalStatus.value = filters.arrivalStatus
+      }
+      lastSyncedAt.value = response.last_synced_at ?? null
       loaded.value = true
       if (activeInvalidationVersion === invalidationVersion) invalidated.value = false
+      return true
     } catch (reason) {
-      if (activeVersion !== requestVersion) return
+      if (activeVersion !== requestVersion) return false
       if (reason instanceof ApiError && reason.status === 401) {
         options.onAuthRequired()
       } else if (reason instanceof ApiError && reason.status === 0) {
@@ -59,6 +92,7 @@ export function useOrderPage(options: OrderPageOptions) {
       } else {
         error.value = reason instanceof Error ? reason.message : '采购订单加载失败，请稍后重试。'
       }
+      return false
     } finally {
       if (activeVersion === requestVersion) loading.value = false
     }
@@ -69,10 +103,20 @@ export function useOrderPage(options: OrderPageOptions) {
     if (!loading.value) await load(loaded.value ? offset.value : 0)
   }
 
-  async function search(nextQuery: string, nextPlatform: OrderPlatformFilter): Promise<void> {
-    query.value = nextQuery.trim()
-    platform.value = nextPlatform
-    await load(0)
+  async function search(
+    nextQuery: string,
+    nextPlatform: OrderPlatformFilter,
+    nextArrivalStatus: OrderArrivalFilter,
+  ): Promise<void> {
+    await load(
+      0,
+      {
+        query: nextQuery.trim(),
+        platform: nextPlatform,
+        arrivalStatus: nextArrivalStatus,
+      },
+      true,
+    )
   }
 
   async function goToPage(nextOffset: number): Promise<void> {
@@ -100,8 +144,10 @@ export function useOrderPage(options: OrderPageOptions) {
     offset.value = 0
     query.value = ''
     platform.value = ''
+    arrivalStatus.value = ''
     loading.value = false
     error.value = ''
+    lastSyncedAt.value = null
     activated.value = false
     loaded.value = false
     invalidated.value = false
@@ -114,8 +160,10 @@ export function useOrderPage(options: OrderPageOptions) {
     offset,
     query,
     platform,
+    arrivalStatus,
     loading,
     error,
+    lastSyncedAt,
     activated,
     loaded,
     invalidated,

@@ -58,8 +58,10 @@ const {
   offset: orderOffset,
   query: orderQuery,
   platform: orderPlatform,
+  arrivalStatus: orderArrivalStatus,
   loading: ordersLoading,
   error: ordersError,
+  lastSyncedAt: ordersLastSyncedAt,
   activate: activateOrders,
   search: searchOrders,
   goToPage: goToOrderPage,
@@ -305,14 +307,18 @@ onBeforeUnmount(() => {
 
 <template>
   <div v-if="booting" class="boot-screen">
-    <div class="brand-mark">✓</div>
+    <div class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg>
+    </div>
     <span class="spinner"></span>
     <p>正在恢复本机收货队列…</p>
   </div>
 
   <main v-else-if="accessDenied" class="login-shell">
     <section class="login-card">
-      <div class="login-logo" aria-hidden="true"><span>⌁</span></div>
+      <div class="login-logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 9v4m0 4h.01M4.9 19h14.2a2 2 0 0 0 1.73-3L13.73 3.7a2 2 0 0 0-3.46 0L3.17 16A2 2 0 0 0 4.9 19Z" /></svg>
+      </div>
       <p class="eyebrow">仅限仓库局域网</p>
       <h1>暂时无法直接访问</h1>
       <p class="login-intro">{{ startupError }}</p>
@@ -341,7 +347,9 @@ onBeforeUnmount(() => {
     <div v-if="sessionNotice" class="notice-banner" role="status">{{ sessionNotice }}</div>
 
     <main class="app-content">
-      <template v-if="activeTab !== 'orders'">
+      <template v-if="activeTab === 'capture'">
+        <SyncStatus :stats="queueStats" :online="online" @retry="uploadQueue.retryNow()" />
+        <ReceiptCapture :user="user" @changed="refreshQueueState" @server-changed="handleServerReceiptChanged" />
         <DashboardStats
           :stats="dashboardStats"
           :loading="dashboardStatsLoading"
@@ -349,35 +357,34 @@ onBeforeUnmount(() => {
           :online="online"
           @retry="refreshDashboardStats"
         />
-        <SyncStatus :stats="queueStats" :online="online" @retry="uploadQueue.retryNow()" />
-      </template>
-
-      <template v-if="activeTab === 'capture'">
-        <ReceiptCapture :user="user" @changed="refreshQueueState" @server-changed="handleServerReceiptChanged" />
         <ReceiptList
           :receipts="recentReceipts"
           :local-items="recentQueueItems"
           :loading="receiptsLoading"
           title="最近到货"
           @refresh="refreshReceipts"
+          @capture="selectTab('capture')"
           @retry="uploadQueue.retryNow"
           @update-local="updateLocalTracking"
           @update-server="updateServerTracking"
         />
       </template>
 
-      <ReceiptList
-        v-else-if="activeTab === 'records'"
-        :receipts="receipts"
-        :local-items="queueItems"
-        :loading="receiptsLoading"
-        title="全部记录"
-        empty-text="还没有可查看的到货记录。"
-        @refresh="refreshReceipts"
-        @retry="uploadQueue.retryNow"
-        @update-local="updateLocalTracking"
-        @update-server="updateServerTracking"
-      />
+      <template v-else-if="activeTab === 'records'">
+        <SyncStatus :stats="queueStats" :online="online" @retry="uploadQueue.retryNow()" />
+        <ReceiptList
+          :receipts="receipts"
+          :local-items="queueItems"
+          :loading="receiptsLoading"
+          title="全部记录"
+          empty-text="还没有可查看的到货记录。"
+          @refresh="refreshReceipts"
+          @capture="selectTab('capture')"
+          @retry="uploadQueue.retryNow"
+          @update-local="updateLocalTracking"
+          @update-server="updateServerTracking"
+        />
+      </template>
 
       <OrderList
         v-else
@@ -387,8 +394,10 @@ onBeforeUnmount(() => {
         :offset="orderOffset"
         :query="orderQuery"
         :platform="orderPlatform"
+        :arrival-status="orderArrivalStatus"
         :loading="ordersLoading"
         :error="ordersError"
+        :last-synced-at="ordersLastSyncedAt"
         :online="online"
         @search="searchOrders"
         @refresh="refreshOrders"
@@ -397,17 +406,21 @@ onBeforeUnmount(() => {
     </main>
 
     <nav class="bottom-nav" aria-label="主导航">
+      <div class="desktop-brand" aria-hidden="true">
+        <span><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg></span>
+        <div><strong>到货管家</strong><small>现场收货台账</small></div>
+      </div>
       <button type="button" :class="{ active: activeTab === 'capture' }" :aria-current="activeTab === 'capture' ? 'page' : undefined" @click="selectTab('capture')">
-        <span aria-hidden="true">＋</span>
-        收货
+        <span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h3l1.5-2h7l1.5 2h3v11H4Z" /><circle cx="12" cy="13" r="3" /></svg></span>
+        <strong>收货</strong>
       </button>
       <button type="button" :class="{ active: activeTab === 'records' }" :aria-current="activeTab === 'records' ? 'page' : undefined" @click="selectTab('records')">
-        <span aria-hidden="true">☷</span>
-        记录
+        <span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h12v18H6zM9 8h6M9 12h6M9 16h4" /></svg></span>
+        <strong>记录</strong>
       </button>
       <button type="button" :class="{ active: activeTab === 'orders' }" :aria-current="activeTab === 'orders' ? 'page' : undefined" @click="selectTab('orders')">
-        <span aria-hidden="true">▤</span>
-        订单
+        <span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5" /></svg></span>
+        <strong>订单</strong>
       </button>
     </nav>
   </div>

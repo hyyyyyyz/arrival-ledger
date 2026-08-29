@@ -1,6 +1,6 @@
 import { renderToString } from '@vue/server-renderer'
 import { createSSRApp } from 'vue'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { PurchaseOrder } from '@/types'
 import OrderList from './OrderList.vue'
@@ -44,30 +44,36 @@ function props(overrides: Record<string, unknown> = {}) {
     offset: 0,
     query: '',
     platform: '',
+    arrivalStatus: '',
     loading: false,
     error: '',
+    lastSyncedAt: '2026-08-30T01:30:00.000Z',
     online: true,
     ...overrides,
   }
 }
 
 describe('OrderList', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('renders a compact order, product, logistics, and warehouse arrival summary', async () => {
     const html = await renderToString(createSSRApp(OrderList, props()))
 
     expect(html).toContain('ORDER-20260828-001')
     expect(html).toContain('商品甲')
-    expect(html).toContain('红色')
+    expect(html).not.toContain('红色')
     expect(html).toContain('×2')
-    expect(html).toContain('商品乙')
+    expect(html).not.toContain('商品乙')
     expect(html).toContain('SF0001')
     expect(html).toContain('顺丰速运')
-    expect(html).toContain('ZT0002')
+    expect(html).not.toContain('ZT0002')
     expect(html).toContain('部分收货')
     expect(html).toContain('1/4 个包裹')
     expect(html).toContain('已收货')
     expect(html).toContain('待确认')
-    expect(html).toContain('展开其余 2 项商品、2 个包裹')
+    expect(html).toContain('展开其余 3 项商品、3 个包裹')
     expect(html).toContain('aria-expanded="false"')
     expect(html).not.toContain('账号：1688 主账号')
     expect(html).not.toContain('五金供应商')
@@ -171,7 +177,22 @@ describe('OrderList', () => {
     expect(loading).toContain('正在加载采购订单')
     expect(failure).toContain('订单服务暂时不可用')
     expect(failure).toContain('重试')
-    expect(empty).toContain('没有符合当前搜索条件的采购订单')
+    expect(empty).toContain('没有符合当前筛选条件的采购订单')
+  })
+
+  it('labels the oldest account sync and warns when it is stale or missing', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-30T02:00:00.000Z'))
+    const fresh = await renderToString(createSSRApp(OrderList, props()))
+    expect(fresh).toContain('全部账号至少同步至')
+    expect(fresh).not.toContain('可能不是最新')
+
+    vi.setSystemTime(new Date('2026-08-30T03:00:00.000Z'))
+    const stale = await renderToString(createSSRApp(OrderList, props()))
+    expect(stale).toContain('可能不是最新')
+
+    const missing = await renderToString(createSSRApp(OrderList, props({ lastSyncedAt: null })))
+    expect(missing).toContain('有采购账号尚无成功同步记录')
   })
 
   it('renders first, middle, and last page boundaries', async () => {

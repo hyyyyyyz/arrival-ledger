@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import type { OrderPlatformFilter, PurchaseOrder } from '@/types'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { OrderArrivalFilter, OrderPlatformFilter, PurchaseOrder } from '@/types'
 
 const props = defineProps<{
   orders: PurchaseOrder[]
@@ -9,34 +9,76 @@ const props = defineProps<{
   offset: number
   query: string
   platform: OrderPlatformFilter
+  arrivalStatus: OrderArrivalFilter
   loading: boolean
   error: string
+  lastSyncedAt: string | null
   online: boolean
 }>()
 
 const emit = defineEmits<{
-  search: [query: string, platform: OrderPlatformFilter]
+  search: [query: string, platform: OrderPlatformFilter, arrivalStatus: OrderArrivalFilter]
   refresh: []
   page: [offset: number]
 }>()
 
 const draftQuery = ref(props.query)
 const draftPlatform = ref<OrderPlatformFilter>(props.platform)
+const draftArrivalStatus = ref<OrderArrivalFilter>(props.arrivalStatus)
 const expandedOrders = ref<Set<string>>(new Set())
+const freshnessNow = ref(Date.now())
+let freshnessTimer: ReturnType<typeof setInterval> | undefined
+
+onMounted(() => {
+  freshnessTimer = setInterval(() => {
+    freshnessNow.value = Date.now()
+  }, 60_000)
+})
+
+onBeforeUnmount(() => {
+  if (freshnessTimer !== undefined) clearInterval(freshnessTimer)
+})
 
 watch(() => props.query, (value) => { draftQuery.value = value })
 watch(() => props.platform, (value) => { draftPlatform.value = value })
+watch(() => props.arrivalStatus, (value) => { draftArrivalStatus.value = value })
+watch(() => props.error, (value) => {
+  if (!value) return
+  draftQuery.value = props.query
+  draftPlatform.value = props.platform
+  draftArrivalStatus.value = props.arrivalStatus
+})
 
 const firstResult = computed(() => props.total > 0 ? props.offset + 1 : 0)
 const lastResult = computed(() => Math.min(props.offset + props.orders.length, props.total))
 const hasPrevious = computed(() => props.offset > 0)
 const hasNext = computed(() => props.offset + props.limit < props.total)
+const freshness = computed(() => {
+  if (!props.lastSyncedAt) {
+    return { label: '有采购账号尚无成功同步记录', stale: true }
+  }
+  const syncedAt = new Date(props.lastSyncedAt)
+  if (Number.isNaN(syncedAt.getTime())) {
+    return { label: '采购数据同步时间异常', stale: true }
+  }
+  const time = new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(syncedAt)
+  const stale = freshnessNow.value - syncedAt.getTime() > 45 * 60 * 1000
+  return {
+    label: `全部账号至少同步至 ${time}${stale ? ' · 可能不是最新' : ''}`,
+    stale,
+  }
+})
 
 type ArrivalTone = 'pending' | 'candidate' | 'partial' | 'received' | 'closed'
 
 interface ArrivalSummary {
   tone: ArrivalTone
-  icon: string
   label: string
   detail: string
 }
@@ -46,11 +88,11 @@ function platformLabel(platform: PurchaseOrder['platform']): string {
 }
 
 function visibleItems(order: PurchaseOrder) {
-  return expandedOrders.value.has(order.id) ? order.items : order.items.slice(0, 2)
+  return expandedOrders.value.has(order.id) ? order.items : order.items.slice(0, 1)
 }
 
 function visiblePackages(order: PurchaseOrder) {
-  return expandedOrders.value.has(order.id) ? order.packages : order.packages.slice(0, 2)
+  return expandedOrders.value.has(order.id) ? order.packages : order.packages.slice(0, 1)
 }
 
 function toggleExpanded(orderId: string): void {
@@ -61,22 +103,24 @@ function toggleExpanded(orderId: string): void {
 }
 
 function hasHiddenDetails(order: PurchaseOrder): boolean {
-  return order.items.length > 2 || order.packages.length > 2
+  return order.items.length > 1
+    || order.packages.length > 1
+    || order.items.some((item) => Boolean(item.sku_text))
 }
 
 function hiddenDetailsLabel(order: PurchaseOrder): string {
-  if (expandedOrders.value.has(order.id)) return '收起其余内容'
+  if (expandedOrders.value.has(order.id)) return '收起订单详情'
   const parts: string[] = []
-  if (order.items.length > 2) parts.push(`${order.items.length - 2} 项商品`)
-  if (order.packages.length > 2) parts.push(`${order.packages.length - 2} 个包裹`)
-  return `展开其余 ${parts.join('、')}`
+  if (order.items.length > 1) parts.push(`${order.items.length - 1} 项商品`)
+  if (order.packages.length > 1) parts.push(`${order.packages.length - 1} 个包裹`)
+  return parts.length ? `展开其余 ${parts.join('、')}` : '查看商品规格'
 }
 
 function arrivalSummary(order: PurchaseOrder): ArrivalSummary {
   const total = order.package_count
   const arrived = order.arrived_package_count
   if (total > 0 && arrived >= total) {
-    return { tone: 'received', icon: '✓', label: '已收货', detail: `${arrived}/${total} 个包裹` }
+    return { tone: 'received', label: '已收货', detail: `${arrived}/${total} 个包裹` }
   }
   if (arrived > 0) {
     const candidateDetail = order.candidate_package_count > 0
@@ -84,7 +128,6 @@ function arrivalSummary(order: PurchaseOrder): ArrivalSummary {
       : ''
     return {
       tone: 'partial',
-      icon: '◐',
       label: '部分收货',
       detail: total > 0
         ? `${arrived}/${total} 个包裹${candidateDetail}`
@@ -94,7 +137,6 @@ function arrivalSummary(order: PurchaseOrder): ArrivalSummary {
   if (order.candidate_package_count > 0) {
     return {
       tone: 'candidate',
-      icon: '?',
       label: '待确认',
       detail: `${order.candidate_package_count} 个包裹照片待确认`,
     }
@@ -103,14 +145,12 @@ function arrivalSummary(order: PurchaseOrder): ArrivalSummary {
   if (normalizedOrderStatus === 'CANCELLED' || normalizedOrderStatus === 'REFUNDED') {
     return {
       tone: 'closed',
-      icon: '—',
       label: '无需收货',
       detail: normalizedOrderStatus === 'CANCELLED' ? '订单已取消' : '退款或售后',
     }
   }
   return {
     tone: 'pending',
-    icon: '!',
     label: '未收货',
     detail: total > 0 ? `0/${total} 个包裹` : '物流待同步',
   }
@@ -127,12 +167,17 @@ function packageArrivalTone(orderPackage: PurchaseOrder['packages'][number]): st
 }
 
 function submitSearch(): void {
-  emit('search', draftQuery.value.trim(), draftPlatform.value)
+  emit('search', draftQuery.value.trim(), draftPlatform.value, draftArrivalStatus.value)
 }
 
 function applyPlatform(platform: OrderPlatformFilter): void {
   draftPlatform.value = platform
-  emit('search', draftQuery.value.trim(), platform)
+  emit('search', draftQuery.value.trim(), platform, draftArrivalStatus.value)
+}
+
+function applyArrivalStatus(arrivalStatus: OrderArrivalFilter): void {
+  draftArrivalStatus.value = arrivalStatus
+  emit('search', draftQuery.value.trim(), draftPlatform.value, arrivalStatus)
 }
 </script>
 
@@ -164,13 +209,20 @@ function applyPlatform(platform: OrderPlatformFilter): void {
           拼多多
         </button>
       </div>
-      <p class="orders-source-note">仅查询到货管家后端中的已同步订单，不会打开采购平台。</p>
+      <div class="arrival-filters" role="group" aria-label="收货状态筛选">
+        <span>状态</span>
+        <button type="button" :class="{ active: draftArrivalStatus === '' }" :aria-pressed="draftArrivalStatus === ''" :disabled="loading || !online" @click="applyArrivalStatus('')">全部</button>
+        <button type="button" :class="{ active: draftArrivalStatus === 'pending' }" :aria-pressed="draftArrivalStatus === 'pending'" :disabled="loading || !online" @click="applyArrivalStatus('pending')">未收货</button>
+        <button type="button" :class="{ active: draftArrivalStatus === 'review' }" :aria-pressed="draftArrivalStatus === 'review'" :disabled="loading || !online" @click="applyArrivalStatus('review')">待确认</button>
+        <button type="button" :class="{ active: draftArrivalStatus === 'received' }" :aria-pressed="draftArrivalStatus === 'received'" :disabled="loading || !online" @click="applyArrivalStatus('received')">已收货</button>
+      </div>
     </div>
 
     <div class="orders-title-row">
       <div>
         <p class="eyebrow">采购明细</p>
         <h2 id="orders-list-title">订单列表</h2>
+        <p class="orders-freshness" :class="{ stale: freshness.stale }">{{ freshness.label }}</p>
       </div>
       <button class="text-button" type="button" :disabled="loading || !online" @click="emit('refresh')">
         {{ loading && orders.length ? '刷新中…' : '刷新' }}
@@ -193,7 +245,7 @@ function applyPlatform(platform: OrderPlatformFilter): void {
         v-for="order in orders"
         :key="order.id"
         class="purchase-order-card"
-        :class="`arrival-${arrivalSummary(order).tone}`"
+        :class="[`arrival-${arrivalSummary(order).tone}`, { 'order-expanded': expandedOrders.has(order.id) }]"
         :aria-labelledby="`order-${order.id}-number`"
       >
         <header class="compact-order-header">
@@ -204,16 +256,35 @@ function applyPlatform(platform: OrderPlatformFilter): void {
             </div>
             <strong :id="`order-${order.id}-number`" class="purchase-order-number">{{ order.platform_order_id }}</strong>
           </div>
-          <div
-            class="order-arrival-state"
-            :class="`state-${arrivalSummary(order).tone}`"
-            :aria-label="`收货状态：${arrivalSummary(order).label}，${arrivalSummary(order).detail}`"
-          >
-            <span aria-hidden="true">{{ arrivalSummary(order).icon }}</span>
-            <div>
-              <strong>{{ arrivalSummary(order).label }}</strong>
-              <small>{{ arrivalSummary(order).detail }}</small>
+          <div class="compact-order-actions">
+            <div
+              class="order-arrival-state"
+              :class="`state-${arrivalSummary(order).tone}`"
+              :aria-label="`收货状态：${arrivalSummary(order).label}，${arrivalSummary(order).detail}`"
+            >
+              <span aria-hidden="true">
+                <svg v-if="arrivalSummary(order).tone === 'received'" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="m8 12 2.5 2.5L16 9" /></svg>
+                <svg v-else-if="arrivalSummary(order).tone === 'candidate' || arrivalSummary(order).tone === 'partial'" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+                <svg v-else-if="arrivalSummary(order).tone === 'closed'" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M8 12h8" /></svg>
+                <svg v-else viewBox="0 0 24 24"><path d="M4 7h16v12H4zM8 7V5h8v2M9 13h6" /></svg>
+              </span>
+              <div>
+                <strong>{{ arrivalSummary(order).label }}</strong>
+                <small>{{ arrivalSummary(order).detail }}</small>
+              </div>
             </div>
+            <button
+              v-if="hasHiddenDetails(order)"
+              class="compact-order-toggle"
+              type="button"
+              :aria-expanded="expandedOrders.has(order.id)"
+              :aria-label="hiddenDetailsLabel(order)"
+              @click="toggleExpanded(order.id)"
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path :d="expandedOrders.has(order.id) ? 'm7 14 5-5 5 5' : 'm7 10 5 5 5-5'" />
+              </svg>
+            </button>
           </div>
         </header>
 
@@ -223,7 +294,7 @@ function applyPlatform(platform: OrderPlatformFilter): void {
             <div v-for="(item, index) in visibleItems(order)" :key="`${item.title}-${item.sku_text || ''}-${index}`" class="compact-product-row">
               <p>
                 <strong>{{ item.title }}</strong>
-                <small v-if="item.sku_text">{{ item.sku_text }}</small>
+                <small v-if="item.sku_text && expandedOrders.has(order.id)">{{ item.sku_text }}</small>
               </p>
               <span>×{{ item.quantity }}</span>
             </div>
@@ -247,21 +318,12 @@ function applyPlatform(platform: OrderPlatformFilter): void {
           <p v-else class="order-section-empty">暂无物流信息</p>
         </section>
 
-        <button
-          v-if="hasHiddenDetails(order)"
-          class="compact-order-toggle"
-          type="button"
-          :aria-expanded="expandedOrders.has(order.id)"
-          @click="toggleExpanded(order.id)"
-        >
-          {{ hiddenDetailsLabel(order) }}
-        </button>
       </article>
     </div>
 
     <div v-else-if="!error" class="empty-state orders-empty">
-      <span aria-hidden="true">▤</span>
-      <p>{{ query || platform ? '没有符合当前搜索条件的采购订单。' : '还没有导入采购订单。' }}</p>
+      <span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5" /></svg></span>
+      <p>{{ query || platform || arrivalStatus ? '没有符合当前筛选条件的采购订单。' : '还没有导入采购订单。' }}</p>
     </div>
 
     <footer v-if="total > 0" class="orders-pagination" aria-label="订单分页">

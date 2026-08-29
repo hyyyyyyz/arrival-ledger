@@ -92,6 +92,7 @@ def test_orders_sort_and_paginate_deterministically(
     assert first["total"] == 4
     assert first["limit"] == 2
     assert first["offset"] == 0
+    assert first["last_synced_at"] is not None
     assert [item["platform_order_id"] for item in first["items"]] == [
         "order-new-b",
         "order-new-a",
@@ -113,6 +114,7 @@ def test_orders_sort_and_paginate_deterministically(
     ).json()
     assert beyond["total"] == 4
     assert beyond["items"] == []
+    assert beyond["last_synced_at"] == first["last_synced_at"]
 
     assert authenticated_client.get("/api/orders", params={"limit": 0}).status_code == 422
     assert authenticated_client.get("/api/orders", params={"limit": 101}).status_code == 422
@@ -123,6 +125,67 @@ def test_orders_sort_and_paginate_deterministically(
         ).status_code
         == 422
     )
+
+
+def test_orders_report_oldest_successful_sync_across_selected_accounts(
+    authenticated_client: TestClient,
+    sync_headers: dict[str, str],
+) -> None:
+    assert authenticated_client.get("/api/orders").json()["last_synced_at"] is None
+
+    pdd = batch_payload("b-orders-freshness-pdd-0001")
+    assert post_batch(authenticated_client, pdd, sync_headers).status_code == 200
+    pdd_synced_at = authenticated_client.get(
+        "/api/orders", params={"platform": "pdd"}
+    ).json()["last_synced_at"]
+    assert pdd_synced_at is not None
+
+    ali = batch_payload(
+        "b-orders-freshness-ali-0001",
+        platform="1688",
+        platform_account_key="1688-freshness",
+        platform_account_label="1688新鲜度测试",
+    )
+    assert post_batch(authenticated_client, ali, sync_headers).status_code == 200
+    with authenticated_client.app.state.database.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ali1688_sync_state(
+                account_key, cursor, last_success_at, last_error_at,
+                last_error_code, last_error_message, last_count, updated_at
+            ) VALUES (?, NULL, ?, NULL, NULL, NULL, 0, ?)
+            """,
+            (
+                "1688-freshness",
+                "2099-01-01T00:00:00.000Z",
+                "2099-01-01T00:00:00.000Z",
+            ),
+        )
+        connection.commit()
+
+    assert authenticated_client.get(
+        "/api/orders", params={"platform": "1688"}
+    ).json()["last_synced_at"] == "2099-01-01T00:00:00Z"
+    assert authenticated_client.get("/api/orders").json()["last_synced_at"] == pdd_synced_at
+
+    with authenticated_client.app.state.database.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO platform_accounts(
+                platform, account_key, display_label, source, created_at, updated_at
+            ) VALUES ('pdd', 'pdd-never-synced', '未同步账号', 'WINDOWS_BROWSER', ?, ?)
+            """,
+            ("2026-08-30T00:00:00.000Z", "2026-08-30T00:00:00.000Z"),
+        )
+        connection.commit()
+
+    assert authenticated_client.get(
+        "/api/orders", params={"platform": "pdd"}
+    ).json()["last_synced_at"] is None
+    assert authenticated_client.get("/api/orders").json()["last_synced_at"] is None
+    assert authenticated_client.get(
+        "/api/orders", params={"platform": "1688"}
+    ).json()["last_synced_at"] == "2099-01-01T00:00:00Z"
 
 
 def test_orders_search_and_platform_filter(
@@ -195,6 +258,187 @@ def test_orders_search_and_platform_filter(
     ).json()
     assert combined["total"] == 0
     assert combined["items"] == []
+
+
+def test_orders_arrival_status_filters_before_pagination_and_combine(
+    authenticated_client: TestClient,
+    sync_headers: dict[str, str],
+    jpeg_bytes: bytes,
+) -> None:
+    pdd = batch_payload(
+        "b-orders-arrival-filter-0001",
+        platform_account_label="拼多多采购",
+    )
+    pdd_received = make_order(
+        "PDD-RECEIVED",
+        ordered_at="2026-08-20T09:00:00.000Z",
+        shop_name="跨页已收店铺",
+        title="跨页已收商品",
+        tracking_no="ARRIVED-PDD-001",
+    )
+    partial = make_order(
+        "PDD-PARTIAL",
+        ordered_at="2026-08-19T09:00:00.000Z",
+        shop_name="部分到货店铺",
+    )
+    partial["packages"] = [
+        {
+            "courier": "圆通速递",
+            "tracking_no": "PARTIAL-ARRIVED-001",
+            "status": "SHIPPED",
+        },
+        {
+            "courier": "圆通速递",
+            "tracking_no": "PARTIAL-PENDING-002",
+            "status": "SHIPPED",
+        },
+    ]
+    candidate_a = make_order(
+        "PDD-CANDIDATE-A",
+        ordered_at="2026-08-18T09:00:00.000Z",
+        shop_name="候选店铺甲",
+        tracking_no="SHARED-REVIEW-001",
+    )
+    candidate_b = make_order(
+        "PDD-CANDIDATE-B",
+        ordered_at="2026-08-17T09:00:00.000Z",
+        shop_name="候选店铺乙",
+        tracking_no="SHARED-REVIEW-001",
+    )
+    pending_with_package = make_order(
+        "PDD-PENDING-PACKAGE",
+        ordered_at="2026-08-16T09:00:00.000Z",
+        shop_name="待收店铺",
+        tracking_no="PENDING-PDD-001",
+    )
+    pending_without_package = make_order(
+        "PDD-PENDING-NO-PACKAGE",
+        ordered_at="2026-08-15T09:00:00.000Z",
+        shop_name="未发货店铺",
+    )
+    cancelled = make_order(
+        "PDD-CANCELLED",
+        ordered_at="2026-08-14T09:00:00.000Z",
+        shop_name="已关闭店铺",
+    )
+    cancelled["status"] = "CANCELLED"
+    refunded = make_order(
+        "PDD-REFUNDED",
+        ordered_at="2026-08-13T09:00:00.000Z",
+        shop_name="已退款店铺",
+    )
+    refunded["status"] = "REFUNDED"
+    pdd["orders"] = [
+        pdd_received,
+        partial,
+        candidate_a,
+        candidate_b,
+        pending_with_package,
+        pending_without_package,
+        cancelled,
+        refunded,
+    ]
+    assert post_batch(authenticated_client, pdd, sync_headers).status_code == 200
+
+    ali = batch_payload(
+        "b-orders-arrival-filter-0002",
+        platform="1688",
+        platform_account_key="1688-arrival-filter",
+        platform_account_label="1688采购",
+    )
+    ali["orders"] = [
+        make_order(
+            "ALI-RECEIVED",
+            ordered_at="2026-08-21T09:00:00.000Z",
+            shop_name="跨页已收店铺",
+            title="跨页已收商品",
+            tracking_no="ARRIVED-ALI-001",
+        )
+    ]
+    assert post_batch(authenticated_client, ali, sync_headers).status_code == 200
+
+    for index, tracking_no in enumerate(
+        (
+            "ARRIVED-PDD-001",
+            "ARRIVED-ALI-001",
+            "PARTIAL-ARRIVED-001",
+            "SHARED-REVIEW-001",
+        ),
+        start=1,
+    ):
+        upload_receipt(
+            authenticated_client,
+            event_id=f"orders-arrival-filter-photo-{index:04d}",
+            tracking_no=tracking_no,
+            photo=jpeg_bytes + bytes([index]),
+        )
+
+    expected = {
+        "all": {
+            "PDD-RECEIVED",
+            "PDD-PARTIAL",
+            "PDD-CANDIDATE-A",
+            "PDD-CANDIDATE-B",
+            "PDD-PENDING-PACKAGE",
+            "PDD-PENDING-NO-PACKAGE",
+            "PDD-CANCELLED",
+            "PDD-REFUNDED",
+            "ALI-RECEIVED",
+        },
+        "received": {"PDD-RECEIVED", "ALI-RECEIVED"},
+        "review": {"PDD-PARTIAL", "PDD-CANDIDATE-A", "PDD-CANDIDATE-B"},
+        "pending": {"PDD-PENDING-PACKAGE", "PDD-PENDING-NO-PACKAGE"},
+    }
+    for arrival_status, expected_ids in expected.items():
+        body = authenticated_client.get(
+            "/api/orders", params={"arrival_status": arrival_status, "limit": 100}
+        ).json()
+        assert body["total"] == len(expected_ids)
+        assert {item["platform_order_id"] for item in body["items"]} == expected_ids
+
+    first_received = authenticated_client.get(
+        "/api/orders", params={"arrival_status": "received", "limit": 1}
+    ).json()
+    second_received = authenticated_client.get(
+        "/api/orders",
+        params={"arrival_status": "received", "limit": 1, "offset": 1},
+    ).json()
+    beyond_received = authenticated_client.get(
+        "/api/orders",
+        params={"arrival_status": "received", "limit": 1, "offset": 2},
+    ).json()
+    assert first_received["total"] == second_received["total"] == 2
+    assert len(first_received["items"]) == len(second_received["items"]) == 1
+    assert first_received["items"][0]["platform_order_id"] != (
+        second_received["items"][0]["platform_order_id"]
+    )
+    assert beyond_received["total"] == 2
+    assert beyond_received["items"] == []
+
+    combined = authenticated_client.get(
+        "/api/orders",
+        params={
+            "arrival_status": "received",
+            "platform": "1688",
+            "query": "跨页已收商品",
+        },
+    ).json()
+    assert combined["total"] == 1
+    assert combined["items"][0]["platform_order_id"] == "ALI-RECEIVED"
+
+    excluded_by_status = authenticated_client.get(
+        "/api/orders",
+        params={"arrival_status": "pending", "query": "已关闭店铺"},
+    ).json()
+    assert excluded_by_status["total"] == 0
+    assert excluded_by_status["items"] == []
+
+    assert (
+        authenticated_client.get(
+            "/api/orders", params={"arrival_status": "unknown"}
+        ).status_code
+        == 422
+    )
 
 
 def test_orders_keep_same_platform_order_id_distinct_across_accounts(

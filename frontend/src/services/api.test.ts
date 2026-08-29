@@ -86,9 +86,9 @@ describe('purchase orders', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(listOrders({ limit: 20, offset: 20, query: '  手机 壳 #1  ', platform: '1688' })).resolves.toEqual(payload)
+    await expect(listOrders({ limit: 20, offset: 20, query: '  手机 壳 #1  ', platform: '1688', arrival_status: 'pending' })).resolves.toEqual(payload)
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/orders?limit=20&offset=20&query=%E6%89%8B%E6%9C%BA+%E5%A3%B3+%231&platform=1688',
+      '/api/orders?limit=20&offset=20&query=%E6%89%8B%E6%9C%BA+%E5%A3%B3+%231&platform=1688&arrival_status=pending',
       expect.any(Object),
     )
   })

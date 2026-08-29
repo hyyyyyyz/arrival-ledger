@@ -38,6 +38,7 @@ uploads/
 
 backups/
 *.tar.gz
+artifacts/
 pdd-profile/
 sync-agent/.env.local
 sync-agent/profiles/

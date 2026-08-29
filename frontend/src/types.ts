@@ -90,6 +90,8 @@ export interface DashboardStats {
   total_orders: number
   arrival_photos: number
   matched_orders: number
+  received_orders?: number
+  review_orders?: number
   pending_orders: number
   candidate_photos?: number
   unmatched_photos: number
@@ -137,6 +139,7 @@ export interface OrderListResponse {
   total: number
   limit: number
   offset: number
+  last_synced_at?: string | null
 }
 
 export interface OrderListParams {
@@ -144,7 +147,10 @@ export interface OrderListParams {
   offset?: number
   query?: string
   platform?: OrderPlatformFilter
+  arrival_status?: OrderArrivalFilter
 }
+
+export type OrderArrivalFilter = '' | 'pending' | 'review' | 'received'
 
 export interface CompressedImage {
   blob: Blob

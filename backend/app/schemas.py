@@ -32,6 +32,14 @@ class DashboardStatsOut(BaseModel):
         ge=0,
         description="Distinct orders confirmed by a canonical READY photo whose tracking number links to one order",
     )
+    received_orders: int = Field(
+        ge=0,
+        description="Orders whose every known package has a confirmed one-order READY receipt",
+    )
+    review_orders: int = Field(
+        ge=0,
+        description="Orders that are partially received or have candidate receipt matches",
+    )
     linked_orders: int = Field(
         ge=0,
         description="Distinct orders linked to canonical READY receipts, including candidates",
@@ -45,7 +53,7 @@ class DashboardStatsOut(BaseModel):
     )
     pending_orders: int = Field(
         ge=0,
-        description="Compatibility alias for unlinked_orders; not a shipment status",
+        description="Active orders with neither confirmed nor candidate receipt evidence",
     )
     unmatched_photos: int = Field(
         ge=0, description="Canonical READY photos with no linked purchase order"
@@ -130,6 +138,10 @@ class PurchaseOrderListResponse(BaseModel):
     total: int = Field(ge=0)
     limit: int = Field(ge=1, le=100)
     offset: int = Field(ge=0)
+    last_synced_at: datetime | None = Field(
+        default=None,
+        description="Oldest latest-success timestamp across accounts represented by this order view; null when any account has never synced successfully",
+    )
 
 
 class ReceiptOut(BaseModel):

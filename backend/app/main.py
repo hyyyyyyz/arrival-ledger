@@ -685,6 +685,48 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                       ON orders.id = links.order_id
                     GROUP BY packages.tracking_no_normalized
                 ),
+                order_tracking AS (
+                    SELECT DISTINCT
+                        links.order_id AS order_id,
+                        packages.tracking_no_normalized AS tracking_no_normalized
+                    FROM package_order_links AS links
+                    JOIN packages AS packages
+                      ON packages.id = links.package_id
+                ),
+                canonical_receipts AS (
+                    SELECT id, tracking_no_normalized
+                    FROM receipt_events
+                    WHERE evidence_status = 'READY'
+                      AND duplicate_of_receipt_id IS NULL
+                ),
+                order_arrival_metrics AS (
+                    SELECT
+                        order_tracking.order_id AS order_id,
+                        COUNT(DISTINCT order_tracking.tracking_no_normalized)
+                            AS package_count,
+                        COUNT(
+                            DISTINCT CASE
+                                WHEN receipts.id IS NOT NULL
+                                 AND tracking_order_counts.order_count = 1
+                                THEN order_tracking.tracking_no_normalized
+                            END
+                        ) AS arrived_package_count,
+                        COUNT(
+                            DISTINCT CASE
+                                WHEN receipts.id IS NOT NULL
+                                 AND tracking_order_counts.order_count > 1
+                                THEN order_tracking.tracking_no_normalized
+                            END
+                        ) AS candidate_package_count
+                    FROM order_tracking
+                    LEFT JOIN tracking_order_counts
+                      ON tracking_order_counts.tracking_no_normalized =
+                         order_tracking.tracking_no_normalized
+                    LEFT JOIN canonical_receipts AS receipts
+                      ON receipts.tracking_no_normalized =
+                         order_tracking.tracking_no_normalized
+                    GROUP BY order_tracking.order_id
+                ),
                 ready_receipt_links AS (
                     SELECT DISTINCT
                         receipts.id AS receipt_id,
@@ -716,6 +758,38 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                         WHERE order_count = 1
                     ) AS matched_orders,
                     (
+                        SELECT COUNT(*)
+                        FROM purchase_orders AS orders
+                        JOIN order_arrival_metrics AS metrics
+                          ON metrics.order_id = orders.id
+                        WHERE metrics.package_count > 0
+                          AND metrics.arrived_package_count >= metrics.package_count
+                    ) AS received_orders,
+                    (
+                        SELECT COUNT(*)
+                        FROM purchase_orders AS orders
+                        LEFT JOIN order_arrival_metrics AS metrics
+                          ON metrics.order_id = orders.id
+                        WHERE (
+                            (
+                                COALESCE(metrics.arrived_package_count, 0) > 0
+                                AND COALESCE(metrics.arrived_package_count, 0) <
+                                    COALESCE(metrics.package_count, 0)
+                            )
+                            OR COALESCE(metrics.candidate_package_count, 0) > 0
+                        )
+                    ) AS review_orders,
+                    (
+                        SELECT COUNT(*)
+                        FROM purchase_orders AS orders
+                        LEFT JOIN order_arrival_metrics AS metrics
+                          ON metrics.order_id = orders.id
+                        WHERE UPPER(TRIM(orders.order_status))
+                                  NOT IN ('CANCELLED', 'REFUNDED')
+                          AND COALESCE(metrics.arrived_package_count, 0) = 0
+                          AND COALESCE(metrics.candidate_package_count, 0) = 0
+                    ) AS pending_orders,
+                    (
                         SELECT COUNT(DISTINCT order_id)
                         FROM ready_receipt_links
                     ) AS linked_orders,
@@ -744,10 +818,12 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             total_orders=total_orders,
             arrival_photos=row["arrival_photos"],
             matched_orders=matched_orders,
+            received_orders=row["received_orders"],
+            review_orders=row["review_orders"],
             linked_orders=row["linked_orders"],
             candidate_photos=row["candidate_photos"],
             unlinked_orders=unlinked_orders,
-            pending_orders=unlinked_orders,
+            pending_orders=row["pending_orders"],
             unmatched_photos=row["unmatched_photos"],
             account_count=row["account_count"],
         )
@@ -760,6 +836,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         offset: Annotated[int, Query(ge=0)] = 0,
         query: Annotated[str | None, Query(max_length=128)] = None,
         platform: Annotated[Literal["pdd", "1688"] | None, Query()] = None,
+        arrival_status: Annotated[
+            Literal["all", "pending", "review", "received"], Query()
+        ] = "all",
     ) -> PurchaseOrderListResponse:
         del user
         filters: list[str] = []
@@ -843,57 +922,65 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 )
             filters.append("(" + " OR ".join(search_clauses) + ")")
 
-        where_sql = " AND ".join(filters) if filters else "1 = 1"
-        with _database(request).connect() as connection:
-            total = connection.execute(
-                f"""
-                SELECT COUNT(*) AS count
-                FROM purchase_orders AS orders
-                JOIN platform_accounts AS accounts
-                  ON accounts.id = orders.platform_account_id
-                WHERE {where_sql}
-                """,
-                parameters,
-            ).fetchone()["count"]
-
-            page_parameters = {**parameters, "limit": limit, "offset": offset}
-            order_rows = connection.execute(
-                f"""
-                WITH canonical_receipts AS (
-                    SELECT id, tracking_no_normalized
-                    FROM receipt_events
-                    WHERE evidence_status = 'READY'
-                      AND duplicate_of_receipt_id IS NULL
-                ),
-                tracking_order_counts AS (
-                    SELECT
-                        order_packages.tracking_no_normalized,
-                        COUNT(DISTINCT links.order_id) AS order_count
-                    FROM packages AS order_packages
-                    JOIN package_order_links AS links
-                      ON links.package_id = order_packages.id
-                    GROUP BY order_packages.tracking_no_normalized
-                ),
-                order_tracking AS (
-                    SELECT DISTINCT
-                        links.order_id,
-                        order_packages.tracking_no_normalized
-                    FROM package_order_links AS links
-                    JOIN packages AS order_packages
-                      ON order_packages.id = links.package_id
+        if arrival_status == "received":
+            filters.append(
+                """
+                COALESCE(arrival_metrics.package_count, 0) > 0
+                AND COALESCE(arrival_metrics.arrived_package_count, 0) >=
+                    COALESCE(arrival_metrics.package_count, 0)
+                """
+            )
+        elif arrival_status == "review":
+            filters.append(
+                """
+                (
+                    (
+                        COALESCE(arrival_metrics.arrived_package_count, 0) > 0
+                        AND COALESCE(arrival_metrics.arrived_package_count, 0) <
+                            COALESCE(arrival_metrics.package_count, 0)
+                    )
+                    OR COALESCE(arrival_metrics.candidate_package_count, 0) > 0
                 )
+                """
+            )
+        elif arrival_status == "pending":
+            filters.append(
+                """
+                UPPER(TRIM(orders.order_status)) NOT IN ('CANCELLED', 'REFUNDED')
+                AND COALESCE(arrival_metrics.arrived_package_count, 0) = 0
+                AND COALESCE(arrival_metrics.candidate_package_count, 0) = 0
+                """
+            )
+
+        where_sql = " AND ".join(filters) if filters else "1 = 1"
+        sync_parameters: dict[str, str | None] = {"sync_platform": platform}
+        order_metrics_ctes = """
+            canonical_receipts AS (
+                SELECT id, tracking_no_normalized
+                FROM receipt_events
+                WHERE evidence_status = 'READY'
+                  AND duplicate_of_receipt_id IS NULL
+            ),
+            tracking_order_counts AS (
                 SELECT
-                    orders.id AS id,
-                    accounts.platform AS platform,
-                    COALESCE(
-                        NULLIF(TRIM(accounts.display_label), ''),
-                        '账号 ' || accounts.id
-                    ) AS account_label,
-                    orders.platform_order_id AS platform_order_id,
-                    orders.ordered_at AS ordered_at,
-                    orders.order_status AS order_status,
-                    orders.shop_name AS shop_name,
-                    orders.source AS source,
+                    order_packages.tracking_no_normalized,
+                    COUNT(DISTINCT links.order_id) AS order_count
+                FROM packages AS order_packages
+                JOIN package_order_links AS links
+                  ON links.package_id = order_packages.id
+                GROUP BY order_packages.tracking_no_normalized
+            ),
+            order_tracking AS (
+                SELECT DISTINCT
+                    links.order_id,
+                    order_packages.tracking_no_normalized
+                FROM package_order_links AS links
+                JOIN packages AS order_packages
+                  ON order_packages.id = links.package_id
+            ),
+            order_arrival_metrics AS (
+                SELECT
+                    order_tracking.order_id AS order_id,
                     COUNT(DISTINCT order_tracking.tracking_no_normalized)
                         AS package_count,
                     COUNT(
@@ -922,28 +1009,95 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                             THEN receipts.id
                         END
                     ) AS candidate_photo_count
-                FROM purchase_orders AS orders
-                JOIN platform_accounts AS accounts
-                  ON accounts.id = orders.platform_account_id
-                LEFT JOIN order_tracking
-                  ON order_tracking.order_id = orders.id
+                FROM order_tracking
                 LEFT JOIN tracking_order_counts
                   ON tracking_order_counts.tracking_no_normalized =
                      order_tracking.tracking_no_normalized
                 LEFT JOIN canonical_receipts AS receipts
                   ON receipts.tracking_no_normalized =
                      order_tracking.tracking_no_normalized
+                GROUP BY order_tracking.order_id
+            )
+        """
+        with _database(request).connect() as connection:
+            last_synced_at = connection.execute(
+                """
+                WITH successful_account_syncs AS (
+                    SELECT platform, account_key, received_at AS synced_at
+                    FROM sync_batches
+                    WHERE status = 'OK'
+
+                    UNION ALL
+
+                    SELECT '1688' AS platform, account_key, last_success_at AS synced_at
+                    FROM ali1688_sync_state
+                    WHERE last_success_at IS NOT NULL
+                ),
+                account_freshness AS (
+                    SELECT
+                        accounts.id AS account_id,
+                        MAX(successful_account_syncs.synced_at) AS synced_at
+                    FROM platform_accounts AS accounts
+                    LEFT JOIN successful_account_syncs
+                      ON successful_account_syncs.platform = accounts.platform
+                     AND successful_account_syncs.account_key = accounts.account_key
+                    WHERE :sync_platform IS NULL
+                       OR accounts.platform = :sync_platform
+                    GROUP BY accounts.id
+                )
+                SELECT CASE
+                    WHEN COUNT(*) = 0 OR COUNT(synced_at) < COUNT(*) THEN NULL
+                    ELSE MIN(synced_at)
+                END AS last_synced_at
+                FROM account_freshness
+                """,
+                sync_parameters,
+            ).fetchone()["last_synced_at"]
+            total = connection.execute(
+                f"""
+                WITH {order_metrics_ctes}
+                SELECT COUNT(*) AS count
+                FROM purchase_orders AS orders
+                JOIN platform_accounts AS accounts
+                  ON accounts.id = orders.platform_account_id
+                LEFT JOIN order_arrival_metrics AS arrival_metrics
+                  ON arrival_metrics.order_id = orders.id
                 WHERE {where_sql}
-                GROUP BY
-                    orders.id,
-                    accounts.platform,
-                    accounts.id,
-                    accounts.display_label,
-                    orders.platform_order_id,
-                    orders.ordered_at,
-                    orders.order_status,
-                    orders.shop_name,
-                    orders.source
+                """,
+                parameters,
+            ).fetchone()["count"]
+
+            page_parameters = {**parameters, "limit": limit, "offset": offset}
+            order_rows = connection.execute(
+                f"""
+                WITH {order_metrics_ctes}
+                SELECT
+                    orders.id AS id,
+                    accounts.platform AS platform,
+                    COALESCE(
+                        NULLIF(TRIM(accounts.display_label), ''),
+                        '账号 ' || accounts.id
+                    ) AS account_label,
+                    orders.platform_order_id AS platform_order_id,
+                    orders.ordered_at AS ordered_at,
+                    orders.order_status AS order_status,
+                    orders.shop_name AS shop_name,
+                    orders.source AS source,
+                    COALESCE(arrival_metrics.package_count, 0) AS package_count,
+                    COALESCE(arrival_metrics.arrived_package_count, 0)
+                        AS arrived_package_count,
+                    COALESCE(arrival_metrics.candidate_package_count, 0)
+                        AS candidate_package_count,
+                    COALESCE(arrival_metrics.arrival_photo_count, 0)
+                        AS arrival_photo_count,
+                    COALESCE(arrival_metrics.candidate_photo_count, 0)
+                        AS candidate_photo_count
+                FROM purchase_orders AS orders
+                JOIN platform_accounts AS accounts
+                  ON accounts.id = orders.platform_account_id
+                LEFT JOIN order_arrival_metrics AS arrival_metrics
+                  ON arrival_metrics.order_id = orders.id
+                WHERE {where_sql}
                 ORDER BY orders.ordered_at DESC, orders.id DESC
                 LIMIT :limit OFFSET :offset
                 """,
@@ -1094,6 +1248,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             total=total,
             limit=limit,
             offset=offset,
+            last_synced_at=last_synced_at,
         )
 
     @application.post(

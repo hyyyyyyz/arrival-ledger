@@ -23,7 +23,7 @@ function submit(): void {
   <main class="login-shell">
     <section class="login-card">
       <div class="login-logo" aria-hidden="true">
-        <span>✓</span>
+        <svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg>
       </div>
       <p class="eyebrow">私人收货记录</p>
       <h1>到货管家</h1>

@@ -11,6 +11,8 @@ describe('DashboardStats', () => {
         total_orders: 184,
         arrival_photos: 7,
         matched_orders: 6,
+        received_orders: 6,
+        review_orders: 2,
         pending_orders: 178,
         candidate_photos: 2,
         unmatched_photos: 1,
@@ -23,13 +25,15 @@ describe('DashboardStats', () => {
 
     const html = await renderToString(app)
 
-    expect(html).toContain('采购订单')
-    expect(html).toContain('到货照片')
-    expect(html).toContain('已确认关联')
-    expect(html).toContain('待确认照片')
+    expect(html).toContain('总订单')
+    expect(html).toContain('未收货')
+    expect(html).toContain('已收货')
+    expect(html).toContain('待处理')
     expect(html).toContain('184')
+    expect(html).toContain('178')
+    expect(html).toContain('>6<')
     expect(html).toContain('>3<')
-    expect(html).toContain('去重后的有效首次凭证')
+    expect(html).toContain('7 张到货凭证')
   })
 
   it('keeps a non-blocking fallback when statistics fail', async () => {
@@ -64,7 +68,7 @@ describe('DashboardStats', () => {
 
     const html = await renderToString(app)
 
-    expect(html).toContain('待确认照片')
+    expect(html).toContain('待处理')
     expect(html).toContain('>1<')
   })
 })

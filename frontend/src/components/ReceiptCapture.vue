@@ -224,7 +224,9 @@ onBeforeUnmount(() => {
         :disabled="processing"
         @change="handleFile"
       />
-      <span class="camera-icon" aria-hidden="true">▣</span>
+      <span class="camera-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M4 7.5h3l1.5-2h7l1.5 2h3v11H4Z" /><circle cx="12" cy="13" r="3" /></svg>
+      </span>
       <span>
         <strong>{{ processing ? '正在处理照片…' : '拍摄包裹面单' }}</strong>
         <small>{{ processing ? '请不要关闭页面' : '点击拉起后置相机' }}</small>

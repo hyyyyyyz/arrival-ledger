@@ -43,6 +43,8 @@ def test_dashboard_stats_are_zero_for_empty_business_tables(
         "total_orders": 0,
         "arrival_photos": 0,
         "matched_orders": 0,
+        "received_orders": 0,
+        "review_orders": 0,
         "linked_orders": 0,
         "candidate_photos": 0,
         "unlinked_orders": 0,
@@ -79,6 +81,8 @@ def test_dashboard_stats_count_orders_without_photos_as_pending(
         "total_orders": 2,
         "arrival_photos": 0,
         "matched_orders": 0,
+        "received_orders": 0,
+        "review_orders": 0,
         "linked_orders": 0,
         "candidate_photos": 0,
         "unlinked_orders": 2,
@@ -86,6 +90,41 @@ def test_dashboard_stats_count_orders_without_photos_as_pending(
         "unmatched_photos": 0,
         "account_count": 1,
     }
+
+
+def test_dashboard_stats_do_not_count_partial_orders_as_received(
+    authenticated_client: TestClient,
+    sync_headers: dict[str, str],
+    jpeg_bytes: bytes,
+) -> None:
+    payload = batch_payload("b-dashboard-partial-0001")
+    payload["orders"][0]["platform_order_id"] = "dashboard-order-partial"
+    payload["orders"][0]["packages"] = [
+        {
+            "courier": "快递甲",
+            "tracking_no": "PARTIAL-DASH-001",
+            "status": "SHIPPED",
+        },
+        {
+            "courier": "快递乙",
+            "tracking_no": "PARTIAL-DASH-002",
+            "status": "SHIPPED",
+        },
+    ]
+    assert post_batch(authenticated_client, payload, sync_headers).status_code == 200
+    upload_receipt(
+        authenticated_client,
+        event_id="dashboard-partial-photo-0001",
+        tracking_no="PARTIAL-DASH-001",
+        photo=jpeg_bytes,
+    )
+
+    stats = authenticated_client.get("/api/dashboard/stats").json()
+    assert stats["total_orders"] == 1
+    assert stats["matched_orders"] == 1
+    assert stats["received_orders"] == 0
+    assert stats["review_orders"] == 1
+    assert stats["pending_orders"] == 0
 
 
 def test_dashboard_stats_deduplicate_orders_across_photos_and_packages(
@@ -216,10 +255,12 @@ def test_dashboard_stats_deduplicate_orders_across_photos_and_packages(
         "total_orders": 4,
         "arrival_photos": 3,
         "matched_orders": 1,
+        "received_orders": 1,
+        "review_orders": 2,
         "linked_orders": 3,
         "candidate_photos": 1,
         "unlinked_orders": 3,
-        "pending_orders": 3,
+        "pending_orders": 1,
         "unmatched_photos": 1,
         "account_count": 2,
     }
