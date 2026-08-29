@@ -20,7 +20,7 @@ function formatCount(value: number | undefined): string {
 
 function pendingReviewCount(stats: DashboardStats | null): number | undefined {
   if (!stats) return undefined
-  return (stats.review_orders ?? 0) + stats.unmatched_photos
+  return stats.review_orders ?? 0
 }
 
 function receivedOrderCount(stats: DashboardStats | null): number | undefined {
@@ -61,7 +61,7 @@ function receivedOrderCount(stats: DashboardStats | null): number | undefined {
       <article class="dashboard-card dashboard-review">
         <span>待处理</span>
         <strong>{{ formatCount(pendingReviewCount(stats)) }}</strong>
-        <small>部分收货、候选或未匹配</small>
+        <small>部分收货或候选订单 · {{ formatCount(stats?.unmatched_photos) }} 张未匹配凭证</small>
       </article>
     </div>
 

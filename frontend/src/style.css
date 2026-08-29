@@ -484,7 +484,7 @@ svg {
 .orders-pagination button:disabled { color: var(--color-neutral-500); background: var(--color-neutral-100); }
 
 .desktop-brand { display: none; }
-.bottom-nav { position: fixed; z-index: 20; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: repeat(3, 1fr); min-height: 68px; padding: var(--space-1) max(var(--space-3), env(safe-area-inset-right)) max(var(--space-1), env(safe-area-inset-bottom)) max(var(--space-3), env(safe-area-inset-left)); border-top: 1px solid var(--border-subtle); background: color-mix(in srgb, var(--surface-panel) 94%, transparent); box-shadow: 0 -8px 24px color-mix(in srgb, var(--color-brand-950) 8%, transparent); backdrop-filter: blur(16px); }
+.bottom-nav { position: fixed; z-index: 20; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: repeat(3, 1fr); min-height: 68px; padding: var(--space-1) max(var(--space-3), env(safe-area-inset-right)) max(var(--space-1), env(safe-area-inset-bottom)) max(var(--space-3), env(safe-area-inset-left)); border-top: 1px solid var(--border-subtle); background: var(--surface-panel); background: color-mix(in srgb, var(--surface-panel) 94%, transparent); box-shadow: 0 -8px 24px rgb(18 53 36 / 8%); box-shadow: 0 -8px 24px color-mix(in srgb, var(--color-brand-950) 8%, transparent); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
 .bottom-nav button { display: grid; min-height: 56px; place-items: center; align-content: center; gap: 2px; padding: var(--space-1); color: var(--color-neutral-600); border: 0; background: transparent; font-size: var(--text-meta); }
 .bottom-nav button > span { font-size: 23px; }
 .bottom-nav button > strong { font-size: var(--text-meta); font-weight: 700; }

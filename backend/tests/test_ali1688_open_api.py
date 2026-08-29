@@ -547,9 +547,16 @@ def test_page_cap_keeps_cursor_unadvanced_for_safe_repeat(tmp_path) -> None:
     result = sync_account(database, APP, ACCOUNT, client=FullPageClient("buyer-a"), page_size=1, max_pages=1)
     assert result["status"] == "PARTIAL"
     with database.connect() as connection:
-        assert connection.execute(
-            "SELECT cursor FROM ali1688_sync_state WHERE account_key = 'buyer-a'"
-        ).fetchone()["cursor"] is None
+        state = connection.execute(
+            "SELECT cursor, last_success_at, last_error_code FROM ali1688_sync_state WHERE account_key = 'buyer-a'"
+        ).fetchone()
+        assert state["cursor"] is None
+        assert state["last_success_at"] is None
+        assert state["last_error_code"] == "PAGE_CAP_REACHED"
+        run = connection.execute(
+            "SELECT status FROM ali1688_sync_runs WHERE account_key = 'buyer-a'"
+        ).fetchone()
+        assert run["status"] == "PARTIAL"
 
 
 def test_more_than_one_hundred_orders_are_chunked_in_one_atomic_sync(tmp_path) -> None:

@@ -1020,30 +1020,48 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             )
         """
         with _database(request).connect() as connection:
+            connection.execute("BEGIN")
             last_synced_at = connection.execute(
                 """
-                WITH successful_account_syncs AS (
+                WITH registered_accounts AS (
+                    SELECT platform, account_key
+                    FROM platform_accounts
+
+                    UNION
+
+                    SELECT platform, account_key
+                    FROM sync_batches
+
+                    UNION
+
+                    SELECT '1688' AS platform, account_key
+                    FROM ali1688_sync_state
+                ),
+                successful_account_syncs AS (
                     SELECT platform, account_key, received_at AS synced_at
                     FROM sync_batches
                     WHERE status = 'OK'
+                      AND worker_id <> 'ali1688-api'
 
                     UNION ALL
 
-                    SELECT '1688' AS platform, account_key, last_success_at AS synced_at
-                    FROM ali1688_sync_state
-                    WHERE last_success_at IS NOT NULL
+                    SELECT '1688' AS platform, account_key, finished_at AS synced_at
+                    FROM ali1688_sync_runs
+                    WHERE status = 'OK'
+                      AND finished_at IS NOT NULL
                 ),
                 account_freshness AS (
                     SELECT
-                        accounts.id AS account_id,
+                        accounts.platform AS platform,
+                        accounts.account_key AS account_key,
                         MAX(successful_account_syncs.synced_at) AS synced_at
-                    FROM platform_accounts AS accounts
+                    FROM registered_accounts AS accounts
                     LEFT JOIN successful_account_syncs
                       ON successful_account_syncs.platform = accounts.platform
                      AND successful_account_syncs.account_key = accounts.account_key
                     WHERE :sync_platform IS NULL
                        OR accounts.platform = :sync_platform
-                    GROUP BY accounts.id
+                    GROUP BY accounts.platform, accounts.account_key
                 )
                 SELECT CASE
                     WHEN COUNT(*) = 0 OR COUNT(synced_at) < COUNT(*) THEN NULL

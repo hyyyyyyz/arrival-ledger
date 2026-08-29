@@ -161,6 +161,34 @@ def test_orders_report_oldest_successful_sync_across_selected_accounts(
                 "2099-01-01T00:00:00.000Z",
             ),
         )
+        connection.execute(
+            """
+            INSERT INTO ali1688_sync_runs(
+                account_key, run_id, status, started_at, finished_at,
+                count, error_code, error_message
+            ) VALUES (?, ?, 'OK', ?, ?, 0, NULL, NULL)
+            """,
+            (
+                "1688-freshness",
+                "freshness-ok-run",
+                "2099-01-01T00:00:00.000Z",
+                "2099-01-01T00:00:00.000Z",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO ali1688_sync_runs(
+                account_key, run_id, status, started_at, finished_at,
+                count, error_code, error_message
+            ) VALUES (?, ?, 'PARTIAL', ?, ?, 1, 'PAGE_CAP_REACHED', NULL)
+            """,
+            (
+                "1688-freshness",
+                "freshness-partial-run",
+                "2100-01-01T00:00:00.000Z",
+                "2100-01-01T00:00:00.000Z",
+            ),
+        )
         connection.commit()
 
     assert authenticated_client.get(
@@ -171,21 +199,26 @@ def test_orders_report_oldest_successful_sync_across_selected_accounts(
     with authenticated_client.app.state.database.connect() as connection:
         connection.execute(
             """
-            INSERT INTO platform_accounts(
-                platform, account_key, display_label, source, created_at, updated_at
-            ) VALUES ('pdd', 'pdd-never-synced', '未同步账号', 'WINDOWS_BROWSER', ?, ?)
+            INSERT INTO ali1688_sync_state(
+                account_key, cursor, last_success_at, last_error_at,
+                last_error_code, last_error_message, last_count, updated_at
+            ) VALUES ('1688-never-synced', NULL, NULL, ?, 'SYNC_FAILED', ?, 0, ?)
             """,
-            ("2026-08-30T00:00:00.000Z", "2026-08-30T00:00:00.000Z"),
+            (
+                "2026-08-30T00:00:00.000Z",
+                "1688 sync failed",
+                "2026-08-30T00:00:00.000Z",
+            ),
         )
         connection.commit()
 
     assert authenticated_client.get(
-        "/api/orders", params={"platform": "pdd"}
+        "/api/orders", params={"platform": "1688"}
     ).json()["last_synced_at"] is None
     assert authenticated_client.get("/api/orders").json()["last_synced_at"] is None
     assert authenticated_client.get(
-        "/api/orders", params={"platform": "1688"}
-    ).json()["last_synced_at"] == "2099-01-01T00:00:00Z"
+        "/api/orders", params={"platform": "pdd"}
+    ).json()["last_synced_at"] == pdd_synced_at
 
 
 def test_orders_search_and_platform_filter(

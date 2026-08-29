@@ -32,8 +32,9 @@ describe('DashboardStats', () => {
     expect(html).toContain('184')
     expect(html).toContain('178')
     expect(html).toContain('>6<')
-    expect(html).toContain('>3<')
+    expect(html).toContain('>2<')
     expect(html).toContain('7 张到货凭证')
+    expect(html).toContain('1 张未匹配凭证')
   })
 
   it('keeps a non-blocking fallback when statistics fail', async () => {
@@ -69,6 +70,7 @@ describe('DashboardStats', () => {
     const html = await renderToString(app)
 
     expect(html).toContain('待处理')
-    expect(html).toContain('>1<')
+    expect(html).toContain('>0<')
+    expect(html).toContain('1 张未匹配凭证')
   })
 })

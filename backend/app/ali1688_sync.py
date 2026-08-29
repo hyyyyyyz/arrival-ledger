@@ -152,6 +152,7 @@ def sync_account(database, app: Ali1688App, account: Ali1688Account, *, dry_run:
         # unchanged so the next run repeats the overlapped window and cannot
         # silently skip older records beyond the cap.
         new_cursor = cursor if hit_page_cap else end_api
+        run_status = "PARTIAL" if hit_page_cap else "OK"
         if dry_run:
             return {"account_key": account.account_key, "status": "DRY_RUN", "orders": count, "cursor_before": cursor, "cursor_after": new_cursor, "page_cap_reached": hit_page_cap}
         if not mapped:
@@ -172,12 +173,21 @@ def sync_account(database, app: Ali1688App, account: Ali1688Account, *, dry_run:
                     chunk_counts = ingest_sync_batch(connection, batch, hashlib.sha256(payload_bytes).hexdigest(), "ali1688-api", _stamp(datetime.now(timezone.utc)), manage_transaction=False)
                     for key in counts:
                         counts[key] += chunk_counts[key]
-                connection.execute("UPDATE ali1688_sync_state SET cursor=?, last_success_at=?, last_error_at=NULL, last_error_code=NULL, last_error_message=NULL, last_count=?, updated_at=? WHERE account_key=?", (new_cursor, _stamp(datetime.now(timezone.utc)), count, _stamp(datetime.now(timezone.utc)), account.account_key))
+                state_updated_at = _stamp(datetime.now(timezone.utc))
+                if run_status == "OK":
+                    connection.execute(
+                        "UPDATE ali1688_sync_state SET cursor=?, last_success_at=?, last_error_at=NULL, last_error_code=NULL, last_error_message=NULL, last_count=?, updated_at=? WHERE account_key=?",
+                        (new_cursor, state_updated_at, count, state_updated_at, account.account_key),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE ali1688_sync_state SET cursor=?, last_error_at=?, last_error_code='PAGE_CAP_REACHED', last_error_message='1688 sync reached page cap', last_count=?, updated_at=? WHERE account_key=?",
+                        (new_cursor, state_updated_at, count, state_updated_at, account.account_key),
+                    )
                 connection.commit()
             except BaseException:
                 connection.rollback()
                 raise
-        run_status = "PARTIAL" if hit_page_cap else "OK"
         _finish_run(database, run_id, run_status, count)
         return {"account_key": account.account_key, "status": run_status, "orders": count, **counts, "cursor_after": new_cursor, "page_cap_reached": hit_page_cap}
     except Exception as exc:
