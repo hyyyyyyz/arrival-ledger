@@ -1041,7 +1041,11 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                     SELECT platform, account_key, received_at AS synced_at
                     FROM sync_batches
                     WHERE status = 'OK'
-                      AND worker_id <> 'ali1688-api'
+                      AND NOT (
+                          platform = '1688'
+                          AND worker_id = 'ali1688-api'
+                          AND token_digest = 'ali1688-api'
+                      )
 
                     UNION ALL
 

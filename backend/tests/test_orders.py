@@ -134,6 +134,7 @@ def test_orders_report_oldest_successful_sync_across_selected_accounts(
     assert authenticated_client.get("/api/orders").json()["last_synced_at"] is None
 
     pdd = batch_payload("b-orders-freshness-pdd-0001")
+    pdd["worker_id"] = "ali1688-api"
     assert post_batch(authenticated_client, pdd, sync_headers).status_code == 200
     pdd_synced_at = authenticated_client.get(
         "/api/orders", params={"platform": "pdd"}
