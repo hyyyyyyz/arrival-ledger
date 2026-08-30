@@ -1,6 +1,6 @@
 # arrival-ledger（「到货管家」）采购包裹到货确认系统
 
-## 总体实施计划 v1.4（2026-08-14）
+## 总体实施计划 v1.5（2026-08-30）
 
 > 这份文档是当前方案的唯一事实来源。它把手机收货页面、订单导入、平台同步和公网访问拆成可以分别验收的模块。平台同步失败时，核心的拍照收货功能仍必须可用。
 
@@ -19,25 +19,32 @@
 
 | 场景 | 入口 | 是否需要密码 | 当前状态 |
 |---|---|---:|---|
-| 仓库局域网 | 微信 H5，访问 http://192.168.1.5:8766 | 否 | `.5` 已部署并通过服务端健康检查，待真机完整验收 |
-| 外网/异地 | HTTPS 临时 Quick Tunnel（无域名） | 是 | `.5` 已启用临时隧道并通过公网健康检查；等待手机登录/拍照验收 |
-| 平台订单采集 | 1688 后端 Open API + Windows 上的一个 PDD Playwright Chromium profile | 1688 secret 在服务器；PDD 登录态只留 Windows | 自动化实现完成，待分别验收 |
+| 仓库手机端 | 微信 H5，通过当前 HTTPS 部署入口访问 | 是 | 已部署；拍照、订单列表、人工收货纠正与责任人记录可用 |
+| 外网/异地 | 同一 HTTPS 入口 | 是 | 公网服务器运行；运维与回滚见 `docs/DEPLOYMENT.md` |
+| 平台订单采集 | 1688 后端 Open API + Mac/Windows PDD 可见浏览器同步 | 1688 secret 在服务器；PDD 登录态只留同步电脑 | 1688 已有真实账号；PDD 多账号第一阶段代码完成，待真实账号验收 |
 
-服务器是纯 Server，不需要安装桌面环境。1688 由后端官方 Open API 同步；Windows 电脑只承担 PDD 浏览器同步工作；Mac 不参与采集，也不需要一直开着。
+服务器是纯 Server，不需要安装桌面环境。1688 由后端官方 Open API 同步；一台有桌面会话的 Mac 或
+Windows 电脑承担 PDD 浏览器同步。每个 PDD 账号有独立 profile，服务器不保存或远程操控这些登录态。
 
 ### 0.3 平台结论
 
 #### 1688 官方 API 与拼多多浏览器路线
 
-1688 采用后端官方 Open API（多应用、多授权账号、只读 secret 文件）；拼多多继续采用 Windows headed Chrome 浏览器同步。详见 docs/ALI1688_OPEN_API.md。旧的“不实现官方 API”段落仅代表历史决策。
+1688 采用后端官方 Open API（多应用、多授权账号、只读 secret 文件）；拼多多采用 Mac/Windows 上
+Playwright 可见浏览器同步。详见 `docs/ALI1688_OPEN_API.md` 和 `docs/PDD_MULTI_ACCOUNT.md`。旧的单账号、
+仅 Windows 或“不实现官方 API”描述均属于历史决策。
 
-PDD 由 Windows 闲置电脑上的 Node.js/TypeScript + Playwright headed worker 读取用户已经打开并登录的可见网页；1688 由后端官方 Open API 读取：
+PDD 由同步电脑上的 Node.js/TypeScript + Playwright headed worker 读取用户已经登录的可见网页；
+1688 由后端官方 Open API 读取：
 
-1. 用户只在一个独立 PDD Playwright Chromium profile 中手工登录；1688 账号授权在服务器 secret 文件中配置；
+1. 每个 PDD 账号只在自己的独立 profile 中手工登录；1688 账号授权在服务器 secret 文件中配置；
 2. worker 打开订单列表，只读取用户可见 DOM/无障碍文本和正常分页；
 3. 先生成 dry-run 预览，用户明确确认后才上传结构化订单；
 4. 到货管家服务器按订单/商品/运单号幂等入库；
 5. 手机扫码得到快递运单号，再反查订单和商品。
+
+PDD 多账号第一阶段已经提供账号清单、逐账号登录、全账号严格串行 dry-run、状态上报和管理员账号页；
+`sync-all` 不支持 commit。远程 noVNC、服务器浏览器、Cookie 注入和定时 commit 尚未实现。
 
 浏览器同步是非官方、可失效的实验增强能力，可能因页面改版、登录过期、验证码、风控或平台规则而停止。禁止调用平台内部 API、抓包、网络拦截、验证码/滑块绕过、代理池、IP 轮换和高频抓取；遇到阻断必须熔断并人工处理。完整规格见 [`docs/BROWSER_SYNC_SPEC.md`](docs/BROWSER_SYNC_SPEC.md)。
 
@@ -181,19 +188,19 @@ ZXing/条码库足以处理规则清晰的条码；OCR 或大模型只作为破�
                 │
                 │ 局域网 HTTP（当前）/未来 HTTPS
                 ▼
-Ubuntu 服务器 192.168.1.5
+Ubuntu 公网服务器
   ├─ Nginx 前端网关 :8766
   ├─ FastAPI 业务 API
   ├─ SQLite（订单、包裹、事件、同步任务）
   ├─ 本地照片目录与备份
-  └─ 内部 sync ingest API（只接收 Windows 结构化批次）
+  └─ 内部 sync ingest API（只接收同步电脑的结构化批次与账号状态）
                 ▲
-                │ Windows 主动出站，最小字段
+                │ 同步电脑主动出站，最小字段
                 │
-闲置 Windows 电脑
-  ├─ 独立 Chromium profile：PDD
+Mac 或闲置 Windows 同步电脑
+  ├─ 每个 PDD 账号一个独立、持久化 profile
   ├─ Node.js/TypeScript + Playwright headed worker
-  └─ Task Scheduler（MVP 验收后才启用）
+  └─ 手工 dry-run/commit（计划任务尚未实现）
 ~~~
 
 ### 4.1 手机 H5 负责什么
@@ -211,33 +218,34 @@ Ubuntu 服务器 192.168.1.5
 - 以 client_event_id 做幂等；
 - 保存订单、包裹、商品行和多对多关系；
 - 查询、去重、匹配、事件时间线和备份；
-- 接收 Windows PDD 浏览器同步批次，并在后端执行 1688 Open API 同步；
+- 接收 PDD 同步电脑提交的批次/状态，并在后端执行 1688 Open API 同步；
 - 不负责把拼多多账号登录到网页，也不保存浏览器会话。
 
-### 4.3 Windows 同步端负责什么
+### 4.3 Mac/Windows PDD 同步端负责什么
 
-- 在真实用户已登录的拼多多网页环境中读取订单展示数据；1688 不经过 Windows 浏览器；
+- 在真实用户已登录的拼多多网页环境中读取订单展示数据；1688 不经过这台浏览器；
 - 只上传必要的非 PII 字段；
 - 记录同步游标、结果和错误状态；
 - 登录失效/验证码/页面改版时停止并提示人工；
 - 不做支付、下单、退款、确认收货等写操作。
 
-Windows 端不需要把 Chromium 窗口交给服务器控制，也不要求 Mac 同时运行。服务器是纯 Server，没有桌面依赖。
+同步电脑不把浏览器窗口、profile 或 Cookie 交给服务器控制。服务器是纯 Server，没有桌面依赖。
 
 ## 5. 订单进入路线
 
 ### 5.1 1688 API 与 PDD 浏览器两条路线
 
-1688 主路线是服务器官方 Open API：每个授权买家账号独立配置、游标和运行状态，后端按修改时间窗口读取列表并读取详情。PDD 仍使用 Windows 上一个独立、可见的 Playwright Chromium profile，用户手工登录，先 dry-run 预览再提交；服务器不运行浏览器。
+1688 主路线是服务器官方 Open API：每个授权买家账号独立配置、游标和运行状态，后端按修改时间窗口读取列表并读取详情。PDD 在 Mac/Windows 上按账号使用独立、可见的 Playwright profile，用户手工登录，先 dry-run 预览再提交；服务器不运行浏览器。
 
 第一测试版固定为：
 
 ```text
 1688：config-doctor → 单账号 dry-run → 用户确认 → 单账号/全账号 sync-once
-PDD：doctor → 必要时 login-check → 等待页面访问冷却 → sync-once --mode dry-run → 用户确认 → commit
+PDD：accounts/doctor → 逐账号 login-check → 等待页面访问冷却 → 逐账号 dry-run → 用户确认 → 逐账号 commit
 ```
 
-PDD 最多先读取 3–5 页/30 条；1688 使用后端页数上限和重叠修改时间游标。两条路线均先人工验收，之后才启用低频定时任务。
+PDD 最多先读取 3–5 页/30 条；`sync-all` 只允许严格串行 dry-run。1688 使用后端页数上限和重叠
+修改时间游标。PDD 计划任务需要另行开发和评审，不能直接启用。
 
 ### 5.2 降级路线：CSV 批量导入
 
@@ -264,23 +272,24 @@ PDD 最多先读取 3–5 页/30 条；1688 使用后端页数上限和重叠修
 
 初始配置：
 
-- Windows 10/11 闲置电脑；
-- 一个独立 Chromium 数据目录：`C:/ArrivalLedger/profiles/pdd`；
-- 不复用日常 Chrome profile，不同时打开同一个 profile；
-- 第一次由用户在可见窗口中手工登录；
+- 一台有桌面会话的 Mac 或 Windows 10/11 同步电脑；
+- 用 `PDD_ACCOUNTS_FILE` 保存本机私有账号清单，每个账号配置唯一 `account_key`、显示名称和独立 `profile_dir`；
+- 不复用日常 Chrome profile，不同时打开同一个 profile，也不允许不同账号共用 profile；
+- 每个账号第一次都由用户在对应的可见窗口中手工登录；
 - 首次同步前显示当前账号的脱敏标识和订单数量，由用户确认“这是采购账号”后才允许导入；
 - 如果误登录测试账号，只在这个独立 profile 内切换账号或清除拼多多站点数据，不能清理日常 Chrome profile；
 - 密码、Cookie、profile 永不上传服务器，也不进入服务器备份；
-- 单账号、只读、低频；MVP 只允许手动运行，不启用定时任务；
+- 多账号只读、低频且严格串行；MVP 只允许手动运行，不启用定时任务；
 - 首次运行最多前台回补 30 条（后续经用户确认才允许扩大到几百条）；
-- Windows 关机/休眠时不运行，任务计划属于验收后的后续阶段；
+- 同步电脑关机/休眠时不运行，计划任务属于验收后的后续阶段；
 - 始终 headed、窗口可见，不做隐藏式无人值守。
 
 同步流程：
 
 ~~~text
-检查 Chromium/profile 是否可用
-  → 打开订单列表
+读取账号清单并获取全局浏览器锁
+  → 按配置顺序选择账号及其独立 profile
+  → 检查 Chromium/profile 是否可用并打开订单列表
   → 读取当前页面可见的订单字段
   → 规范化并本地校验
   → 用专用 sync worker token 调服务器
@@ -291,11 +300,11 @@ PDD 最多先读取 3–5 页/30 条；1688 使用后端页数上限和重叠修
 状态和处理：
 
 - OK：成功完成；
-- NEEDS_LOGIN：登录过期，提示用户在 Windows 窗口重新登录；
+- NEEDS_LOGIN：登录过期，提示用户在同步电脑的对应账号窗口重新登录；
 - CAPTCHA_OR_BLOCKED：出现验证码/风控，立即停止，不自动处理；
 - SCHEMA_CHANGED：页面结构无法确认，保留日志和上次成功游标；
 - NETWORK_ERROR：网络失败，有限退避后停止；
-- DISABLED：用户手动停用同步。
+- DISABLED：本次因配置、冷却或本机互斥保护未进入有效读取；查看提示后再处理，不表示账号被永久停用。
 
 绝不实现：
 
@@ -305,7 +314,7 @@ PDD 最多先读取 3–5 页/30 条；1688 使用后端页数上限和重叠修
 - 自动支付、下单、退款、确认收货；
 - 把内部同步接口当成平台 API 或控制通道；它只接收 worker 主动提交的结构化批次。
 
-只有 PDD 手动同步在 20–30 个真实订单上、且 1688 API 多账号验收完成后，才允许分别启用 Windows Task Scheduler 或服务器定时器。
+只有 PDD 多账号手动同步在真实订单上、且 1688 API 多账号验收完成后，才允许另行设计并评审 macOS/Windows 计划任务或服务器定时器；当前版本不得直接启用。
 
 ### 5.4 截图/OCR/手工兜底
 
@@ -315,12 +324,12 @@ PDD 最多先读取 3–5 页/30 条；1688 使用后端页数上限和重叠修
 
 ### 6.1 MVP 技术选型
 
-- Windows 10/11；
+- 有桌面会话的 macOS 或 Windows 10/11；
 - Node.js 20 LTS + TypeScript strict；
 - Playwright（锁定版本）+ `chromium.launchPersistentContext`；
-- headed Chromium，一个独立 PDD `user-data-dir`；
-- CLI 先支持 `doctor`、`login-check`、`sync-once --mode dry-run|commit`；
-- 服务器只增加内部 `/api/sync/v1/batches` 接收接口，不把平台 API 误称为“不要 API”。
+- headed Chromium，每个 PDD 账号一个独立、持久化的 `user-data-dir`；
+- CLI 支持 `doctor`、`accounts`、`login-check --account`、`sync-once --account --mode dry-run|commit`，以及严格串行且仅 dry-run 的 `sync-all`；
+- 服务器提供内部 `/api/sync/v1/batches` 批次接收和 `/api/sync/v1/account-status` 状态上报接口，不把平台 API 误称为“不要 API”。
 
 ### 6.2 适配器分层
 
@@ -351,7 +360,7 @@ DISABLED
 
 ### 6.4 内部同步接口
 
-“不用平台 API”不等于“不要内部 HTTP 接口”。Windows 端必须通过本项目自己的接口把规范化订单安全、幂等地送到服务器：
+“不用平台 API”不等于“不要内部 HTTP 接口”。同步电脑必须通过本项目自己的接口把规范化订单安全、幂等地送到服务器：
 
 ```http
 POST /api/sync/v1/batches
@@ -359,11 +368,11 @@ Authorization: Bearer <worker-token>
 Idempotency-Key: <run-id>
 ```
 
-请求只允许 `platform`、`account_key`、订单/商品/包裹、游标和批次统计；拒绝密码、Cookie、token、地址、电话、HTML、截图和未知敏感字段。worker token 明文只保存在服务器受限 `.env` 与 Windows 受 ACL 保护的 `.env.local`，数据库只保存摘要；订单按 `(platform, account_key, platform_order_id)` 幂等 upsert，订单与包裹采用多对多关系。详细 JSON 契约见 [`docs/BROWSER_SYNC_SPEC.md`](docs/BROWSER_SYNC_SPEC.md)。
+请求只允许 `platform`、`account_key`、订单/商品/包裹、游标和批次统计；拒绝密码、Cookie、token、地址、电话、HTML、截图和未知敏感字段。worker token 明文只保存在服务器受限 `.env` 与同步电脑受本地文件权限保护的 `.env.local`，数据库只保存摘要；订单按 `(platform, account_key, platform_order_id)` 幂等 upsert，订单与包裹采用多对多关系。详细 JSON 契约见 [`docs/BROWSER_SYNC_SPEC.md`](docs/BROWSER_SYNC_SPEC.md)。
 
 ### 6.5 账户与人工确认
 
-PDD 的 `account_key` 由用户在 Windows 本地配置，不能依赖抓取手机号。1688 的 `account_key` 由服务器 secret 配置，不能依赖手机号。首次 `login-check` 显示脱敏账号标识和订单数量，用户确认后才可 `commit`。程序不自动输入密码、不处理短信/二维码登录，不上传 profile。
+PDD 的 `account_key` 先由管理员网页登记，再在同步电脑的私有账号清单中配置相同键，不能依赖抓取手机号。每个账号必须使用独立 profile。1688 的 `account_key` 由服务器 secret 配置，不能依赖手机号。首次 `login-check` 显示脱敏账号标识和订单数量，用户确认后才可 `commit`。程序不自动输入密码、不处理短信/二维码登录，不上传 profile。
 
 ## 7. 数据模型（目标模型）
 
@@ -435,52 +444,36 @@ sync_runs(
 
 ### 8.2 服务器部署现状与迁移目标
 
-目标服务器：jackson@192.168.1.5
-目标应用目录：/home/jackson/arrival-ledger
-目标数据目录：/home/jackson/arrival-manager-data（数据库/数据路径暂时兼容旧名）
-迁移后入口：http://192.168.1.5:8766
-目标机现有 cash-save：80/443 和 127.0.0.1:8000（不得修改或占用）
-旧机 192.168.1.4 上的 pharos：8848（清理 arrival 项目时不得修改）
+- 当前长期入口为 `https://120.26.124.126/`，固定账号登录，不开放注册；
+- 应用已迁移到公网 Linux Server，服务端不安装桌面浏览器，也不保存 PDD profile/Cookie；
+- 1688 官方 Open API 在服务器运行；PDD 浏览器同步只在有桌面会话的 Mac/Windows 同步电脑运行；
+- 生产变更必须保留现有同机项目，使用项目自己的容器、数据目录和备份，不清理 Docker 全局资源；
+- HTTPS、认证 Cookie、备份、回滚和端口约束以 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) 为准；
+- 旧的 `.4`/`.5` 局域网地址与随机 Quick Tunnel 均为历史路径，不再作为当前入口或部署目标。
 
-- `.5` 已安装 Docker/Compose，`arrival-ledger-backend-1` 与 `arrival-ledger-frontend-1` 已启动并健康；
-- `.5` 的 `/healthz`、`/api/health`、前端首页已通过 Mac 端检查；公网测试期间 `AUTH_REQUIRED=true`，未登录 `/api/auth/me` 正确返回 401；
-- 数据已从 `.4` 的一致性归档恢复到兼容路径，当前历史收货记录数量为 0，仍保留空数据库结构；
-- 旧机 `.4` 的 arrival Compose 栈已停止，旧代码/数据已移到带时间戳的 `*.retired-*` 归档目录，等待真机验收后最终删除；
-- 目标机 8766 对外提供入口，后端容器端口仍不直接暴露，由前端 Nginx 负责网关；
-- 尚未配置正式域名或 Named Tunnel；
-- `.5` 当前运行宿主机 `cloudflared` Quick Tunnel，使用 IPv4 + HTTP/2 转发到 `127.0.0.1:8766`，未重启 arrival backend/frontend；URL 为随机 `trycloudflare.com`，仅用于本轮测试；
-- 公网测试期间 `.env` 为 `AUTH_REQUIRED=true`、`COOKIE_SECURE=true`。直接 HTTP 局域网地址会要求登录，Secure Cookie 不能通过 HTTP 发送；测试应使用隧道 HTTPS。
+### 8.3 最近本地验证（2026-08-30）
 
-### 8.3 最近本地验证
-
-- 后端：49 passed（含同步批次/迁移/匹配闭环）；
-- 前端：4 passed；
-- TypeScript 检查通过；
-- 生产构建通过；
+- 后端：130 passed（含 PDD 账号状态、权限、迁移、同步批次和匹配闭环）；
+- 前端：51 passed，TypeScript 检查和生产构建通过；
+- PDD sync-agent：266 passed，TypeScript 检查、构建和离线 doctor 通过；
+- 前端与同步端依赖审计均为 0 个已知漏洞；
 - 尚未完成真实 iPhone/Android 微信连续 30 件验收；
-- 1688 Open API、Windows PDD 浏览器同步端与内部批次接收接口已完成自动化测试，待按 [`docs/SYNC_MANUAL_ACCEPTANCE.md`](docs/SYNC_MANUAL_ACCEPTANCE.md) 分别完成服务器 API 和 Windows PDD 真机验收，尚未合并 main；
+- 1688 Open API、PDD 多账号同步端与内部批次/状态接口已完成自动化测试；PDD 仍待按
+  [`docs/PDD_MULTI_ACCOUNT.md`](docs/PDD_MULTI_ACCOUNT.md) 完成真实账号验收；
 - 尚未完成采购订单/CSV 导入模块；
 - 浏览器自动化文档、数据契约和 DeepSeek 交接规范已冻结；
-- 1688 API 与 PDD worker 自动化代码已完成（配置/签名/分页详情映射、服务器批次接收与迁移、PDD dry-run 快照与 commit、收货运单匹配闭环），真实 1688 授权调用和 PDD 页面采集仍待手工验收；
+- 1688 API 已有真实授权账号；PDD worker 的多账号配置、独立 profile、串行 dry-run、状态上报、
+  snapshot/commit 和管理员账号页已完成，真实 PDD 页面采集仍待手工验收；
 - Git 回滚基线已建立并推送到 GitHub `hyyyyyyz/arrival-ledger`（提交 `d431654`）。
 
-### 8.4 服务器迁移：192.168.1.4 → 192.168.1.5
+### 8.4 生产发布原则
 
-目标机 .5 已有 cash-save/Caddy 使用 80、443 和 127.0.0.1:8000；arrival-ledger 继续使用 8766，不修改 Caddy 和 cash-save。Docker 已安装并启动。
-
-迁移必须遵循：
-
-1. 先在所有手机的旧链接确认“待上传/失败/上传中”均为 0；.4 和 .5 是不同浏览器 origin，IndexedDB 队列不会自动迁移；
-2. 暂停旧机收货写入，在 .4 生成 SQLite/media/uploads 一致性备份并计算 SHA-256；
-3. 单独安全复制 .env，只把 TRUSTED_HOSTS 更新为 192.168.1.5；
-4. 在 .5 安装 Docker/Compose，代码放 /home/jackson/arrival-ledger（已完成）；
-5. 还原数据到兼容路径 /home/jackson/arrival-manager-data 并恢复 UID/GID 10001 权限；
-6. 在 .5 启动并验证健康、页面、历史照片、上传、重启和备份（服务端检查已完成，真机上传待验收）；
-7. 手机确认 http://192.168.1.5:8766 可用后，停止 .4 的 arrival-manager Compose 栈（已完成）；
-8. 保存最终离机备份后，仅清理 .4 上本项目的容器、网络、镜像、代码目录和数据目录（已做可恢复归档，待真机确认后删除）；
-9. 严禁清理 .4 的 pharos:8848、Docker 全局资源或其他目录。
-
-在第 6–7 步验收完成之前，任何“清理 .4”操作都不允许执行。
+1. 发布前先确认所有手机的“待上传/失败/上传中”均为 0；不同 origin 的 IndexedDB 队列不会自动迁移；
+2. 数据库与 `media/uploads` 必须做同一停写窗口的一致性归档并计算 SHA-256；
+3. `.env`、1688 secret 和 worker key 单独安全配置，不进入 Git 或普通备份；
+4. 发布后验证健康检查、登录、订单、历史照片、拍照上传、人工收货纠正、重启持久化和备份恢复；
+5. 保留上一版本镜像和数据归档至少一个回滚周期，禁止新旧两端同时写入；
+6. 不修改或清理同机其他项目、Docker 全局资源或无关目录。详细命令见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
 
 ## 9. 访问、安全、隐私与备份
 
@@ -495,22 +488,22 @@ sync_runs(
 - X-Arrival-Client 只是降低跨站误触发的防护，不是身份认证；
 - 所有操作暂归固定 warehouse operator，并记录 device_id，不能证明具体是谁操作。
 
-公网模式（当前临时测试）：
+公网模式（当前长期部署）：
 
 - 先设置 AUTH_REQUIRED=true、COOKIE_SECURE=true；
-- 必须使用 HTTPS；当前可用的 Quick Tunnel 仅为随机临时地址，不是稳定域名；
+- 必须使用 HTTPS；Quick Tunnel 仅可用于临时诊断，不作为长期入口；
 - 图片读取、订单导入和同步接口都需要鉴权；
 - 不得把 8766 端口或局域网免登录模式直接端口映射到公网；隧道 ingress 只允许指向 `127.0.0.1:8766`，不得指向 Caddy/cash-save。
 
-### 9.2 Windows 同步端信任边界
+### 9.2 Mac/Windows 同步端信任边界
 
-- 拼多多密码、Cookie、二维码登录态和 profile 只存在 Windows；
-- Windows 只向服务器发起出站 HTTPS/局域网请求；
+- 拼多多密码、Cookie、二维码登录态和 profile 只存在实际运行同步器的 Mac/Windows；
+- 同步电脑只向服务器发起出站 HTTPS/局域网请求；
 - 使用可撤销、可轮换的专用 sync worker API key；
 - API key 不与管理员会话共用；
 - 服务器只接受订单必要字段和同步批次，不接受浏览器控制指令；
 - profile 目录不备份到服务器、不上传聊天、不放 Git；
-- Windows 日志不得打印 Cookie、Authorization header 或完整地址。
+- 同步电脑日志不得打印 Cookie、Authorization header 或完整地址。
 
 ### 9.3 照片和备份
 
@@ -520,7 +513,7 @@ sync_runs(
 - 至少一份备份放另一台设备或异地存储；
 - 建议 7 个日备、4 个周备、12 个月备；
 - 每月执行恢复演练；
-- .env 和 sync worker key 单独保存，不进入普通照片备份；平台密码、Cookie 和 profile 只在 Windows 本地。
+- .env 和 sync worker key 单独保存，不进入普通照片备份；平台密码、Cookie 和 profile 只在同步电脑本地。
 
 ## 10. 分阶段实施计划
 
@@ -567,16 +560,17 @@ sync_runs(
 
 ### 阶段 P2：拼多多低频同步（实际优先级最高的平台增强）
 
-拼多多是当前必须覆盖的平台，因此在 CSV 导入完成后优先验证 Windows 浏览器路线；这项能力仍然是非官方实验，不能阻塞 P0/P1。
+拼多多是当前必须覆盖的平台，因此优先验证 Mac/Windows 可见浏览器路线；这项能力仍然是非官方实验，不能阻塞 P0/P1。
 
-- [ ] Windows 10/11 安装独立 `pdd` profile；
-- [ ] 首次人工登录并确认账号不是测试号；
-- [ ] `login-check` 和 `sync-once --mode dry-run` 可见运行；
+- [x] 支持 `PDD_ACCOUNTS_FILE`，每个账号独立 profile/游标/锁/访问冷却；
+- [x] 支持管理员登记账号 key/名称并查看脱敏状态和订单数；
+- [x] `accounts`、`login-check --account`、`sync-once --account` 与严格串行 `sync-all --mode dry-run`；
+- [ ] 在真实 Mac/Windows 同步电脑逐账号人工登录并确认不是测试号；
 - [ ] 读取最近 20–30 个真实订单；
 - [ ] 字段完整率、运单匹配率、重复幂等验收；
-- [ ] 加入 NEEDS_LOGIN/CAPTCHA_OR_BLOCKED/SCHEMA_CHANGED/NETWORK_ERROR 状态；
-- [ ] 用户确认 dry-run 报告后再执行 commit；
-- [ ] 稳定后才评估 Windows Task Scheduler，每天 1–2 次；
+- [x] NEEDS_LOGIN/CAPTCHA_OR_BLOCKED/SCHEMA_CHANGED/NETWORK_ERROR 状态上报；
+- [x] 用户确认 dry-run snapshot 后才能逐账号执行 commit；
+- [ ] 稳定后另行开发并评估 macOS/Windows 计划任务；
 - [ ] 首次扩大回补范围前先做备份和人工抽样。
 
 只有以下条件同时满足，才允许定时启用：
@@ -649,13 +643,13 @@ dry-run、全账号同步、游标隔离、多商品/多包裹和运单匹配验
 1. 1688 至少两个授权账号分别通过 `config-doctor` 和单账号 dry-run；
 2. 1688 订单 ID、商品、SKU、数量、状态和多包裹物流映射正确；
 3. 1688 重复同步不增加重复记录，失败账号不推进自己的游标；
-4. PDD 独立 profile 首次人工登录成功并手动同步 20–30 条真实订单；
+4. 至少两个 PDD 账号用不同 profile 首次人工登录成功，并分别手动同步 20–30 条真实订单；
 5. PDD 订单号、商品、规格、数量、店铺和页面可见物流字段完整率达到 95%；
 6. 服务器不保存平台密码、Cookie、完整 profile、地址或电话；
 7. 1688 权限/结构错误和 PDD 登录/验证码/页面改版进入明确错误状态；
 8. dry-run 与 commit 的记录集合一致，重复提交幂等；
 9. 停止任一同步端时，P0/P1 功能仍正常；
-10. 只有验收通过后，才允许启用 1688 服务端定时器或 PDD Task Scheduler。
+10. 只有验收通过后，才允许启用 1688 服务端定时器；PDD 计划任务须另行开发和评审。
 
 ### 11.4 公网
 
@@ -671,22 +665,22 @@ dry-run、全账号同步、游标隔离、多商品/多包裹和运单匹配验
 |---|---|---|
 | PDD 网页改版/风控 | PDD 浏览器同步停止 | CSV、截图/OCR、手工导入；同步熔断 |
 | 1688 API 权限/结构变化 | 1688 API 同步停止 | 重新授权、检查官方文档；回退 CSV/手工导入 |
-| 拼多多协议限制 | 账号或工具风险 | 只读、低频、单账号、人工登录，不绕过验证 |
-| 浏览器登录失效/验证码 | 同步不可用 | Windows 窗口人工处理；不自动重试或绕过 |
+| 拼多多协议限制 | 账号或工具风险 | 多账号严格串行、只读、低频、人工登录，不绕过验证 |
+| 浏览器登录失效/验证码 | 同步不可用 | 同步电脑对应账号窗口人工处理；不自动重试或绕过 |
 | 页面结构变化 | 错误订单入库 | `SCHEMA_CHANGED` 熔断，保留游标和脱敏诊断 |
 | 面单无平台订单号 | 无法直接反查 | 预先建立运单映射，未知单号进入待认领 |
 | 同一订单拆包/合包 | 错误打勾 | 多对多链接和包裹级确认 |
 | 手机浏览器清理本地数据 | 待上传照片丢失 | 尽快上传、显示未同步、服务器/异机备份 |
 | 局域网免登录被误用 | 同网设备可修改 | 明确可信网络边界；公网前启用认证 |
 | 照片增长过快 | 磁盘不足 | 压缩、告警、保留策略、异机归档 |
-| Windows 休眠/关机 | 定时任务错过 | 开机补跑，记录最后成功游标 |
+| 同步电脑休眠/关机 | 同步任务无法运行 | 当前人工补跑并记录最后成功游标；未来计划任务另行评审 |
 | 服务器 IP 变化 | 手机打不开 | 路由器 DHCP 保留，后续域名/Tunnel |
 
 ## 13. 当前待确认事项
 
 这些事项不会阻塞 P0：
 
-1. 闲置 Windows 的版本（Windows 10/11）及是否允许长期接电运行；
+1. 最终承担 PDD 同步的 Mac/Windows 设备及是否允许长期接电运行；
 2. PDD 独立 profile 的 `account_key` 标签，以及 1688 服务器 secret 中各账号的 `account_key`；
 3. 服务器照片的异机备份目标；
 4. 是否在临时隧道验收后恢复局域网免登录，还是继续保留认证模式；
@@ -697,13 +691,22 @@ dry-run、全账号同步、游标隔离、多商品/多包裹和运单匹配验
 1. 先完成微信真机拍摄一件和连续 30 件局域网验收；
 2. 实现 CSV 预览、导入、去重和订单—包裹匹配；
 3. 用现有拼多多样本验证扫描运单号能反查商品；
-4. 按 [`DEEPSEEK_HANDOFF.md`](DEEPSEEK_HANDOFF.md) 完成 1688 API 与 PDD worker 的测试和交接；
-5. 服务器按 API 文档对 1688 各账号执行 `config-doctor → dry-run → commit`；Windows 只对 PDD 执行
-   `doctor → 必要时 login-check → 等待冷却 → dry-run → commit`；
-6. 两条路线手工稳定后才分别启用低频定时器；
+4. 按 [`docs/PDD_MULTI_ACCOUNT.md`](docs/PDD_MULTI_ACCOUNT.md) 在管理员网页和同步电脑配置完全一致的
+   `account_key`，每个账号使用独立 profile；
+5. 逐账号执行 `login-check --account → 等待冷却 → dry-run → 核对 snapshot → commit`，再执行一次
+   `sync-all --mode dry-run` 验证严格串行和错误隔离；
+6. PDD 真实账号验收稳定后，才另行决定是否开发计划任务；
 7. 最后决定公网访问策略，并在公网前切换认证。
 
 ## 15. 变更记录
+
+### v1.5（2026-08-30）
+
+- PDD 从单账号扩展为多账号：`PDD_ACCOUNTS_FILE`、一账号一 profile、账号级游标/锁/冷却及全局浏览器互斥；
+- 新增管理员 PDD 账号登记/状态页、worker 状态上报接口和数据库 migration v7；
+- 新增 `accounts`、`--account` 和严格串行、仅 dry-run 的 `sync-all`；commit 仍须逐账号人工核对；
+- 同步电脑正式支持有桌面会话的 Mac 或 Windows；profile/Cookie 始终只留在对应同步电脑；
+- 明确远程 noVNC、服务器浏览器、Cookie 注入和 PDD 定时 commit 均未实现。
 
 ### v1.4（历史，2026-08-14；1688 浏览器方案已废止）
 

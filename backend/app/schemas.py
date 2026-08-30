@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def _validate_bcrypt_password_bytes(value: str) -> str:
@@ -73,6 +74,122 @@ class UserManagementAuditListResponse(BaseModel):
 class AuthResponse(BaseModel):
     user: UserOut
     auth_required: bool = True
+
+
+PlatformAccountSyncStatus = Literal[
+    "OK",
+    "NEEDS_LOGIN",
+    "CAPTCHA_OR_BLOCKED",
+    "SCHEMA_CHANGED",
+    "NETWORK_ERROR",
+    "DISABLED",
+]
+
+
+def normalize_platform_account_key(value: str) -> str:
+    normalized = value.strip().lower()
+    if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", normalized) is None:
+        raise ValueError(
+            "account_key must start with a letter or digit and contain only "
+            "lowercase letters, digits, ., _ and -"
+        )
+    return normalized
+
+
+class PlatformAccountCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    platform: Literal["pdd"]
+    account_key: str = Field(min_length=1, max_length=64)
+    display_label: str = Field(min_length=1, max_length=128)
+
+    @field_validator("account_key")
+    @classmethod
+    def normalize_account_key(cls, value: str) -> str:
+        return normalize_platform_account_key(value)
+
+    @field_validator("display_label")
+    @classmethod
+    def display_label_not_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("display_label must not be blank")
+        return normalized
+
+
+class PlatformAccountStatusIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1]
+    worker_id: str = Field(min_length=1, max_length=64)
+    platform: Literal["pdd"]
+    platform_account_key: str = Field(min_length=1, max_length=64)
+    platform_account_label: str | None = Field(default=None, max_length=128)
+    status: PlatformAccountSyncStatus
+    checked_at: datetime
+    count: int | None = Field(default=None, ge=0)
+    message: str | None = Field(default=None, max_length=256)
+
+    @field_validator("worker_id")
+    @classmethod
+    def worker_id_not_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("worker_id must not be blank")
+        return normalized
+
+    @field_validator("platform_account_key")
+    @classmethod
+    def normalize_account_key(cls, value: str) -> str:
+        return normalize_platform_account_key(value)
+
+    @field_validator("platform_account_label")
+    @classmethod
+    def optional_label_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("platform_account_label must not be blank")
+        return normalized
+
+    @field_validator("checked_at")
+    @classmethod
+    def checked_at_is_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("checked_at must include a timezone offset")
+        return value
+
+    @field_validator("message")
+    @classmethod
+    def normalize_message(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class PlatformAccountOut(BaseModel):
+    id: int
+    platform: Literal["pdd"]
+    account_key: str
+    display_label: str | None
+    source: Literal["WINDOWS_BROWSER", "ALI1688_API"]
+    status: PlatformAccountSyncStatus
+    worker_id: str | None
+    order_count: int = Field(ge=0)
+    last_attempt_at: datetime | None
+    last_success_at: datetime | None
+    last_count: int = Field(ge=0)
+    message: str | None
+    created_at: datetime
+    updated_at: datetime
+    status_updated_at: datetime
+
+
+class PlatformAccountListResponse(BaseModel):
+    items: list[PlatformAccountOut]
+    total: int = Field(ge=0)
 
 
 class DashboardStatsOut(BaseModel):

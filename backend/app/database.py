@@ -100,6 +100,22 @@ CREATE TABLE IF NOT EXISTS platform_accounts (
     UNIQUE(platform, account_key)
 );
 
+CREATE TABLE IF NOT EXISTS platform_account_sync_state (
+    platform_account_id INTEGER PRIMARY KEY
+        REFERENCES platform_accounts(id) ON DELETE CASCADE,
+    status TEXT NOT NULL
+        CHECK (status IN (
+            'OK', 'NEEDS_LOGIN', 'CAPTCHA_OR_BLOCKED',
+            'SCHEMA_CHANGED', 'NETWORK_ERROR', 'DISABLED'
+        )),
+    worker_id TEXT,
+    last_attempt_at TEXT,
+    last_success_at TEXT,
+    last_count INTEGER NOT NULL DEFAULT 0 CHECK (last_count >= 0),
+    message TEXT CHECK (message IS NULL OR length(message) <= 256),
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS purchase_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     platform_account_id INTEGER NOT NULL REFERENCES platform_accounts(id),
@@ -447,6 +463,49 @@ def _migration_user_management_audit(connection: sqlite3.Connection) -> None:
     """)
 
 
+def _migration_platform_account_sync_state(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS platform_account_sync_state (
+            platform_account_id INTEGER PRIMARY KEY
+                REFERENCES platform_accounts(id) ON DELETE CASCADE,
+            status TEXT NOT NULL
+                CHECK (status IN (
+                    'OK', 'NEEDS_LOGIN', 'CAPTCHA_OR_BLOCKED',
+                    'SCHEMA_CHANGED', 'NETWORK_ERROR', 'DISABLED'
+                )),
+            worker_id TEXT,
+            last_attempt_at TEXT,
+            last_success_at TEXT,
+            last_count INTEGER NOT NULL DEFAULT 0 CHECK (last_count >= 0),
+            message TEXT CHECK (message IS NULL OR length(message) <= 256),
+            updated_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        INSERT OR IGNORE INTO platform_account_sync_state(
+            platform_account_id, status, worker_id, last_attempt_at,
+            last_success_at, last_count, message, updated_at
+        )
+        SELECT
+            id, 'NEEDS_LOGIN', NULL, NULL, NULL, 0,
+            '等待同步器首次上报状态', updated_at
+        FROM platform_accounts
+        WHERE platform = 'pdd'
+    """)
+
+
+def _migration_normalize_pdd_account_source(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute("""
+        UPDATE platform_accounts
+        SET source = 'WINDOWS_BROWSER'
+        WHERE platform = 'pdd' AND source <> 'WINDOWS_BROWSER'
+    """)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial_schema", apply=_migration_initial_schema),
     Migration(version=2, name="item_identity", apply=_migration_item_identity),
@@ -469,6 +528,16 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=6,
         name="user_management_audit",
         apply=_migration_user_management_audit,
+    ),
+    Migration(
+        version=7,
+        name="platform_account_sync_state",
+        apply=_migration_platform_account_sync_state,
+    ),
+    Migration(
+        version=8,
+        name="normalize_pdd_account_source",
+        apply=_migration_normalize_pdd_account_source,
     ),
 )
 

@@ -1,6 +1,7 @@
 import { chromium, type BrowserContext } from "playwright";
 
 import type { Platform } from "../models.js";
+import { prepareProfileDirForBrowser } from "../profile_path.js";
 
 export interface SyncBrowser {
   context: BrowserContext;
@@ -30,7 +31,8 @@ export function assertAllowedOrderListUrl(platform: Platform, url: string): void
 }
 
 export async function launchSyncBrowser(profileDir: string): Promise<SyncBrowser> {
-  const context = await chromium.launchPersistentContext(profileDir, {
+  const safeProfileDir = prepareProfileDirForBrowser(profileDir);
+  const context = await chromium.launchPersistentContext(safeProfileDir, {
     headless: false,
     viewport: { width: 1280, height: 900 },
   });

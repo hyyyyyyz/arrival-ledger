@@ -1,10 +1,17 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { configFailures, loadConfig, maskKey, parseEnvFile } from "../src/config.js";
+import {
+  configFailures,
+  configForPddAccount,
+  loadConfig,
+  maskKey,
+  parseEnvFile,
+  selectPddAccount,
+} from "../src/config.js";
 
 const createdDirs: string[] = [];
 
@@ -162,6 +169,135 @@ describe("loadConfig", () => {
       },
     });
     expect(issues.some((issue) => issue.field.includes("PDD_PROFILE_DIR/ALI1688_PROFILE_DIR"))).toBe(true);
+  });
+
+  it("loads a strict multi-account PDD file and resolves relative profile directories", () => {
+    const dir = tempDir();
+    const configDir = join(dir, "config");
+    mkdirSync(configDir);
+    const accountsFile = join(configDir, "pdd-accounts.json");
+    writeFileSync(
+      accountsFile,
+      JSON.stringify({
+        schema_version: 1,
+        accounts: [
+          { account_key: "PDD.Main", display_label: "采购主账号", profile_dir: "../profiles/main" },
+          { account_key: "pdd-backup", display_label: "采购备用账号", profile_dir: "../profiles/backup" },
+        ],
+      }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    const { config, issues } = loadConfig({
+      cwd: dir,
+      env: { PDD_ACCOUNTS_FILE: "config/pdd-accounts.json" },
+    });
+    expect(configFailures(issues)).toEqual([]);
+    expect(config.pdd_accounts.map((item) => item.account_key)).toEqual(["pdd.main", "pdd-backup"]);
+    const canonicalDir = realpathSync.native(dir);
+    expect(config.pdd_accounts[0]?.profile_dir).toBe(join(canonicalDir, "profiles", "main"));
+    expect(config.pdd_accounts_file).toBe(accountsFile);
+    expect(selectPddAccount(config).message).toContain("multiple");
+    const selected = selectPddAccount(config, "PDD.Main");
+    expect(selected.account?.display_label).toBe("采购主账号");
+    const selectedConfig = configForPddAccount(config, selected.account!);
+    expect(selectedConfig.account_keys.pdd).toBe("pdd.main");
+    expect(selectedConfig.profile_dirs.pdd).toBe(join(canonicalDir, "profiles", "main"));
+  });
+
+  it("ignores legacy single-account PDD fields when the accounts file is configured", () => {
+    const dir = tempDir();
+    const accountsFile = join(dir, "accounts.json");
+    writeFileSync(
+      accountsFile,
+      JSON.stringify({ schema_version: 1, accounts: [{ account_key: "buyer.one", profile_dir: "profile" }] }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    const { config, issues } = loadConfig({
+      cwd: dir,
+      env: {
+        PDD_ACCOUNTS_FILE: accountsFile,
+        PDD_ACCOUNT_KEY: "invalid legacy key!",
+        PDD_PROFILE_DIR: "",
+      },
+    });
+    expect(configFailures(issues)).toEqual([]);
+    expect(config.account_keys.pdd).toBe("buyer.one");
+  });
+
+  it("rejects duplicate normalized keys, duplicate profiles and unknown fields", () => {
+    const dir = tempDir();
+    const accountsFile = join(dir, "accounts.json");
+    writeFileSync(
+      accountsFile,
+      JSON.stringify({
+        schema_version: 1,
+        unexpected: true,
+        accounts: [
+          { account_key: "Buyer.One", profile_dir: "profiles/shared" },
+          { account_key: "buyer.one", profile_dir: "profiles/shared", extra: "no" },
+        ],
+      }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    const { issues } = loadConfig({ cwd: dir, env: { PDD_ACCOUNTS_FILE: accountsFile } });
+    const messages = issues.map((issue) => `${issue.field}: ${issue.message}`).join("\n");
+    expect(messages).toContain("duplicate account_key");
+    expect(messages).toContain("profile_dir must be unique");
+    expect(messages).toContain("unknown root field");
+    expect(messages).toContain("unknown field");
+  });
+
+  it("rejects a symlink accounts file and an existing symlink profile", () => {
+    const dir = tempDir();
+    const realFile = join(dir, "real.json");
+    writeFileSync(realFile, JSON.stringify({ schema_version: 1, accounts: [{ account_key: "pdd-main", profile_dir: "profile" }] }), { encoding: "utf8", mode: 0o600 });
+    const linkFile = join(dir, "link.json");
+    symlinkSync(realFile, linkFile);
+    const linkedFileResult = loadConfig({ cwd: dir, env: { PDD_ACCOUNTS_FILE: linkFile } });
+    expect(linkedFileResult.issues.some((issue) => issue.message.includes("symbolic link"))).toBe(true);
+
+    const targetProfile = join(dir, "real-profile");
+    mkdirSync(targetProfile);
+    const profileLink = join(dir, "profile-link");
+    symlinkSync(targetProfile, profileLink, "dir");
+    writeFileSync(realFile, JSON.stringify({ schema_version: 1, accounts: [{ account_key: "pdd-main", profile_dir: profileLink }] }), { encoding: "utf8", mode: 0o600 });
+    const linkedProfileResult = loadConfig({ cwd: dir, env: { PDD_ACCOUNTS_FILE: realFile } });
+    expect(linkedProfileResult.issues.some((issue) => issue.field.endsWith("profile_dir") && issue.message.includes("symbolic link"))).toBe(true);
+  });
+
+  it("rejects a parent symlink/junction alias and deduplicates its canonical eventual profile", () => {
+    const dir = tempDir();
+    const realParent = join(dir, "profiles-real");
+    const aliasParent = join(dir, "profiles-alias");
+    mkdirSync(realParent);
+    symlinkSync(realParent, aliasParent, process.platform === "win32" ? "junction" : "dir");
+    const accountsFile = join(dir, "accounts.json");
+    writeFileSync(
+      accountsFile,
+      JSON.stringify({
+        schema_version: 1,
+        accounts: [
+          { account_key: "buyer-one", profile_dir: join(realParent, "buyer") },
+          { account_key: "buyer-two", profile_dir: join(aliasParent, "buyer") },
+        ],
+      }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+
+    const { issues } = loadConfig({ cwd: dir, env: { PDD_ACCOUNTS_FILE: accountsFile } });
+    const messages = issues.map((issue) => issue.message).join("\n");
+    expect(messages).toMatch(/symbolic link|junction/);
+    expect(messages).toContain("profile_dir must be unique");
+  });
+
+  it("rejects group-writable account files where POSIX modes are available", () => {
+    if (process.platform === "win32") return;
+    const dir = tempDir();
+    const accountsFile = join(dir, "accounts.json");
+    writeFileSync(accountsFile, JSON.stringify({ schema_version: 1, accounts: [{ account_key: "pdd-main", profile_dir: "profile" }] }), { encoding: "utf8", mode: 0o600 });
+    chmodSync(accountsFile, 0o620);
+    const { issues } = loadConfig({ cwd: dir, env: { PDD_ACCOUNTS_FILE: accountsFile } });
+    expect(issues.some((issue) => issue.severity === "FAIL" && issue.message.includes("group or other"))).toBe(true);
   });
 
   it("configFailures filters FAIL severity only", () => {

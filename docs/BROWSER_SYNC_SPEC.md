@@ -1,8 +1,8 @@
 # 浏览器自动化同步技术规格（Browser Sync MVP）
 
-版本：1.4（2026-08-14）
+版本：1.5（2026-08-30）
 适用仓库：`arrival-ledger`
-状态：MVP 已实现，等待 Windows 真机手工验收
+状态：PDD 多账号第一阶段已实现，等待 Mac/Windows 真实账号手工验收
 
 ## 1. 目的与边界
 
@@ -20,16 +20,17 @@
 - 不自动下单、支付、退款、确认收货、评价或修改任何平台数据。
 - 不绕过验证码、滑块、登录保护、风控或人机校验；出现这些页面立即停止并等待人工。
 - 不使用代理池、IP 轮换、多账号并发、隐藏窗口、无限滚动高频轮询或“反检测”技术。
+- 第一阶段不提供远程 noVNC、服务器端浏览器、Cookie 注入、后台定时 commit 或无人值守登录。
 
 ## 2. 总体架构
 
 ```text
-Windows 10/11（闲置电脑）
+Mac 或 Windows 10/11（有桌面会话的同步电脑）
   ├─ Node.js 20 LTS + TypeScript 同步程序
-  ├─ Playwright + 可见 Chromium
-  ├─ C:\ArrivalLedger\profiles\pdd       # 仅拼多多浏览器登录态
-  ├─ C:\ArrivalLedger\state               # 游标、批次、锁
-  └─ C:\ArrivalLedger\logs                # 脱敏日志
+  ├─ Playwright + 可见浏览器
+  ├─ profiles/pdd-main、profiles/pdd-backup # 每个账号独立持久化 profile
+  ├─ state                                  # 按账号隔离的游标、批次、锁
+  └─ logs                                   # 脱敏日志
           │ 仅上传订单必要字段
           ▼
 Ubuntu 192.168.1.5
@@ -39,17 +40,25 @@ Ubuntu 192.168.1.5
   └─ 手机收货 H5：运单匹配与照片凭证
 ```
 
-服务器是纯 Server，不安装桌面环境，也不反向控制 Windows 浏览器。Windows 端主动发起请求；服务器只接受结构化订单批次。
+服务器是纯 Server，不安装桌面环境，也不反向控制同步电脑的浏览器。同步电脑主动发起请求；服务器只接受
+结构化订单批次和脱敏账号状态。profile、Cookie 和浏览器存储不离开同步电脑。
 
 ### 2.1 拼多多浏览器 profile
 
-拼多多使用独立的 `user-data-dir`，不得复用用户日常 Chrome profile：
+每个拼多多账号使用独立的 `user-data-dir`，不得复用用户日常 Chrome profile，也不得让两个采购账号
+共用目录：
 
 ```text
-C:\ArrivalLedger\profiles\pdd
+profiles/pdd-main
+profiles/pdd-backup
 ```
 
-首次运行由用户在可见窗口中登录。程序只检查是否已登录，不自动填写密码、不保存密码、不代做短信/扫码确认。profile 目录永远只留在 Windows，不能进入 Git、服务器备份或同步接口。
+首次运行由用户在可见窗口中登录。程序只检查是否已登录，不自动填写密码、不保存密码、不代做短信/扫码确认。profile 目录永远只留在其对应同步电脑，不能进入 Git、服务器备份或同步接口。
+
+多账号清单由 `PDD_ACCOUNTS_FILE` 指向的 JSON v1 文件定义，每项只含 `account_key`、可选
+`display_label` 和 `profile_dir`。`account_key` 是跨管理员网页、同步端游标和服务器订单的稳定关联键，
+不是手机号或平台用户名。管理员网页只登记同一个 key/名称并显示状态，不配置 profile、不收集凭证、
+也不会远程打开浏览器。操作教程见 [`PDD_MULTI_ACCOUNT.md`](PDD_MULTI_ACCOUNT.md)。
 
 ## 3. 第一测试版本（MVP-1）
 
@@ -57,37 +66,56 @@ C:\ArrivalLedger\profiles\pdd
 
 ```powershell
 npm run doctor
-npm run login-check -- --platform pdd
-npm run sync-once -- --platform pdd --mode dry-run
-npm run sync-once -- --platform pdd --mode commit --from-report .\state\snapshot-pdd-pdd-main-<batch_id>.json --yes
+npm run accounts -- --platform pdd
+npm run login-check -- --platform pdd --account pdd-main
+npm run sync-once -- --platform pdd --account pdd-main --mode dry-run
+npm run sync-once -- --platform pdd --account pdd-main --mode commit --from-report .\state\snapshot-pdd-pdd-main-<batch_id>.json --yes
+npm run sync-all -- --platform pdd --mode dry-run
 ```
 
 `sync-once` 运行时浏览器保持可见（始终 headed，无隐藏运行模式）；用户能看到当前页面和进度。
 首次同步从平台当前订单列表的最新页开始，默认最多 30 条；当前单次快照与服务器单批上限均为 100 条。每个平台先手动跑通 20–30 条
-真实订单，再考虑 Task Scheduler。
+真实订单。`sync-all` 严格按账号清单顺序逐个 dry-run，某账号失败不会并发或阻止后续状态检查，但整个
+命令返回非零；它不支持 commit。每个 snapshot 必须人工核对后再逐账号 commit。
 
 本机配置只保存非敏感连接信息和路径，例如：
 
 ```dotenv
 ARRIVAL_API_BASE_URL=http://192.168.1.5:8766
 ARRIVAL_SYNC_WORKER_KEY=填入本机密钥，不提交 Git
-PDD_PROFILE_DIR=C:/ArrivalLedger/profiles/pdd
+PDD_ACCOUNTS_FILE=config/pdd-accounts.json
 SYNC_MAX_PAGES=5
 SYNC_MAX_RECORDS=30
 SYNC_PAGE_DELAY_MS=2500
 ```
 
-密码、短信验证码、二维码登录内容和平台 Cookie 不得出现在配置文件、命令行参数、进程标题或日志中。Windows 上的密钥文件应由 ACL 只允许当前用户读取；若通过公网隧道传输，`ARRIVAL_API_BASE_URL` 必须使用 `https://`。
+账号清单示例：
+
+```json
+{
+  "schema_version": 1,
+  "accounts": [
+    {"account_key": "pdd-main", "display_label": "主采购账号", "profile_dir": "../profiles/pdd-main"},
+    {"account_key": "pdd-backup", "display_label": "备用采购账号", "profile_dir": "../profiles/pdd-backup"}
+  ]
+}
+```
+
+密码、短信验证码、二维码登录内容和平台 Cookie 不得出现在配置文件、命令行参数、进程标题或日志中。
+macOS 使用文件权限、Windows 使用 NTFS ACL，仅允许运行同步端的本机用户读取私密文件；若通过公网
+传输，`ARRIVAL_API_BASE_URL` 必须使用 `https://`。
 
 ### MVP-1 完成条件
 
-1. 拼多多 profile 可由用户手工登录并通过 `login-check`。
-2. PDD 成功读取至少 20 条真实订单；订单号、商品、规格、数量、店铺等列表字段完整率不低于 95%。1688 的 API 验收见 `docs/ALI1688_OPEN_API.md`。
+1. 至少两个拼多多账号使用不同 profile，由用户逐账号手工登录并通过 `login-check --account`。
+2. 每个验收账号成功读取至少 20 条真实订单；订单号、商品、规格、数量、店铺等列表字段完整率不低于 95%。1688 的 API 验收见 `docs/ALI1688_OPEN_API.md`。
 3. 同一批次重复运行不新增重复订单、商品行或包裹。
 4. PDD 至少一个带运单号的订单能在手机收货页面显示商品；1688 API 的物流验收见 `docs/ALI1688_OPEN_API.md`。
 5. 登录过期、验证码、页面改版均产生明确状态，不静默写入错误数据。
-6. 服务器数据库/日志中不存在密码、Cookie、完整地址和原始 HTML；worker token 的明文只存在于服务器受限 `.env` 与 Windows 受 ACL 保护的 `.env.local`，数据库只保存摘要。
-7. 关闭 Windows 同步程序后，P0 收货页面仍可正常使用。
+6. 服务器数据库/日志中不存在密码、Cookie、完整地址和原始 HTML；worker token 的明文只存在于服务器受限 `.env` 与同步电脑受权限保护的 `.env.local`，数据库只保存摘要。
+7. 关闭 Mac/Windows 同步程序后，P0 收货页面仍可正常使用。
+8. `sync-all --mode dry-run` 严格串行，账号状态能在管理员网页区分展示；没有任何 profile、Cookie 或
+   登录态出现在服务器。
 
 `dry-run` 只读取、解析、校验并把完整记录集保存为本地私有 snapshot（含 payload hash），不能写服务器；
 `commit` 必须通过 `--from-report <snapshot>` 读取该 snapshot 上传，**不能重新打开网页抓取**；
@@ -103,11 +131,12 @@ sync-agent/
   README.md
   package.json / package-lock.json / tsconfig.json
   src/
-    cli.ts                 # doctor/login-check/capture-page/sync-once
+    cli.ts                 # doctor/accounts/login-check/capture-page/sync-once/sync-all
     capture_page.ts        # 单次、只读、严格脱敏的结构诊断
     config.ts              # 本机配置，不含密码/Cookie
     models.ts              # 统一订单与批次类型
     run.ts                 # dry-run/commit 编排
+    pdd_multi.ts           # PDD 多账号串行 dry-run 与状态上报
     normalize.ts           # 纯函数规范化
     transport.ts           # 到货管家内部接口客户端
     browser/
@@ -263,9 +292,9 @@ interface PlatformAdapter {
 - 只有服务器确认批次成功后才推进 `last_cursor`；
 - 每次运行生成本地报告，包含读取数、有效数、跳过数、上传数、错误数和状态。
 
-## 7. Windows → Server 接口契约
+## 7. 同步电脑 → Server 接口契约
 
-同步端不使用管理员会话 Cookie，使用单独、可撤销、可轮换的 worker token。token 只放 Windows 私密配置和服务器 `.env`，不进源码。
+同步端不使用管理员会话 Cookie，使用单独、可撤销、可轮换的 worker token。token 只放同步电脑私密配置和服务器 `.env`，不进源码。
 
 ### 7.1 批次请求
 
@@ -315,15 +344,42 @@ Idempotency-Key: <batch_id>
 
 `mode` 为 `dry_run` 时客户端不得调用该接口；服务端只接受 `commit` 批次。每批最多 100 个订单，字段长度、日期、数量和运单号格式均须校验。响应必须返回：`batch_id`、`created`、`updated`、`skipped`、`errors`、`cursor_accepted`。重复提交同一 `batch_id` 必须返回原结果，不重复写入。
 
-### 7.2 服务器安全要求
+### 7.2 账号状态请求
+
+`login-check` 和 dry-run 尽力把当前账号状态上报到：
+
+```http
+POST /api/sync/v1/account-status
+Authorization: Bearer <sync-worker-token>
+Content-Type: application/json
+```
+
+```json
+{
+  "schema_version": 1,
+  "worker_id": "pdd-sync-computer-01",
+  "platform": "pdd",
+  "platform_account_key": "pdd-main",
+  "platform_account_label": "主采购账号",
+  "status": "OK|NEEDS_LOGIN|CAPTCHA_OR_BLOCKED|SCHEMA_CHANGED|NETWORK_ERROR|DISABLED",
+  "checked_at": "ISO-8601",
+  "count": 20,
+  "message": "脱敏摘要"
+}
+```
+
+状态上报失败不能覆盖本地报告或触发平台重开。管理员网页通过受管理员权限保护的账号管理接口登记
+`account_key`/名称、读取状态和订单数；它不接收 `profile_dir`、Cookie、密码或 worker token。
+
+### 7.3 服务器安全要求
 
 - worker token 只允许访问同步批次接口，不能调用管理员登录、照片读取或删除接口；
-- token 明文仅存在于服务器 `.env`（`SYNC_WORKER_TOKENS`）与 Windows 本机 `.env.local`；数据库只存 HMAC 摘要，支持撤销和轮换；
+- token 明文仅存在于服务器 `.env`（`SYNC_WORKER_TOKENS`）与同步电脑 `.env.local`；数据库只存 HMAC 摘要，支持撤销和轮换；
 - 限制请求体大小、批次订单数和请求频率；
 - 记录 `worker_id`、平台、批次、时间和结果，不记录 Authorization 原文；
 - 公网使用时必须 HTTPS；局域网 HTTP 只用于首次测试且不得把端口转发公网；
 - 原始页面、截图、Cookie 和密码不上传；手工执行 `capture-page` 产生的严格脱敏结构诊断只保存在
-  Windows 本地。目前不承诺自动清理，使用者应在问题修复后人工删除 `state/diagnostics/` 中的旧文件。
+  同步电脑本地。目前不承诺自动清理，使用者应在问题修复后人工删除 `state/diagnostics/` 中的旧文件。
 
 建议响应码：`401` worker key 缺失/无效，`403` key 已撤销或 scope 不允许，`409` 批次内容与已记录的同一 `batch_id` 不一致，`413` 超过大小/条数限制，`422` 字段校验失败，`429` 频率限制，`5xx` 服务暂时不可用。客户端只对网络错误和 `5xx/429` 做有限退避；`401/403/409/422` 直接停止并显示人工可读错误。
 
@@ -421,15 +477,19 @@ sync_batches(
 原始 class、属性值、截图、Cookie、storage、URL path 参数或 query。诊断命令固定单页、零详情点击、
 零分页、零上传；POSIX 文件权限为目录 `0700`/文件 `0600`，Windows 依赖安装教程设置的 NTFS ACL。
 
-## 10. PDD 后续定时任务（不属于 MVP-1）
+## 10. PDD 后续定时任务（未实现，不属于第一阶段）
 
-MVP-1 手动同步稳定后，才配置 Windows Task Scheduler：
+第一阶段只提供人工命令；仓库当前没有可直接启用的 PDD 定时 commit。真实账号手动同步稳定后，才另行
+设计 macOS `launchd` 或 Windows Task Scheduler，并重新评审以下约束：
 
 - 每天 02:00 和 14:00 各一次，开机延迟 5 分钟补跑；
 - 使用同一独立 profile 和 lock 文件，禁止并发；
 - 任务失败只写状态并通知，不连续重试；
 - `NEEDS_LOGIN`、`CAPTCHA_OR_BLOCKED`、`SCHEMA_CHANGED` 必须人工处理后再恢复；
-- 任务计划不保存明文密码，profile 目录不复制到服务器。
+- 任务计划不保存明文密码，profile 目录不复制到服务器；
+- 即使未来实现计划任务，也不得注入 Cookie 或绕过 dry-run → 人工核对 → commit。
+
+远程 noVNC 登录页和服务器端 Playwright 同样未实现；第一阶段只能在同步电脑的可见窗口人工登录。
 
 ## 11. 测试矩阵
 
@@ -445,17 +505,18 @@ MVP-1 手动同步稳定后，才配置 Windows Task Scheduler：
 
 ### 人工验收
 
-- PDD 手工登录正确账号并同步 20–30 条真实订单；1688 在服务器以至少两个授权账号验收；
+- PDD 至少两个账号使用独立 profile，逐账号手工登录并各同步 20–30 条真实订单；1688 在服务器以至少两个授权账号验收；
+- `accounts` 展示的 key/profile 正确；`sync-all --mode dry-run` 严格串行且每个账号产生独立报告；
 - 关闭/重新运行同步，计数不重复；
 - 账号退出或登录过期显示 `NEEDS_LOGIN`；
 - 人工触发验证码时程序停止，不尝试处理；
 - 面单扫码后能按运单号显示商品；
-- Windows 关机后重新启动可继续，不破坏服务器已有收货数据。
+- 同步电脑关机后重新启动可继续，不破坏服务器已有收货数据。
 
 ## 12. 版本演进
 
-- MVP-1：手动、可见、每次显式指定一个平台的 `sync-once`；
+- MVP-1：手动、可见、每次显式指定账号的 `sync-once`，以及严格串行、只做 dry-run 的 `sync-all`；
 - MVP-2：批次历史、预览确认、PDD/1688 字段差异修复；
-- MVP-3：Task Scheduler 低频增量同步和失败通知；
-- 后续：1688 由 backend 官方 API 独立定时；PDD 仅在人工验收后评估 Windows Task Scheduler。其它平台
+- MVP-3（未实现）：macOS/Windows 计划任务、低频增量同步和失败通知；
+- 后续：1688 由 backend 官方 API 独立定时；PDD 仅在人工验收后另行开发 macOS/Windows 计划任务。其它平台
   接入必须另行评估官方许可、权限和稳定性。

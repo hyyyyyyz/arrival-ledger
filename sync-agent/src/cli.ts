@@ -1,12 +1,21 @@
 import { existsSync, mkdirSync, accessSync, constants } from "node:fs";
 import { parseArgs } from "node:util";
 
-import { configFailures, loadConfig, maskKey } from "./config.js";
+import {
+  configFailures,
+  configForPddAccount,
+  loadConfig,
+  maskKey,
+  selectPddAccount,
+  type PddAccountConfig,
+  type SyncConfig,
+} from "./config.js";
 import { runCapturePage } from "./capture_page.js";
 import { runLoginCheck as runLoginCheckFlow } from "./login_check.js";
 import { JsonLogger } from "./log.js";
 import { isPlatform, type Platform } from "./models.js";
 import { runSyncOnce } from "./run.js";
+import { postPddAccountStatusBestEffort, runPddSyncAll } from "./pdd_multi.js";
 import { acquireLock, describeHolder } from "./state/lock.js";
 import { loadCursor } from "./state/cursor.js";
 
@@ -20,14 +29,17 @@ const HELP = `arrival-ledger sync-agent (browser sync MVP)
 
 Usage:
   sync-agent doctor [--offline] [--platform pdd]
-  sync-agent login-check --platform pdd
+  sync-agent accounts --platform pdd
+  sync-agent login-check --platform pdd [--account pdd-main]
   sync-agent capture-page --platform pdd
-  sync-agent sync-once --platform pdd --mode dry-run
+  sync-agent sync-once --platform pdd --mode dry-run [--account pdd-main]
   sync-agent sync-once --platform pdd --mode commit --from-report <snapshot> --yes
+  sync-agent sync-all --platform pdd --mode dry-run
 
 Commands:
   doctor       Check local configuration, state, locks and (unless --offline)
                the local Chromium installation. Never contacts platform sites.
+  accounts     List configured PDD accounts without opening a browser.
   login-check  Open the visible browser on the platform order list and report
                login/captcha state. It never fills passwords or solves
                captchas; log in manually in the visible window.
@@ -37,10 +49,14 @@ Commands:
   sync-once    dry-run reads visible orders once and saves a private local
                snapshot; commit uploads EXACTLY the snapshot bytes and never
                re-opens the browser. commit requires --yes.
+  sync-all     Run PDD dry-run once per configured account, strictly in file
+               order and never concurrently. It continues after account errors
+               and exits non-zero if any account is not OK. Commit is disabled.
 
 Flags:
   --offline       doctor: skip the Chromium check
   --platform      pdd (1688 browser sync is retired; use the backend Open API)
+  --account       PDD account_key from PDD_ACCOUNTS_FILE
   --mode          dry-run | commit
   --from-report   path to the dry-run snapshot (required for commit)
   --yes           confirm commit after reviewing the dry-run report
@@ -106,6 +122,7 @@ async function checkLocalChromium(): Promise<{ state: DoctorCheck["state"]; deta
 async function runDoctor(options: {
   offline: boolean;
   platform: Platform | null;
+  accountKey?: string;
 }): Promise<number> {
   const { config, issues } = loadConfig();
   const logger = new JsonLogger({ logDir: config.log_dir });
@@ -151,42 +168,86 @@ async function runDoctor(options: {
   });
 
   for (const platform of platforms) {
-    const accountKey = config.account_keys[platform];
-    const profileDir = config.profile_dirs[platform];
-    checks.push({
-      label: `${platform} profile dir`,
-      state: existsSync(profileDir) ? "OK" : "WARN",
-      detail: existsSync(profileDir)
-        ? profileDir
-        : `${profileDir} does not exist yet; run login-check to create and log in`,
-    });
-    checks.push({
-      label: `${platform} account key`,
-      state: "OK",
-      detail: `${accountKey} (cursor and lock are isolated per account_key)`,
-    });
-
-    const lock = acquireLock(config.state_dir, platform, accountKey, config.worker_id);
-    if (lock.held) {
-      lock.release();
-      checks.push({ label: `${platform} lock`, state: "OK", detail: "acquired and released" });
+    let accountConfigs: Array<{ accountKey: string; profileDir: string; label: string }>;
+    if (platform === "pdd") {
+      const selected = options.accountKey === undefined
+        ? null
+        : selectPddAccount(config, options.accountKey);
+      if (selected !== null && selected.account === null) {
+        checks.push({ label: "pdd account selection", state: "FAIL", detail: selected.message ?? "unknown account" });
+        accountConfigs = [];
+      } else {
+        const accounts = selected?.account === undefined || selected?.account === null
+          ? config.pdd_accounts
+          : [selected.account];
+        accountConfigs = accounts.map((account) => ({
+          accountKey: account.account_key,
+          profileDir: account.profile_dir,
+          label: account.display_label ?? account.account_key,
+        }));
+      }
     } else {
-      checks.push({
-        label: `${platform} lock`,
-        state: "FAIL",
-        detail: `held by ${describeHolder(lock.holder)}`,
-      });
+      accountConfigs = [{
+        accountKey: config.account_keys[platform],
+        profileDir: config.profile_dirs[platform],
+        label: config.account_keys[platform],
+      }];
     }
 
-    const cursor = loadCursor(config.state_dir, platform, accountKey);
-    checks.push({
-      label: `${platform} cursor`,
-      state: "OK",
-      detail:
-        cursor === null
-          ? "no cursor yet"
-          : `last=${cursor.last_status} failures=${cursor.consecutive_failures} sync=${cursor.last_sync_at ?? "never"}`,
-    });
+    if (platform === "pdd") {
+      const browserLock = acquireLock(config.state_dir, platform, "__browser-global__", config.worker_id);
+      if (browserLock.held) {
+        browserLock.release();
+        checks.push({ label: "pdd browser-global lock", state: "OK", detail: "acquired and released" });
+      } else {
+        checks.push({
+          label: "pdd browser-global lock",
+          state: "FAIL",
+          detail: browserLock.reason === "reclaim-guard-present"
+            ? "reclamation guard exists; confirm no sync-agent process is running, then remove the matching *.lock.reclaim file manually"
+            : `held by ${describeHolder(browserLock.holder)}`,
+        });
+      }
+    }
+
+    for (const account of accountConfigs) {
+      checks.push({
+        label: `${platform}:${account.accountKey} profile dir`,
+        state: existsSync(account.profileDir) ? "OK" : "WARN",
+        detail: existsSync(account.profileDir)
+          ? account.profileDir
+          : `${account.profileDir} does not exist yet; run login-check to create and log in`,
+      });
+      checks.push({
+        label: `${platform}:${account.accountKey} account`,
+        state: "OK",
+        detail: `${account.label} (cursor and lock are isolated per account_key)`,
+      });
+
+      const lock = acquireLock(config.state_dir, platform, account.accountKey, config.worker_id);
+      if (lock.held) {
+        lock.release();
+        checks.push({ label: `${platform}:${account.accountKey} lock`, state: "OK", detail: "acquired and released" });
+      } else {
+        checks.push({
+          label: `${platform}:${account.accountKey} lock`,
+          state: "FAIL",
+          detail: lock.reason === "reclaim-guard-present"
+            ? "reclamation guard exists; confirm no sync-agent process is running, then remove the matching *.lock.reclaim file manually"
+            : `held by ${describeHolder(lock.holder)}`,
+        });
+      }
+
+      const cursor = loadCursor(config.state_dir, platform, account.accountKey);
+      checks.push({
+        label: `${platform}:${account.accountKey} cursor`,
+        state: "OK",
+        detail:
+          cursor === null
+            ? "no cursor yet"
+            : `last=${cursor.last_status} failures=${cursor.consecutive_failures} sync=${cursor.last_sync_at ?? "never"}`,
+      });
+    }
   }
 
   if (!options.offline) {
@@ -195,7 +256,7 @@ async function runDoctor(options: {
     checks.push({
       label: "chromium",
       state: "WARN",
-      detail: "skipped (--offline); run without --offline on the Windows machine to verify Chromium",
+      detail: "skipped (--offline); run without --offline on the Mac/Windows sync computer to verify Chromium",
     });
   }
 
@@ -212,23 +273,50 @@ async function runDoctor(options: {
   return failures.length === 0 ? 0 : 1;
 }
 
-async function runLoginCheckCommand(platform: Platform): Promise<number> {
+function selectedPddConfig(
+  config: SyncConfig,
+  accountKey: string | undefined,
+): { config: SyncConfig; account: PddAccountConfig } | { error: string } {
+  const selected = selectPddAccount(config, accountKey);
+  if (selected.account === null) return { error: selected.message ?? "PDD account selection failed" };
+  return { config: configForPddAccount(config, selected.account), account: selected.account };
+}
+
+async function runLoginCheckCommand(platform: Platform, accountKey?: string): Promise<number> {
   const { config, issues } = loadConfig();
   const configExit = requireValidConfig(issues);
   if (configExit !== null) return configExit;
 
   const logger = new JsonLogger({ logDir: config.log_dir });
-  const outcome = await runLoginCheckFlow({ config, platform, logger });
+  if (platform !== "pdd") return fail("only PDD login-check is supported", 1);
+  const selected = selectedPddConfig(config, accountKey);
+  if ("error" in selected) return fail(selected.error, 1);
+  const outcome = await runLoginCheckFlow({ config: selected.config, platform, logger });
+  if (outcome.state !== null && outcome.checkedAt !== null) {
+    await postPddAccountStatusBestEffort({
+      config,
+      account: selected.account,
+      input: {
+        status: outcome.state.status,
+        message: outcome.state.detail,
+      },
+      checkedAt: outcome.checkedAt,
+      logger,
+    });
+  }
   return outcome.exitCode;
 }
 
-async function runCapturePageCommand(platform: Platform): Promise<number> {
+async function runCapturePageCommand(platform: Platform, accountKey?: string): Promise<number> {
   const { config, issues } = loadConfig();
   const configExit = requireValidConfig(issues);
   if (configExit !== null) return configExit;
 
   const logger = new JsonLogger({ logDir: config.log_dir });
-  const outcome = await runCapturePage({ config, platform, logger });
+  if (platform !== "pdd") return fail("only PDD capture-page is supported", 1);
+  const selected = selectedPddConfig(config, accountKey);
+  if ("error" in selected) return fail(selected.error, 1);
+  const outcome = await runCapturePage({ config: selected.config, platform, logger });
   return outcome.exitCode;
 }
 
@@ -237,14 +325,55 @@ async function runSyncOnceCommand(
   mode: "dry-run" | "commit",
   confirm: boolean,
   snapshotPath: string | undefined,
+  accountKey: string | undefined,
 ): Promise<number> {
   const { config, issues } = loadConfig();
   const configExit = requireValidConfig(issues);
   if (configExit !== null) return configExit;
 
   const logger = new JsonLogger({ logDir: config.log_dir });
-  const outcome = await runSyncOnce({ config, platform, mode, confirm, logger, snapshotPath });
+  if (platform !== "pdd") return fail("only PDD sync-once is supported", 1);
+  const selected = selectedPddConfig(config, accountKey);
+  if ("error" in selected) return fail(selected.error, 1);
+  const outcome = await runSyncOnce({ config: selected.config, platform, mode, confirm, logger, snapshotPath });
+  if (mode === "dry-run" && outcome.report.status !== "DISABLED") {
+    await postPddAccountStatusBestEffort({
+      config,
+      account: selected.account,
+      input: {
+        status: outcome.report.status,
+        ...(outcome.report.status === "OK" ? { count: outcome.report.counts.valid } : {}),
+        message: outcome.report.error_code ?? "dry-run completed",
+      },
+      checkedAt: outcome.report.finished_at,
+      logger,
+    });
+  }
   return outcome.exitCode;
+}
+
+function runAccountsCommand(): number {
+  const { config, issues } = loadConfig();
+  const configExit = requireValidConfig(issues);
+  if (configExit !== null) return configExit;
+  process.stdout.write(`Configured PDD accounts: ${config.pdd_accounts.length}\n`);
+  for (const account of config.pdd_accounts) {
+    const cursor = loadCursor(config.state_dir, "pdd", account.account_key);
+    process.stdout.write(
+      `- ${account.account_key}${account.display_label === null ? "" : ` (${account.display_label})`}\n` +
+      `  profile: ${account.profile_dir}\n` +
+      `  status: ${cursor?.last_status ?? "NOT_CHECKED"}; last_sync: ${cursor?.last_sync_at ?? "never"}\n`,
+    );
+  }
+  return 0;
+}
+
+async function runSyncAllCommand(): Promise<number> {
+  const { config, issues } = loadConfig();
+  const configExit = requireValidConfig(issues);
+  if (configExit !== null) return configExit;
+  const logger = new JsonLogger({ logDir: config.log_dir });
+  return (await runPddSyncAll({ config, logger })).exitCode;
 }
 
 async function main(): Promise<number> {
@@ -256,6 +385,7 @@ async function main(): Promise<number> {
     options: {
       offline: { type: "boolean", default: false },
       platform: { type: "string" },
+      account: { type: "string" },
       mode: { type: "string" },
       "from-report": { type: "string" },
       yes: { type: "boolean", default: false },
@@ -285,13 +415,17 @@ async function main(): Promise<number> {
 
   switch (command) {
     case "doctor":
-      return runDoctor({ offline: values.offline, platform });
+      return runDoctor({ offline: values.offline, platform, accountKey: values.account });
+    case "accounts":
+      if (platform !== "pdd") return fail("accounts requires --platform pdd");
+      if (values.account !== undefined) return fail("accounts lists all configured accounts; do not pass --account");
+      return runAccountsCommand();
     case "login-check":
       if (platform === null) return fail(`--platform is required for login-check`);
-      return runLoginCheckCommand(platform);
+      return runLoginCheckCommand(platform, values.account);
     case "capture-page":
       if (platform === null) return fail(`--platform is required for capture-page`);
-      return runCapturePageCommand(platform);
+      return runCapturePageCommand(platform, values.account);
     case "sync-once": {
       if (platform === null) return fail(`--platform is required for sync-once`);
       if (values.mode === undefined) return fail(`--mode dry-run|commit is required for sync-once`);
@@ -304,8 +438,14 @@ async function main(): Promise<number> {
       if (values.mode === "commit" && values["from-report"] === undefined) {
         return fail("commit requires --from-report <snapshot>; commit never re-opens the browser");
       }
-      return runSyncOnceCommand(platform, values.mode, values.yes, values["from-report"]);
+      return runSyncOnceCommand(platform, values.mode, values.yes, values["from-report"], values.account);
     }
+    case "sync-all":
+      if (platform !== "pdd") return fail("sync-all requires --platform pdd");
+      if (values.mode !== "dry-run") return fail("sync-all currently requires --mode dry-run; commit is disabled");
+      if (values.account !== undefined) return fail("sync-all runs every configured account; do not pass --account");
+      if (values.yes || values["from-report"] !== undefined) return fail("sync-all is dry-run only and does not accept commit flags");
+      return runSyncAllCommand();
     default:
       return fail(`unknown command: ${command}\n\n${HELP}`);
   }

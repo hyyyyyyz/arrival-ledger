@@ -82,6 +82,7 @@ export interface SyncBatch {
   worker_id: string;
   platform: Platform;
   platform_account_key: string;
+  platform_account_label?: string;
   started_at: string;
   finished_at: string;
   cursor_before: string | null;
@@ -126,6 +127,18 @@ export interface RunReport {
   snapshot_path: string | null;
 }
 
+export interface AccountStatusReport {
+  schema_version: 1;
+  worker_id: string;
+  platform: "pdd";
+  platform_account_key: string;
+  platform_account_label?: string;
+  status: SyncStatus;
+  checked_at: string;
+  count?: number;
+  message?: string;
+}
+
 export interface ValidationIssue {
   path: string;
   message: string;
@@ -146,6 +159,63 @@ function isIsoTimestamp(value: unknown): boolean {
 
 function lengthBounded(value: string, maximum: number): boolean {
   return value.length <= maximum;
+}
+
+export function validateAccountStatusReport(report: unknown): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (typeof report !== "object" || report === null || Array.isArray(report)) {
+    return [{ path: "$", message: "account status must be an object" }];
+  }
+  const record = report as Record<string, unknown>;
+  const allowed = new Set([
+    "schema_version",
+    "worker_id",
+    "platform",
+    "platform_account_key",
+    "platform_account_label",
+    "status",
+    "checked_at",
+    "count",
+    "message",
+  ]);
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) issues.push({ path: key, message: "unknown field" });
+  }
+  if (record["schema_version"] !== 1) {
+    issues.push({ path: "schema_version", message: "must equal 1" });
+  }
+  if (!isNonEmptyString(record["worker_id"]) || !lengthBounded(record["worker_id"] as string, LIMITS.worker_id)) {
+    issues.push({ path: "worker_id", message: `must be a non-empty string <= ${LIMITS.worker_id} chars` });
+  }
+  if (record["platform"] !== "pdd") {
+    issues.push({ path: "platform", message: 'must equal "pdd"' });
+  }
+  if (
+    !isNonEmptyString(record["platform_account_key"]) ||
+    !lengthBounded(record["platform_account_key"] as string, LIMITS.account_key) ||
+    !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(record["platform_account_key"] as string)
+  ) {
+    issues.push({ path: "platform_account_key", message: "must use the normalized account key format" });
+  }
+  const label = record["platform_account_label"];
+  if (label !== undefined && (!isNonEmptyString(label) || !lengthBounded(label, 128))) {
+    issues.push({ path: "platform_account_label", message: "must be a non-empty string <= 128 chars" });
+  }
+  if (!SYNC_STATUSES.includes(record["status"] as SyncStatus)) {
+    issues.push({ path: "status", message: `must be one of ${SYNC_STATUSES.join(", ")}` });
+  }
+  if (!isIsoTimestamp(record["checked_at"])) {
+    issues.push({ path: "checked_at", message: "must be an ISO-8601 timestamp" });
+  }
+  const count = record["count"];
+  if (count !== undefined && (typeof count !== "number" || !Number.isInteger(count) || count < 0)) {
+    issues.push({ path: "count", message: "must be a non-negative integer" });
+  }
+  const message = record["message"];
+  if (message !== undefined && (typeof message !== "string" || message.length > 256)) {
+    issues.push({ path: "message", message: "must be a string <= 256 chars" });
+  }
+  return issues;
 }
 
 export function validateBatch(batch: unknown): ValidationIssue[] {
@@ -172,9 +242,14 @@ export function validateBatch(batch: unknown): ValidationIssue[] {
   }
   if (
     !isNonEmptyString(record["platform_account_key"]) ||
-    !lengthBounded(record["platform_account_key"] as string, LIMITS.account_key)
+    !lengthBounded(record["platform_account_key"] as string, LIMITS.account_key) ||
+    !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(record["platform_account_key"] as string)
   ) {
-    issues.push({ path: "platform_account_key", message: "must be a non-empty string <= 64 chars" });
+    issues.push({ path: "platform_account_key", message: "must use the normalized account key format" });
+  }
+  const accountLabel = record["platform_account_label"];
+  if (accountLabel !== undefined && (!isNonEmptyString(accountLabel) || !lengthBounded(accountLabel, 128))) {
+    issues.push({ path: "platform_account_label", message: "must be a non-empty string <= 128 chars" });
   }
   for (const field of ["started_at", "finished_at"]) {
     if (!isIsoTimestamp(record[field])) {

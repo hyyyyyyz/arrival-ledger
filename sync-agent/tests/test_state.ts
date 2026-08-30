@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { acquireLock, digestToken, readLockFile } from "../src/state/lock.js";
+import { acquireLock, digestToken, MALFORMED_LOCK_GRACE_MS, readLockFile } from "../src/state/lock.js";
 import { emptyCursor, loadCursor, saveCursor, updateCursor } from "../src/state/cursor.js";
 
 const createdDirs: string[] = [];
@@ -122,6 +122,48 @@ describe("platform lock", () => {
     const acquired = acquireLock(dir, "pdd", "pdd-main", "worker-live");
     expect(acquired.held).toBe(true);
     if (acquired.held) acquired.release();
+  });
+
+  it("reclaims an old crash-left empty lock without permitting two holders", () => {
+    const dir = tempStateDir();
+    const path = join(dir, "pdd-__browser-global__.lock");
+    writeFileSync(path, "", "utf8");
+    const old = new Date(Date.now() - MALFORMED_LOCK_GRACE_MS - 1_000);
+    utimesSync(path, old, old);
+
+    const first = acquireLock(dir, "pdd", "__browser-global__", "worker-1");
+    expect(first.held).toBe(true);
+    if (!first.held) return;
+    const second = acquireLock(dir, "pdd", "__browser-global__", "worker-2");
+    expect(second.held).toBe(false);
+    first.release();
+  });
+
+  it("does not reclaim a fresh malformed lock that may still be being written", () => {
+    const dir = tempStateDir();
+    const path = join(dir, "pdd-__browser-global__.lock");
+    writeFileSync(path, "{", "utf8");
+    const acquired = acquireLock(dir, "pdd", "__browser-global__", "worker-1");
+    expect(acquired.held).toBe(false);
+    expect(existsSync(path)).toBe(true);
+  });
+
+  it("never automatically removes an existing stale or malformed reclaim guard", () => {
+    const dir = tempStateDir();
+    const mainPath = join(dir, "pdd-__browser-global__.lock");
+    const guardPath = `${mainPath}.reclaim`;
+    writeFileSync(mainPath, "", "utf8");
+    writeFileSync(guardPath, "{", "utf8");
+    const old = new Date(Date.now() - MALFORMED_LOCK_GRACE_MS - 1_000);
+    utimesSync(mainPath, old, old);
+    utimesSync(guardPath, old, old);
+
+    const acquired = acquireLock(dir, "pdd", "__browser-global__", "worker-1");
+    expect(acquired.held).toBe(false);
+    if (!acquired.held) expect(acquired.reason).toBe("reclaim-guard-present");
+    expect(existsSync(mainPath)).toBe(true);
+    expect(existsSync(guardPath)).toBe(true);
+    expect(readFileSync(guardPath, "utf8")).toBe("{");
   });
 
   it("release does not remove a lock owned by someone else", () => {

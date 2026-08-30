@@ -20,6 +20,41 @@ export interface CreateUserInput {
   role: 'ADMIN' | 'RECEIVER'
 }
 
+export type PlatformAccountSyncStatus =
+  | 'OK'
+  | 'NEEDS_LOGIN'
+  | 'CAPTCHA_OR_BLOCKED'
+  | 'SCHEMA_CHANGED'
+  | 'NETWORK_ERROR'
+  | 'DISABLED'
+  | 'NEVER_SYNCED'
+  | string
+
+export interface PlatformAccount {
+  id: string | number
+  platform: OrderPlatform
+  account_key: string
+  display_label: string | null
+  source: string
+  status: PlatformAccountSyncStatus | null
+  last_attempt_at: string | null
+  last_success_at: string | null
+  last_count: number
+  message: string | null
+  order_count: number
+}
+
+export interface PlatformAccountListResponse {
+  items: PlatformAccount[]
+  total: number
+}
+
+export interface CreatePlatformAccountInput {
+  platform: 'pdd'
+  account_key: string
+  display_label: string
+}
+
 export interface AuthSession {
   user: User
   authRequired: boolean

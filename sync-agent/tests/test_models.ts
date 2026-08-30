@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { LIMITS, validateBatch, validateOrder } from "../src/models.js";
+import { LIMITS, validateAccountStatusReport, validateBatch, validateOrder } from "../src/models.js";
 
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 
@@ -48,6 +48,11 @@ describe("validateBatch", () => {
     expect(validateBatch(validBatch())).toEqual([]);
   });
 
+  it("accepts an account label and dotted normalized account key", () => {
+    const batch = { ...validBatch(), platform_account_key: "buyer.team-1", platform_account_label: "采购一组" };
+    expect(validateBatch(batch)).toEqual([]);
+  });
+
   it("rejects a missing orders array", () => {
     const batch = validBatch();
     delete batch["orders"];
@@ -79,6 +84,38 @@ describe("validateBatch", () => {
   it("rejects non-object payloads", () => {
     expect(validateBatch(null)).toHaveLength(1);
     expect(validateBatch("text")).toHaveLength(1);
+  });
+});
+
+describe("validateAccountStatusReport", () => {
+  it("accepts the backend account-status contract", () => {
+    expect(validateAccountStatusReport({
+      schema_version: 1,
+      worker_id: "worker-test",
+      platform: "pdd",
+      platform_account_key: "buyer.team-1",
+      platform_account_label: "采购一组",
+      status: "OK",
+      checked_at: "2026-08-30T00:00:00.000Z",
+      count: 12,
+      message: "dry-run completed",
+    })).toEqual([]);
+  });
+
+  it("rejects unknown fields and contract bounds", () => {
+    const paths = validateAccountStatusReport({
+      schema_version: 1,
+      worker_id: "worker-test",
+      platform: "pdd",
+      platform_account_key: "-invalid",
+      platform_account_label: "x".repeat(129),
+      status: "OK",
+      checked_at: "2026-08-30T00:00:00.000Z",
+      count: -1,
+      message: "x".repeat(257),
+      extra: true,
+    }).map((issue) => issue.path);
+    expect(paths).toEqual(expect.arrayContaining(["platform_account_key", "platform_account_label", "count", "message", "extra"]));
   });
 });
 

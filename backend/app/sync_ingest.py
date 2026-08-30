@@ -118,6 +118,13 @@ class SyncBatchIn(BaseModel):
     def finished_after_started(self) -> "SyncBatchIn":
         if self.finished_at < self.started_at:
             raise ValueError("finished_at must not be earlier than started_at")
+        expected_source = (
+            "WINDOWS_BROWSER" if self.platform == "pdd" else "ALI1688_API"
+        )
+        if self.source != expected_source:
+            raise ValueError(
+                f"source must be {expected_source} when platform is {self.platform}"
+            )
         return self
 
 
@@ -277,11 +284,10 @@ def _upsert_platform_account_in_tx(
         (payload.platform, payload.platform_account_key),
     ).fetchone()
     if row is not None:
-        if payload.source == "ALI1688_API":
-            connection.execute(
-                "UPDATE platform_accounts SET display_label = COALESCE(?, display_label), source = ?, updated_at = ? WHERE id = ?",
-                (payload.platform_account_label, payload.source, now, row["id"]),
-            )
+        connection.execute(
+            "UPDATE platform_accounts SET display_label = COALESCE(?, display_label), source = ?, updated_at = ? WHERE id = ?",
+            (payload.platform_account_label, payload.source, now, row["id"]),
+        )
         return row["id"]
     cursor = connection.execute(
         """

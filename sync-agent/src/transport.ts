@@ -1,5 +1,5 @@
-import type { SyncBatch, ValidationIssue } from "./models.js";
-import { SCHEMA_VERSION, validateBatch } from "./models.js";
+import type { AccountStatusReport, SyncBatch, ValidationIssue } from "./models.js";
+import { SCHEMA_VERSION, validateAccountStatusReport, validateBatch } from "./models.js";
 
 export interface IngestResponse {
   batch_id: string;
@@ -179,6 +179,42 @@ export async function postBatch(
     }
   }
   throw lastError;
+}
+
+export async function postAccountStatus(
+  options: TransportOptions,
+  report: AccountStatusReport,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const issues = validateAccountStatusReport(report);
+  if (issues.length > 0) {
+    throw new TransportError(
+      "validation",
+      `client-side account status validation failed: ${issues.map((issue) => issue.path).join(", ")}`,
+    );
+  }
+  if (options.worker_key.length === 0) {
+    throw new TransportError("auth", "worker key is not configured");
+  }
+
+  const url = `${options.api_base_url.replace(/\/+$/, "")}/api/sync/v1/account-status`;
+  const timeoutMs = options.timeout_ms ?? 15_000;
+  try {
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${options.worker_key}`,
+      },
+      body: JSON.stringify(report),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (response.status >= 200 && response.status < 300) return;
+    throw mapStatus(response.status, parseRetryAfter(response.headers.get("retry-after")));
+  } catch (cause) {
+    if (cause instanceof TransportError) throw cause;
+    throw new TransportError("network", `account status request failed: ${(cause as Error).message}`);
+  }
 }
 
 function delay(milliseconds: number): Promise<void> {

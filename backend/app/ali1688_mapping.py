@@ -147,6 +147,7 @@ def map_order(raw: dict[str, Any], detail: dict[str, Any] | None = None) -> Sync
             quantity=quantity,
             unit_price=_price(_first(item, "price", "unitPrice", "priceWithTax", "amount")),
         ))
+    status = normalized_status(_first(base, "status", "orderStatus"))
     logistics = (detail or {}).get("nativeLogistics") or raw.get("nativeLogistics")
     if logistics is not None and not isinstance(logistics, dict):
         raise ValueError("1688 nativeLogistics must be an object")
@@ -174,6 +175,12 @@ def map_order(raw: dict[str, Any], detail: dict[str, Any] | None = None) -> Sync
             explicit_no_logistics = explicit_no_logistics or this_item_has_no_logistics
             if this_item_has_no_logistics:
                 continue
+            # 1688 may retain a historical logistics row after an order is
+            # cancelled/refunded even though that row has no bill number.
+            # Closed orders never require warehouse receipt matching, so the
+            # unusable row is safe to ignore. Active orders still fail closed.
+            if status in {"CANCELLED", "REFUNDED"}:
+                continue
             raise ValueError("1688 logistics item has no usable tracking number")
         courier_value = _first(
             package,
@@ -188,7 +195,6 @@ def map_order(raw: dict[str, Any], detail: dict[str, Any] | None = None) -> Sync
             tracking_no=tracking,
             status=normalized_package_status(_first(package, "status", "logisticsStatus")),
         ))
-    status = normalized_status(_first(base, "status", "orderStatus"))
     if status == "SHIPPED" and not packages and not explicit_no_logistics:
         raise ValueError("shipped 1688 order has no logistics item")
     ordered_at_raw = _first(base, "createTime", "createdTime", "orderCreateTime")

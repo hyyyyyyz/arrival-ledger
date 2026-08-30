@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import DashboardStats from '@/components/DashboardStats.vue'
 import LoginView from '@/components/LoginView.vue'
 import OrderList from '@/components/OrderList.vue'
+import PddAccountManagement from '@/components/PddAccountManagement.vue'
 import PeopleManagement from '@/components/PeopleManagement.vue'
 import ReceiptCapture from '@/components/ReceiptCapture.vue'
 import ReceiptList from '@/components/ReceiptList.vue'
@@ -420,12 +421,17 @@ onBeforeUnmount(() => {
         />
       </template>
 
-      <PeopleManagement
-        v-else-if="activeTab === 'people' && user.role === 'ADMIN'"
-        :current-user="user"
-        :online="online"
-        @auth-required="handleAuthRequired"
-      />
+      <div v-else-if="activeTab === 'people' && user.role === 'ADMIN'" class="admin-management-page">
+        <PeopleManagement
+          :current-user="user"
+          :online="online"
+          @auth-required="handleAuthRequired"
+        />
+        <PddAccountManagement
+          :online="online"
+          @auth-required="handleAuthRequired"
+        />
+      </div>
 
       <OrderList
         v-else

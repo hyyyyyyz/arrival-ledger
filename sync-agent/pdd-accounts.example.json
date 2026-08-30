@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "accounts": [
+    {
+      "account_key": "pdd.main",
+      "display_label": "拼多多采购主账号",
+      "profile_dir": "profiles/pdd-main"
+    },
+    {
+      "account_key": "pdd.backup",
+      "display_label": "拼多多采购备用账号",
+      "profile_dir": "profiles/pdd-backup"
+    }
+  ]
+}

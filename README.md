@@ -40,11 +40,11 @@
 |---|---|
 | CSV 批量导入（幂等、忽略 PII、退款/取消明确状态） | 规划中（P1） |
 | 1688 官方 Open API 多账号同步（后端） | 已在生产配置首个授权账号；可继续追加账号 |
-| Windows 浏览器可见页面同步 PDD（`sync-agent`） | 代码完成，待 Windows 真机手工验收 |
+| Mac/Windows 可见浏览器同步 PDD（`sync-agent`，一账号一 profile） | 多账号第一阶段代码完成，待真实账号手工验收 |
 | 截图 / OCR / 手工录入 | 兜底路径 |
 
-1688 订单使用服务器官方 Open API；PDD 仍使用闲置 Windows 上的 Playwright Chromium profile，由用户手工
-登录，程序只读可见页面，先 dry-run 预览、用户确认后才提交最小必要的结构化订单批次到自家服务器。批次包含
+1688 订单使用服务器官方 Open API；PDD 使用 Mac 或 Windows 同步电脑上的可见 Playwright 持久化 profile，
+每个采购账号拥有独立 profile、游标和锁。用户手工登录，程序只读可见页面，先 dry-run 预览、用户确认后才提交最小必要的结构化订单批次到自家服务器。批次包含
 订单号、商品和运单号，但不包含密码、Cookie、地址、电话或原始页面；同步失败
 不影响拍照收货。
 
@@ -52,9 +52,9 @@
 
 - 局域网免登录（可信 Wi-Fi）与公网 HTTPS 认证两种模式，公网启用前必须关闭免登录；
 - 照片、数据库只在自家服务器，不保存收件人电话和完整地址；
-- PDD 密码、Cookie、登录态只留在 Windows 本机，永不上传、不进日志、不进 Git；1688 的 AppSecret
+- PDD 密码、Cookie、登录态和 profile 只留在同步电脑，永不上传、不进日志、不进 Git；1688 的 AppSecret
   和 access token 只保存在服务器受限、只读挂载的 secret 文件中；
-- 同步接口使用独立 worker token：明文只存在于服务器 `.env`（`SYNC_WORKER_TOKENS`）与 Windows 本机 `.env.local`，数据库只记录 token 摘要，可撤销/轮换。
+- 同步接口使用独立 worker token：明文只存在于服务器 `.env`（`SYNC_WORKER_TOKENS`）与同步电脑 `.env.local`，数据库只记录 token 摘要，可撤销/轮换。
 
 ## 系统架构
 
@@ -65,11 +65,11 @@
 Ubuntu 服务器（纯 Server，无桌面）
   ├─ Nginx 网关 :8766 ──► FastAPI 业务 API ──► SQLite + 照片目录
   ├─ 1688 官方 Open API（多应用、多授权账号、独立游标）
-  └─ 内部同步接口 /api/sync/v1/batches（只接收 Windows 主动提交的批次）
+  └─ 内部同步接口（只接收同步电脑主动提交的结构化批次和账号状态）
                       ▲
                       │ 可见页面只读同步（可失效的增强能力）
-闲置 Windows 电脑
-  ├─ 独立 Chromium profile：仅 PDD（用户手工登录）
+Mac 或闲置 Windows 同步电脑
+  ├─ 每个 PDD 账号一个独立、持久化、可见的 Playwright profile（用户手工登录）
   └─ sync-agent：Node 20 + TypeScript + Playwright headed
 ```
 
@@ -96,30 +96,38 @@ deploy/scripts/verify.sh http://127.0.0.1:8766
 ## 1688 与拼多多订单同步
 
 1688 在服务器使用官方 Open API，支持多个应用和多个授权买家账号；详细配置、令牌轮换、dry-run、
-单账号/全账号同步和定时器见 [`docs/ALI1688_OPEN_API.md`](docs/ALI1688_OPEN_API.md)。Windows 不需要
-安装或登录 1688。
+单账号/全账号同步和定时器见 [`docs/ALI1688_OPEN_API.md`](docs/ALI1688_OPEN_API.md)。同步电脑不需要
+安装或登录 1688，也不承载 1688 授权信息。
 
-拼多多浏览器订单同步（Windows）
+拼多多浏览器订单同步（Mac/Windows，多账号第一阶段）
 
 固定流程：
 
 ```text
-doctor → 必要时 login-check → 等待页面访问冷却 → sync-once --mode dry-run → 用户确认 → sync-once --mode commit --from-report <snapshot> --yes
+管理员网页登记同一个 account_key/名称
+→ 同步电脑配置 PDD_ACCOUNTS_FILE（一账号一 profile）
+→ accounts / doctor
+→ 逐账号 login-check --account <key>
+→ sync-once --account <key> --mode dry-run
+→ 用户核对 snapshot
+→ sync-once --account <key> --mode commit --from-report <snapshot> --yes
 ```
 
+- 多账号从头配置：[`docs/PDD_MULTI_ACCOUNT.md`](docs/PDD_MULTI_ACCOUNT.md)
 - 规格与边界：[`docs/BROWSER_SYNC_SPEC.md`](docs/BROWSER_SYNC_SPEC.md)
 - 手工验收清单：[`docs/SYNC_MANUAL_ACCEPTANCE.md`](docs/SYNC_MANUAL_ACCEPTANCE.md)
 - 运行与配置说明：[`sync-agent/README.md`](sync-agent/README.md)
 
-首次运行必须在可见窗口手工登录；程序不自动填密码、不绕过验证码、不隐藏窗口；只有手动同步验收
-通过后才允许考虑 PDD 定时任务。1688 定时同步由服务器单独控制，两者互不依赖。
+首次运行必须在可见窗口逐账号手工登录；程序不自动填密码、不绕过验证码、不隐藏窗口。当前
+`sync-all` 只支持严格串行 dry-run，commit 仍须逐账号人工确认。远程 noVNC、服务器浏览器、Cookie
+注入和 PDD 定时 commit 均未实现。1688 定时同步由服务器单独控制，两者互不依赖。
 
 ## 仓库结构
 
 ```text
 backend/     FastAPI + SQLite：收货凭证、认证、订单/包裹数据模型、同步批次接收
 frontend/    Vue 3 微信 H5：拍照、压缩、条码、离线队列、清单
-sync-agent/  Windows 同步端：仅 PDD 的 doctor / login-check / capture-page / sync-once
+sync-agent/  Mac/Windows 同步端：PDD accounts / login-check / capture-page / sync-once / sync-all
 deploy/      Nginx 模板、备份/验证脚本
 docs/        计划、规格、部署、验收文档
 ```
@@ -144,9 +152,10 @@ cd sync-agent && npm ci && npm test && npm run typecheck && npm run build && npm
 - [总体实施计划](PLAN.md) —— 产品结论、数据模型、分阶段计划与验收标准
 - [部署与运维](docs/DEPLOYMENT.md) —— 迁移、备份恢复、公网隧道、回滚、故障排查
 - [1688 官方 Open API 多账号配置](docs/ALI1688_OPEN_API.md)
+- [拼多多多账号同步（第一阶段）](docs/PDD_MULTI_ACCOUNT.md)
 - [人员责任与人工收货纠正](docs/RESPONSIBILITY_AND_MANUAL_ARRIVAL.md)
 - [浏览器同步技术规格](docs/BROWSER_SYNC_SPEC.md)
-- [Windows 手工验收清单](docs/SYNC_MANUAL_ACCEPTANCE.md)
+- [平台同步手工验收清单](docs/SYNC_MANUAL_ACCEPTANCE.md)
 - [DeepSeek 实现任务单](DEEPSEEK_HANDOFF.md)
 
 ## 项目状态
@@ -154,5 +163,6 @@ cd sync-agent && npm ci && npm test && npm run typecheck && npm run build && npm
 - 当前生产入口使用公网 HTTPS，服务器部署与回滚流程见 `docs/DEPLOYMENT.md`；
 - 1688 Open API 已通过首个真实采购账号导入订单，多账号可在同一应用授权上继续追加；
 - 拍照收货、人工状态纠正和人员责任审计已完成代码与自动测试，仍需按实际仓库流程持续真机验收；
-- PDD 浏览器同步代码已完成但尚待真机验收；CSV 导入尚未开始；
+- PDD 多账号浏览器同步第一阶段代码已完成但尚待真实账号验收；远程 noVNC、服务器浏览器和定时
+  commit 尚未实现；CSV 导入尚未开始；
 - 详细状态与决策记录见 [PLAN.md](PLAN.md) 第 0 节和变更记录。

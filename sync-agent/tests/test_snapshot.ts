@@ -37,6 +37,7 @@ function sampleBatch(): SyncBatch {
     worker_id: "worker-test",
     platform: "pdd",
     platform_account_key: "pdd-main",
+    platform_account_label: "拼多多采购主账号",
     started_at: "2026-08-13T02:00:00.000Z",
     finished_at: "2026-08-13T02:01:00.000Z",
     cursor_before: null,
@@ -190,5 +191,12 @@ describe("snapshot lifecycle", () => {
     expect(path).toContain("snapshot-pdd-pdd-main-");
     const mode = readFileSync(path, "utf8");
     expect(mode).not.toContain("password");
+  });
+
+  it("keeps dotted account keys distinct from dashed account keys in filenames", () => {
+    const dir = tempDir();
+    expect(snapshotFileName(dir, "pdd", "buyer.one", "batch")).not.toBe(
+      snapshotFileName(dir, "pdd", "buyer-one", "batch"),
+    );
   });
 });

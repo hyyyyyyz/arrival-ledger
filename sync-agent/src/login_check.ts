@@ -26,6 +26,7 @@ export interface LoginCheckOptions {
 export interface LoginCheckOutcome {
   exitCode: number;
   state: PageStateCheck | null;
+  checkedAt: string | null;
 }
 
 export function waitForEnter(): Promise<void> {
@@ -51,7 +52,7 @@ export async function runLoginCheck(options: LoginCheckOptions): Promise<LoginCh
   const write = options.output ?? ((line: string) => process.stdout.write(`${line}\n`));
 
   try {
-    mkdirSync(profileDir, { recursive: true });
+    mkdirSync(profileDir, { recursive: true, mode: 0o700 });
   } catch (error) {
     logger.error({
       command: "login-check",
@@ -59,7 +60,7 @@ export async function runLoginCheck(options: LoginCheckOptions): Promise<LoginCh
       message: `could not create profile dir ${profileDir}: ${(error as Error).message}`,
       error_code: "CONFIG",
     });
-    return { exitCode: 1, state: null };
+    return { exitCode: 1, state: null, checkedAt: null };
   }
   if (!existsSync(profileDir)) {
     logger.error({
@@ -68,18 +69,33 @@ export async function runLoginCheck(options: LoginCheckOptions): Promise<LoginCh
       message: `profile dir is unavailable: ${profileDir}`,
       error_code: "CONFIG",
     });
-    return { exitCode: 1, state: null };
+    return { exitCode: 1, state: null, checkedAt: null };
   }
+
+  const platformLock = platform === "pdd"
+    ? acquireLock(config.state_dir, platform, "__browser-global__", config.worker_id)
+    : null;
+  if (platformLock !== null && !platformLock.held) {
+    logger.error({
+      command: "login-check",
+      platform,
+      message: `another PDD browser operation is running (${describeHolder(platformLock.holder)})`,
+      error_code: "LOCKED",
+    });
+    return { exitCode: 1, state: null, checkedAt: null };
+  }
+  const releasePlatformLock = platformLock?.held === true ? platformLock.release : () => undefined;
 
   const lock = acquireLock(config.state_dir, platform, accountKey, config.worker_id);
   if (!lock.held) {
+    releasePlatformLock();
     logger.error({
       command: "login-check",
       platform,
       message: `another sync is running (${describeHolder(lock.holder)})`,
       error_code: "LOCKED",
     });
-    return { exitCode: 1, state: null };
+    return { exitCode: 1, state: null, checkedAt: null };
   }
 
   const adapter = options.adapter ?? getAdapter(platform);
@@ -103,7 +119,7 @@ export async function runLoginCheck(options: LoginCheckOptions): Promise<LoginCh
         message: "platform access state is invalid; no browser was opened",
         error_code: "STATE_INVALID",
       });
-      return { exitCode: 1, state: null };
+      return { exitCode: 1, state: null, checkedAt: null };
     }
     if (!access.allowed) {
       write(`[WARN] ${platform} page cooldown is active; retry after ${access.retry_after_seconds}s.`);
@@ -113,7 +129,7 @@ export async function runLoginCheck(options: LoginCheckOptions): Promise<LoginCh
         message: `platform page cooldown is active; retry after ${access.retry_after_seconds}s`,
         error_code: "RATE_LIMITED",
       });
-      return { exitCode: 1, state: null };
+      return { exitCode: 1, state: null, checkedAt: null };
     }
     browser = await launcher(profileDir);
     const page: Page = browser.context.pages()[0] ?? (await browser.context.newPage());
@@ -124,6 +140,7 @@ export async function runLoginCheck(options: LoginCheckOptions): Promise<LoginCh
     });
 
     let state = await checkPageState(page, adapter);
+    let checkedAt = new Date().toISOString();
     let attempts = 0;
     while (state.status === "NEEDS_LOGIN" || state.status === "CAPTCHA_OR_BLOCKED") {
       attempts += 1;
@@ -141,19 +158,21 @@ export async function runLoginCheck(options: LoginCheckOptions): Promise<LoginCh
       write("Press Enter here after the login is complete (Ctrl+C to abort)...");
       await waitForInput();
       state = await checkPageState(page, adapter);
+      checkedAt = new Date().toISOString();
     }
 
     if (state.status === "OK") {
       write(`[OK] ${platform} login state: ${state.detail}`);
       logger.info({ command: "login-check", platform, status: "OK", message: state.detail });
-      return { exitCode: 0, state };
+      return { exitCode: 0, state, checkedAt };
     }
     write(`[FAIL] ${platform} login state: ${state.detail}`);
     write("Fix the visible page manually and run login-check again.");
     logger.warn({ command: "login-check", platform, status: state.status, message: state.detail });
-    return { exitCode: 1, state };
+    return { exitCode: 1, state, checkedAt };
   } finally {
     if (browser !== null) await browser.close().catch(() => undefined);
     lock.release();
+    releasePlatformLock();
   }
 }

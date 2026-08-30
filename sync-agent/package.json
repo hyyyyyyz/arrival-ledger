@@ -12,9 +12,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "doctor": "npm run build --silent && node dist/cli.js doctor",
+    "accounts": "npm run build --silent && node dist/cli.js accounts",
     "login-check": "npm run build --silent && node dist/cli.js login-check",
     "capture-page": "npm run build --silent && node dist/cli.js capture-page",
-    "sync-once": "npm run build --silent && node dist/cli.js sync-once"
+    "sync-once": "npm run build --silent && node dist/cli.js sync-once",
+    "sync-all": "npm run build --silent && node dist/cli.js sync-all"
   },
   "dependencies": {
     "playwright": "1.62.1"

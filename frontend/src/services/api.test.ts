@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  createPlatformAccount,
   createUser,
   getCurrentSession,
   getDashboardStats,
   listOrders,
+  listPlatformAccounts,
   listUsers,
   setUserActive,
   updateOrderArrivalStatus,
@@ -166,6 +168,43 @@ describe('people management', () => {
       method: 'PATCH',
       body: JSON.stringify({ is_active: false }),
     }))
+  })
+})
+
+describe('platform account management', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('lists PDD accounts and registers only the stable account identity', async () => {
+    const account = {
+      id: 3,
+      platform: 'pdd',
+      account_key: 'pdd-main',
+      display_label: '主采购账号',
+      source: 'BROWSER_PROFILE',
+      status: 'NEEDS_LOGIN',
+      last_attempt_at: null,
+      last_success_at: null,
+      last_count: 0,
+      message: null,
+      order_count: 0,
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ items: [account], total: 1 }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ account }), { status: 201, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(listPlatformAccounts('pdd')).resolves.toEqual({ items: [account], total: 1 })
+    await expect(createPlatformAccount({ platform: 'pdd', account_key: 'pdd-main', display_label: '主采购账号' })).resolves.toEqual(account)
+
+    expect(fetchMock.mock.calls[0]).toEqual([
+      '/api/platform-accounts?platform=pdd',
+      expect.objectContaining({ credentials: 'include', cache: 'no-store' }),
+    ])
+    expect(fetchMock.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ platform: 'pdd', account_key: 'pdd-main', display_label: '主采购账号' }),
+    }))
+    expect(String(fetchMock.mock.calls[1]?.[1]?.body)).not.toMatch(/password|cookie|token/i)
   })
 })
 

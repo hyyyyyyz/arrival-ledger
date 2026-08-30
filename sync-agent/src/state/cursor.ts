@@ -11,7 +11,7 @@ import {
 } from "../models.js";
 
 export function accountKeyFilePart(accountKey: string): string {
-  return accountKey.replace(/[^A-Za-z0-9_-]/g, "-").toLowerCase();
+  return accountKey.replace(/[^A-Za-z0-9._-]/g, "-").toLowerCase();
 }
 
 export function cursorFileName(

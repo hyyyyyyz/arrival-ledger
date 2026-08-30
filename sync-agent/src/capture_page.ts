@@ -42,8 +42,22 @@ export async function runCapturePage(options: CapturePageOptions): Promise<Captu
     });
     return { exitCode: 1, path: null, status: "DISABLED" };
   }
+  const platformLock = platform === "pdd"
+    ? acquireLock(config.state_dir, platform, "__browser-global__", config.worker_id)
+    : null;
+  if (platformLock !== null && !platformLock.held) {
+    logger.error({
+      command: "capture-page",
+      platform,
+      message: `another PDD browser operation is running (${describeHolder(platformLock.holder)})`,
+      error_code: "LOCKED",
+    });
+    return { exitCode: 1, path: null, status: "DISABLED" };
+  }
+  const releasePlatformLock = platformLock?.held === true ? platformLock.release : () => undefined;
   const lock = acquireLock(config.state_dir, platform, accountKey, config.worker_id);
   if (!lock.held) {
+    releasePlatformLock();
     logger.error({
       command: "capture-page",
       platform,
@@ -126,5 +140,6 @@ export async function runCapturePage(options: CapturePageOptions): Promise<Captu
   } finally {
     if (browser !== null) await browser.close().catch(() => undefined);
     lock.release();
+    releasePlatformLock();
   }
 }

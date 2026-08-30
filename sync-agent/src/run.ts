@@ -161,8 +161,26 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
     };
   }
 
+  const platformLock = platform === "pdd"
+    ? acquireLock(config.state_dir, platform, "__browser-global__", config.worker_id)
+    : null;
+  if (platformLock !== null && !platformLock.held) {
+    logger.error({
+      command: "sync-once",
+      platform,
+      message: `another PDD browser operation is running (${describeHolder(platformLock.holder)})`,
+      error_code: "LOCKED",
+    });
+    return {
+      exitCode: 1,
+      report: buildReport("sync-once", platform, "dry-run", null, "DISABLED", "LOCKED", startedAt, emptyCounts(), []),
+    };
+  }
+  const releasePlatformLock = platformLock?.held === true ? platformLock.release : () => undefined;
+
   const lock = acquireLock(config.state_dir, platform, accountKey, config.worker_id);
   if (!lock.held) {
+    releasePlatformLock();
     logger.error({
       command: "sync-once",
       platform,
@@ -497,6 +515,12 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
       worker_id: config.worker_id,
       platform,
       platform_account_key: accountKey,
+      ...(platform === "pdd"
+        ? {
+            platform_account_label:
+              config.pdd_accounts.find((account) => account.account_key === accountKey)?.display_label ?? undefined,
+          }
+        : {}),
       started_at: startedAt,
       finished_at: finishedAt,
       cursor_before: loadCursor(config.state_dir, platform, accountKey)?.last_cursor ?? null,
@@ -522,6 +546,7 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
       await browser.close().catch(() => undefined);
     }
     lock.release();
+    releasePlatformLock();
   }
 }
 

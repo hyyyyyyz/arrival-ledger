@@ -44,6 +44,10 @@ from .schemas import (
     OrderArrivalAuditListResponse,
     OrderArrivalStateOut,
     OrderArrivalStatusUpdate,
+    PlatformAccountCreate,
+    PlatformAccountListResponse,
+    PlatformAccountOut,
+    PlatformAccountStatusIn,
     PurchaseOrderListResponse,
     PurchaseOrderOut,
     ReceiptCreateResponse,
@@ -151,12 +155,42 @@ class AuthenticatedUser:
         )
 
 
+@dataclass(frozen=True)
+class AuthenticatedSyncWorker:
+    token_digest: str
+
+
 def _settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
 def _database(request: Request) -> Database:
     return request.app.state.database
+
+
+def require_sync_worker(request: Request) -> AuthenticatedSyncWorker:
+    settings = _settings(request)
+    if not settings.sync_worker_tokens:
+        raise HTTPException(
+            status_code=503,
+            detail="sync ingest is not configured on this server",
+        )
+
+    authorization = request.headers.get("authorization", "").strip()
+    match = re.fullmatch(r"[Bb]earer\s+(\S+)", authorization)
+    if match is None:
+        raise HTTPException(status_code=401, detail="invalid worker token")
+    token_digest = session_token_digest(settings.session_secret, match.group(1))
+    with _database(request).connect() as connection:
+        token_row = connection.execute(
+            "SELECT id, revoked_at FROM sync_worker_tokens WHERE token_digest = ?",
+            (token_digest,),
+        ).fetchone()
+    if token_row is None:
+        raise HTTPException(status_code=401, detail="invalid worker token")
+    if token_row["revoked_at"] is not None:
+        raise HTTPException(status_code=403, detail="worker token revoked")
+    return AuthenticatedSyncWorker(token_digest=token_digest)
 
 
 def require_user(request: Request) -> AuthenticatedUser:
@@ -255,6 +289,37 @@ def require_admin(
     if user.role != "ADMIN":
         raise HTTPException(status_code=403, detail="administrator access required")
     return user
+
+
+PLATFORM_ACCOUNT_SELECT = """
+SELECT
+    accounts.id,
+    accounts.platform,
+    accounts.account_key,
+    accounts.display_label,
+    accounts.source,
+    COALESCE(sync_state.status, 'NEEDS_LOGIN') AS status,
+    sync_state.worker_id,
+    (
+        SELECT COUNT(*)
+        FROM purchase_orders
+        WHERE purchase_orders.platform_account_id = accounts.id
+    ) AS order_count,
+    sync_state.last_attempt_at,
+    sync_state.last_success_at,
+    COALESCE(sync_state.last_count, 0) AS last_count,
+    sync_state.message,
+    accounts.created_at,
+    accounts.updated_at,
+    COALESCE(sync_state.updated_at, accounts.updated_at) AS status_updated_at
+FROM platform_accounts AS accounts
+LEFT JOIN platform_account_sync_state AS sync_state
+  ON sync_state.platform_account_id = accounts.id
+"""
+
+
+def _platform_account_from_row(row: sqlite3.Row) -> PlatformAccountOut:
+    return PlatformAccountOut(**dict(row))
 
 
 RECEIPT_SELECT = """
@@ -802,6 +867,263 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             rows = connection.execute("SELECT account_key, cursor, last_success_at, last_error_at, last_error_code, last_error_message, last_count, updated_at FROM ali1688_sync_state ORDER BY account_key").fetchall()
         # This is intentionally a public projection; no token/app identifiers are returned.
         return {"enabled": bool(getattr(request.app.state, "ali1688_config", None) and request.app.state.ali1688_config.enabled), "accounts": [dict(row) for row in rows]}
+
+    @application.post(
+        "/api/sync/v1/account-status",
+        response_model=PlatformAccountOut,
+    )
+    def report_platform_account_status(
+        payload: PlatformAccountStatusIn,
+        request: Request,
+        worker: Annotated[
+            AuthenticatedSyncWorker, Depends(require_sync_worker)
+        ],
+    ) -> PlatformAccountOut:
+        received_at = utc_now()
+        if payload.checked_at.astimezone(timezone.utc) > received_at + timedelta(
+            minutes=5
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="checked_at must not be more than five minutes in the future",
+            )
+        now = db_timestamp(received_at)
+        checked_at = db_timestamp(payload.checked_at)
+        incoming_attempt = datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+        with _database(request).connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                account = connection.execute(
+                    """
+                    SELECT id, display_label FROM platform_accounts
+                    WHERE platform = 'pdd' AND account_key = ?
+                    """,
+                    (payload.platform_account_key,),
+                ).fetchone()
+                account_was_created = account is None
+                if account is None:
+                    connection.execute(
+                        """
+                        INSERT INTO platform_accounts(
+                            platform, account_key, display_label, source,
+                            created_at, updated_at
+                        ) VALUES ('pdd', ?, ?, 'WINDOWS_BROWSER', ?, ?)
+                        """,
+                        (
+                            payload.platform_account_key,
+                            payload.platform_account_label,
+                            now,
+                            now,
+                        ),
+                    )
+                    account = connection.execute(
+                        """
+                        SELECT id, display_label FROM platform_accounts
+                        WHERE platform = 'pdd' AND account_key = ?
+                        """,
+                        (payload.platform_account_key,),
+                    ).fetchone()
+                if account is None:  # pragma: no cover - guarded by the insert
+                    raise RuntimeError("platform account insert did not return an account")
+                previous_state = connection.execute(
+                    """
+                    SELECT status, worker_id, last_attempt_at, last_success_at,
+                           last_count, message
+                    FROM platform_account_sync_state
+                    WHERE platform_account_id = ?
+                    """,
+                    (account["id"],),
+                ).fetchone()
+                equal_replay = False
+                if previous_state is not None and previous_state["last_attempt_at"]:
+                    previous_attempt = datetime.fromisoformat(
+                        previous_state["last_attempt_at"].replace("Z", "+00:00")
+                    )
+                    if incoming_attempt < previous_attempt:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="stale account status report",
+                        )
+                    if incoming_attempt == previous_attempt:
+                        effective_label = (
+                            payload.platform_account_label
+                            if payload.platform_account_label is not None
+                            else account["display_label"]
+                        )
+                        effective_count = (
+                            payload.count
+                            if payload.count is not None
+                            else previous_state["last_count"]
+                        )
+                        equal_replay = all(
+                            (
+                                payload.status == previous_state["status"],
+                                payload.worker_id == previous_state["worker_id"],
+                                payload.message == previous_state["message"],
+                                effective_count == previous_state["last_count"],
+                                effective_label == account["display_label"],
+                            )
+                        )
+                        if not equal_replay:
+                            raise HTTPException(
+                                status_code=409,
+                                detail="conflicting account status report for checked_at",
+                            )
+                if not equal_replay:
+                    if not account_was_created:
+                        connection.execute(
+                            """
+                            UPDATE platform_accounts
+                            SET display_label = COALESCE(?, display_label),
+                                source = 'WINDOWS_BROWSER', updated_at = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                payload.platform_account_label,
+                                now,
+                                account["id"],
+                            ),
+                        )
+                    last_success_at = (
+                        checked_at
+                        if payload.status == "OK"
+                        else (
+                            previous_state["last_success_at"]
+                            if previous_state is not None
+                            else None
+                        )
+                    )
+                    last_count = (
+                        payload.count
+                        if payload.count is not None
+                        else (
+                            previous_state["last_count"]
+                            if previous_state is not None
+                            else 0
+                        )
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO platform_account_sync_state(
+                            platform_account_id, status, worker_id,
+                            last_attempt_at, last_success_at, last_count,
+                            message, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(platform_account_id) DO UPDATE SET
+                            status = excluded.status,
+                            worker_id = excluded.worker_id,
+                            last_attempt_at = excluded.last_attempt_at,
+                            last_success_at = excluded.last_success_at,
+                            last_count = excluded.last_count,
+                            message = excluded.message,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            account["id"],
+                            payload.status,
+                            payload.worker_id,
+                            checked_at,
+                            last_success_at,
+                            last_count,
+                            payload.message,
+                            now,
+                        ),
+                    )
+                row = connection.execute(
+                    PLATFORM_ACCOUNT_SELECT
+                    + " WHERE accounts.id = ? AND accounts.platform = 'pdd'",
+                    (account["id"],),
+                ).fetchone()
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        if row is None:  # pragma: no cover - guarded by the transaction
+            raise RuntimeError("platform account status could not be read")
+        # The authenticated token digest and browser profile never enter this projection.
+        del worker
+        return _platform_account_from_row(row)
+
+    @application.get(
+        "/api/platform-accounts",
+        response_model=PlatformAccountListResponse,
+    )
+    def list_platform_accounts(
+        request: Request,
+        admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+        platform: Annotated[Literal["pdd"], Query()] = "pdd",
+    ) -> PlatformAccountListResponse:
+        del admin
+        with _database(request).connect() as connection:
+            rows = connection.execute(
+                PLATFORM_ACCOUNT_SELECT
+                + " WHERE accounts.platform = ? ORDER BY accounts.id",
+                (platform,),
+            ).fetchall()
+        return PlatformAccountListResponse(
+            items=[_platform_account_from_row(row) for row in rows],
+            total=len(rows),
+        )
+
+    @application.post(
+        "/api/platform-accounts",
+        response_model=PlatformAccountOut,
+    )
+    def register_platform_account(
+        payload: PlatformAccountCreate,
+        request: Request,
+        admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+    ) -> PlatformAccountOut:
+        del admin
+        now = db_timestamp(utc_now())
+        with _database(request).connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    INSERT INTO platform_accounts(
+                        platform, account_key, display_label, source,
+                        created_at, updated_at
+                    ) VALUES ('pdd', ?, ?, 'WINDOWS_BROWSER', ?, ?)
+                    ON CONFLICT(platform, account_key) DO UPDATE SET
+                        display_label = excluded.display_label,
+                        source = excluded.source,
+                        updated_at = excluded.updated_at
+                    """,
+                    (payload.account_key, payload.display_label, now, now),
+                )
+                account = connection.execute(
+                    """
+                    SELECT id FROM platform_accounts
+                    WHERE platform = 'pdd' AND account_key = ?
+                    """,
+                    (payload.account_key,),
+                ).fetchone()
+                if account is None:  # pragma: no cover - guarded by the upsert
+                    raise RuntimeError("platform account upsert did not return an account")
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO platform_account_sync_state(
+                        platform_account_id, status, worker_id,
+                        last_attempt_at, last_success_at, last_count,
+                        message, updated_at
+                    ) VALUES (?, 'NEEDS_LOGIN', NULL, NULL, NULL, 0,
+                              '等待同步器首次上报状态', ?)
+                    """,
+                    (account["id"], now),
+                )
+                row = connection.execute(
+                    PLATFORM_ACCOUNT_SELECT
+                    + " WHERE accounts.id = ? AND accounts.platform = 'pdd'",
+                    (account["id"],),
+                ).fetchone()
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        if row is None:  # pragma: no cover - guarded by the transaction
+            raise RuntimeError("platform account could not be read")
+        return _platform_account_from_row(row)
 
     @application.post("/api/auth/login", response_model=AuthResponse)
     def login(payload: LoginRequest, request: Request, response: Response) -> AuthResponse:
@@ -2421,30 +2743,15 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     @application.post(
         "/api/sync/v1/batches", response_model=SyncBatchResponse
     )
-    async def sync_batches(request: Request) -> SyncBatchResponse:
+    async def sync_batches(
+        request: Request,
+        worker: Annotated[
+            AuthenticatedSyncWorker, Depends(require_sync_worker)
+        ],
+    ) -> SyncBatchResponse:
         settings = _settings(request)
         database = _database(request)
-
-        if not settings.sync_worker_tokens:
-            raise HTTPException(
-                status_code=503,
-                detail="sync ingest is not configured on this server",
-            )
-
-        authorization = request.headers.get("authorization", "").strip()
-        match = re.fullmatch(r"[Bb]earer\s+(\S+)", authorization)
-        if match is None:
-            raise HTTPException(status_code=401, detail="invalid worker token")
-        token_digest = session_token_digest(settings.session_secret, match.group(1))
-        with database.connect() as connection:
-            token_row = connection.execute(
-                "SELECT id, revoked_at FROM sync_worker_tokens WHERE token_digest = ?",
-                (token_digest,),
-            ).fetchone()
-        if token_row is None:
-            raise HTTPException(status_code=401, detail="invalid worker token")
-        if token_row["revoked_at"] is not None:
-            raise HTTPException(status_code=403, detail="worker token revoked")
+        token_digest = worker.token_digest
 
         raw_body = await request.body()
         if len(raw_body) > settings.sync_max_batch_bytes:

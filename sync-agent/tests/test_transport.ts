@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { postBatch, TransportError } from "../src/transport.js";
+import { postAccountStatus, postBatch, TransportError } from "../src/transport.js";
 import type { SyncBatch } from "../src/models.js";
 
 function validBatch(): SyncBatch {
@@ -174,5 +174,42 @@ describe("postBatch", () => {
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 418 })) as unknown as typeof fetch;
     const error = await postBatch({ ...options, backoff_ms: 1 }, validBatch(), fetchImpl).catch((cause) => cause);
     expect(error).toBeInstanceOf(TransportError);
+  });
+});
+
+describe("postAccountStatus", () => {
+  const report = {
+    schema_version: 1 as const,
+    worker_id: "worker-test",
+    platform: "pdd" as const,
+    platform_account_key: "buyer.team-1",
+    platform_account_label: "采购一组",
+    status: "OK" as const,
+    checked_at: "2026-08-30T00:00:00.000Z",
+    count: 8,
+    message: "dry-run completed",
+  };
+
+  it("posts the exact status contract with worker authorization", async () => {
+    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe("http://127.0.0.1:8766/api/sync/v1/account-status");
+      expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer test-worker-key-0001");
+      expect(JSON.parse(String(init.body))).toEqual(report);
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    await postAccountStatus(options, report, fetchImpl);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send status without a worker key", async () => {
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+    await expect(postAccountStatus({ ...options, worker_key: "" }, report, fetchImpl)).rejects.toMatchObject({ kind: "auth" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("does not retry an out-of-order account status rejected with 409", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 409 })) as unknown as typeof fetch;
+    await expect(postAccountStatus(options, report, fetchImpl)).rejects.toMatchObject({ kind: "conflict" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

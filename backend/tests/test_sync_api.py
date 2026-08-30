@@ -54,6 +54,10 @@ def batch_payload(batch_id: str = "b0000000-0000-4000-8000-000000000001", **over
         ],
     }
     payload.update(overrides)
+    if "source" not in payload:
+        payload["source"] = (
+            "ALI1688_API" if payload["platform"] == "1688" else "WINDOWS_BROWSER"
+        )
     return payload
 
 
@@ -78,6 +82,21 @@ def test_sync_batch_rejects_unknown_and_sensitive_fields(
     payload["orders"][0]["items"][0]["password"] = "hunter2"
     response = post_batch(client, payload, sync_headers)
     assert response.status_code == 422
+
+
+def test_sync_batch_rejects_platform_source_mismatch(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    pdd_from_api = batch_payload(source="ALI1688_API")
+    assert post_batch(client, pdd_from_api, sync_headers).status_code == 422
+
+    ali_from_browser = batch_payload(
+        "b-source-pair-1688-0001",
+        platform="1688",
+        platform_account_key="1688-main",
+        source="WINDOWS_BROWSER",
+    )
+    assert post_batch(client, ali_from_browser, sync_headers).status_code == 422
 
 
 def test_sync_batch_accepts_and_ingests(
@@ -116,6 +135,40 @@ def test_sync_batch_accepts_and_ingests(
         assert len(batches) == 1
         assert batches[0]["status"] == "OK"
         assert batches[0]["token_digest"] != "test-sync-worker-token-0001"
+
+
+def test_sync_batch_repairs_existing_pdd_account_source(
+    client: TestClient, sync_headers: dict[str, str]
+) -> None:
+    with client.app.state.database.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO platform_accounts(
+                platform, account_key, display_label, source, created_at, updated_at
+            ) VALUES (
+                'pdd', 'pdd-main', '旧标签', 'ALI1688_API',
+                '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z'
+            )
+            """
+        )
+        connection.commit()
+
+    payload = batch_payload(
+        "b-repair-pdd-source-0001",
+        platform_account_label="采购主账号",
+    )
+    assert post_batch(client, payload, sync_headers).status_code == 200
+    with client.app.state.database.connect() as connection:
+        account = connection.execute(
+            """
+            SELECT display_label, source FROM platform_accounts
+            WHERE platform = 'pdd' AND account_key = 'pdd-main'
+            """
+        ).fetchone()
+    assert dict(account) == {
+        "display_label": "采购主账号",
+        "source": "WINDOWS_BROWSER",
+    }
 
 
 def test_sync_batch_replay_returns_original_result(

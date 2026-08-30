@@ -346,6 +346,10 @@ function applyArrivalStatus(arrivalStatus: OrderArrivalFilter): void {
               <span class="platform-badge" :class="`platform-${order.platform}`">{{ platformLabel(order.platform) }}</span>
             </div>
             <strong :id="`order-${order.id}-number`" class="purchase-order-number">{{ order.platform_order_id }}</strong>
+            <p class="purchase-account-line">
+              <span>采购账号</span>
+              <strong>{{ order.account_label }}</strong>
+            </p>
           </div>
           <div class="compact-order-actions">
             <div

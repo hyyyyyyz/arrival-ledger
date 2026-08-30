@@ -7,6 +7,9 @@ import type {
   ManualArrivalStatus,
   OrderListParams,
   OrderListResponse,
+  CreatePlatformAccountInput,
+  PlatformAccount,
+  PlatformAccountListResponse,
   Receipt,
   UploadQueueItem,
   User,
@@ -86,6 +89,10 @@ function unwrapReceipt(payload: Receipt | { receipt: Receipt }): Receipt {
 
 function unwrapUser(payload: ManagedUser | { user: ManagedUser }): ManagedUser {
   return 'user' in payload ? payload.user : payload
+}
+
+function unwrapPlatformAccount(payload: PlatformAccount | { account: PlatformAccount }): PlatformAccount {
+  return 'account' in payload ? payload.account : payload
 }
 
 export async function login(username: string, password: string): Promise<AuthSession> {
@@ -171,6 +178,20 @@ export async function setUserActive(userId: string | number, isActive: boolean):
     },
   )
   return unwrapUser(payload)
+}
+
+export async function listPlatformAccounts(platform: 'pdd' = 'pdd'): Promise<PlatformAccountListResponse> {
+  const search = new URLSearchParams({ platform })
+  return request<PlatformAccountListResponse>(`/platform-accounts?${search.toString()}`)
+}
+
+export async function createPlatformAccount(input: CreatePlatformAccountInput): Promise<PlatformAccount> {
+  const payload = await request<PlatformAccount | { account: PlatformAccount }>('/platform-accounts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  return unwrapPlatformAccount(payload)
 }
 
 export async function createReceipt(item: UploadQueueItem): Promise<Receipt> {

@@ -434,7 +434,7 @@ def test_migration_upgrades_old_database_and_keeps_receipts(
         migrations = connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6]
+        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6, 7, 8]
         tables = {
             row["name"]
             for row in connection.execute(
@@ -445,6 +445,7 @@ def test_migration_upgrades_old_database_and_keeps_receipts(
         assert "order_arrival_events" in tables
         assert "receipt_change_events" in tables
         assert "user_management_events" in tables
+        assert "platform_account_sync_state" in tables
 
 
 def test_fp_item_title_sku_change_with_package_is_safe(
@@ -547,7 +548,7 @@ def test_legacy_nonnull_links_are_nullified_and_deduped_on_upgrade(
         migrations = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6]
+        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_failed_migration_leaves_no_partial_schema(tmp_path) -> None:
@@ -655,9 +656,11 @@ def test_responsibility_migration_upgrades_version_four_database(tmp_path) -> No
         migrations = connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [(row["version"], row["name"]) for row in migrations][-2:] == [
+        assert [(row["version"], row["name"]) for row in migrations][-4:] == [
             (5, "responsibility_and_manual_arrival"),
             (6, "user_management_audit"),
+            (7, "platform_account_sync_state"),
+            (8, "normalize_pdd_account_source"),
         ]
 
 
@@ -718,6 +721,6 @@ def test_user_audit_migration_upgrades_version_five_database(tmp_path) -> None:
             """
         ).fetchone()
         assert (last_migration["version"], last_migration["name"]) == (
-            6,
-            "user_management_audit",
+            8,
+            "normalize_pdd_account_source",
         )

@@ -41,6 +41,7 @@ backups/
 artifacts/
 pdd-profile/
 sync-agent/.env.local
+sync-agent/config/pdd-accounts.json
 sync-agent/profiles/
 sync-agent/state/
 sync-agent/logs/

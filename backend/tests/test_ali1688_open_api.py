@@ -373,6 +373,69 @@ def test_mapping_fails_closed_on_incomplete_official_fields(mutate, match) -> No
         map_order(order, detail)
 
 
+@pytest.mark.parametrize(
+    ("raw_status", "expected_status"),
+    [("cancel", "CANCELLED"), ("refundsuccess", "REFUNDED")],
+)
+def test_mapping_ignores_only_unusable_historical_logistics_on_closed_order(
+    raw_status: str,
+    expected_status: str,
+) -> None:
+    order = {
+        "baseInfo": {
+            "idOfStr": "888888888888888888",
+            "status": raw_status,
+            "createTime": "20260828142334000+0800",
+        },
+        "productItems": [
+            {
+                "subItemIDString": "line-1",
+                "name": "已取消商品",
+                "quantity": 1,
+            }
+        ],
+    }
+    detail = {
+        "nativeLogistics": {
+            "logisticsItems": [
+                {"status": "alreadysend"},
+                {
+                    "logisticsBillNo": "SF1234567890000",
+                    "status": "signinsuccess",
+                },
+            ],
+        }
+    }
+
+    mapped = map_order(order, detail)
+
+    assert mapped.status == expected_status
+    assert [package.tracking_no for package in mapped.packages] == ["SF1234567890000"]
+
+
+def test_mapping_closed_order_still_rejects_non_object_logistics_row() -> None:
+    order = {
+        "baseInfo": {
+            "idOfStr": "888888888888888888",
+            "status": "cancel",
+            "createTime": "20260828142334000+0800",
+        },
+        "productItems": [
+            {
+                "subItemIDString": "line-1",
+                "name": "已取消商品",
+                "quantity": 1,
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="non-object"):
+        map_order(
+            order,
+            {"nativeLogistics": {"logisticsItems": [None]}},
+        )
+
+
 def _database(tmp_path) -> Database:
     database = Database(tmp_path / "arrival.db")
     database.initialize(
