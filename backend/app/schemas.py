@@ -251,7 +251,7 @@ class OrderMatchItemOut(BaseModel):
 
 class OrderMatchOut(BaseModel):
     order_id: str = Field(description="Stable internal purchase order identity")
-    platform: Literal["pdd", "1688"]
+    platform: Literal["pdd", "1688", "other"]
     platform_order_id: str
     account_label: str | None = Field(
         default=None, description="Optional non-secret platform account display label"
@@ -322,7 +322,7 @@ class OrderArrivalAuditListResponse(BaseModel):
 
 class PurchaseOrderOut(BaseModel):
     id: str = Field(description="Stable internal purchase order identity")
-    platform: Literal["pdd", "1688"]
+    platform: Literal["pdd", "1688", "other"]
     account_label: str
     platform_order_id: str
     ordered_at: datetime | None
@@ -348,6 +348,9 @@ class PurchaseOrderOut(BaseModel):
     responsible_user: UserOut | None
     manual_revision: int = Field(ge=0)
     changed_at: datetime | None
+    manual_created_by: UserOut | None = None
+    manual_created_at: datetime | None = None
+    manual_remark: str | None = None
 
 
 class PurchaseOrderListResponse(BaseModel):
@@ -359,6 +362,43 @@ class PurchaseOrderListResponse(BaseModel):
         default=None,
         description="Oldest latest-success timestamp across accounts represented by this order view; null when any account has never synced successfully",
     )
+
+
+class ManualOrderCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    client_event_id: str = Field(min_length=8, max_length=128)
+    tracking_no: str = Field(min_length=1, max_length=128)
+    product_name: str = Field(min_length=1, max_length=256)
+    courier: str | None = Field(default=None, max_length=128)
+    remark: str | None = Field(default=None, max_length=512)
+
+    @field_validator("client_event_id", "tracking_no", "product_name")
+    @classmethod
+    def required_text_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be blank")
+        return value
+
+    @field_validator("courier", "remark")
+    @classmethod
+    def optional_text_normalized(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class ManualOrderCreateResponse(BaseModel):
+    created: bool
+    idempotent_replay: bool
+    order_id: str
+    platform_order_id: str
+    tracking_no: str
+    product_name: str
+    courier: str | None
+    source: Literal["THIRD_PARTY_MANUAL"]
 
 
 class ReceiptOut(BaseModel):

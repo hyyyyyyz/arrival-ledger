@@ -97,7 +97,11 @@ dry-run，再按账号确认后提交。每个账号有独立游标和锁，失�
 - `device_id`：客户端持久设备标识；
 - `tracking_no`：可选快递单号；
 - `barcode_candidate`：可选识别候选；
-- `input_method`：当前只接受 `PHOTO_CAPTURE`。
+- `input_method`：接受 `PHOTO_CAPTURE`（相机拍摄）或 `PHOTO_LIBRARY`（相册选择）。
+
+第三方或线下采购可通过认证接口 `POST /api/manual-orders` 录入。必填字段是稳定的
+`client_event_id`、`tracking_no` 和 `product_name`，`courier`、`remark` 可选。标准化运单号全局去重；
+若已属于 1688/PDD 订单则返回 `409`，不会误建重复订单。创建人和创建时间会随统一订单列表返回。
 
 相同 `client_event_id` 重试返回既有记录，不重复写照片或数据库行。不同事件使用相同标准化快递单号时仍保存新照片以供审计，并通过 `is_duplicate`、`duplicate_of_id` 和 `duplicate_of` 指向首次记录。
 

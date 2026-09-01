@@ -109,6 +109,67 @@ def test_manual_arrival_requires_authentication(client: TestClient) -> None:
     assert client.get("/api/orders/1/arrival-history").status_code == 401
 
 
+def test_third_party_order_is_idempotent_and_visible_in_order_list(
+    authenticated_client: TestClient,
+) -> None:
+    payload = {
+        "client_event_id": "third-party-create-0001",
+        "tracking_no": "YT-OTHER-1234",
+        "product_name": "甲方采购的样品",
+        "courier": "圆通速递",
+        "remark": "无需平台同步",
+    }
+    created = authenticated_client.post("/api/manual-orders", json=payload)
+    assert created.status_code == 201
+    assert created.json()["created"] is True
+    replay = authenticated_client.post("/api/manual-orders", json=payload)
+    assert replay.status_code == 201
+    assert replay.json()["idempotent_replay"] is True
+    for field, value in (
+        ("tracking_no", "YT-OTHER-9999"),
+        ("product_name", "被篡改的商品"),
+        ("courier", "中通快递"),
+        ("remark", "被篡改的备注"),
+    ):
+        conflicting_replay = authenticated_client.post(
+            "/api/manual-orders",
+            json={**payload, field: value},
+        )
+        assert conflicting_replay.status_code == 409
+    duplicate = authenticated_client.post(
+        "/api/manual-orders", json={**payload, "client_event_id": "third-party-create-0002"}
+    )
+    assert duplicate.status_code == 409
+    orders = authenticated_client.get("/api/orders", params={"platform": "other"})
+    assert orders.status_code == 200
+    order = orders.json()["items"][0]
+    assert order["platform"] == "other"
+    assert order["source"] == "THIRD_PARTY_MANUAL"
+    assert order["items"][0]["title"] == payload["product_name"]
+    assert order["packages"][0]["tracking_no"] == payload["tracking_no"]
+    assert order["manual_created_by"]["username"] == "admin"
+    assert order["manual_remark"] == payload["remark"]
+    stats = authenticated_client.get("/api/dashboard/stats").json()
+    assert stats["total_orders"] == 1
+    assert stats["account_count"] == 0
+
+
+def test_third_party_order_rejects_tracking_collision_with_platform_order(
+    authenticated_client: TestClient,
+    sync_headers: dict[str, str],
+) -> None:
+    _seed_order(authenticated_client, sync_headers, order_id="REAL-ORDER-001", tracking_no="SHARED-REAL-001")
+    response = authenticated_client.post(
+        "/api/manual-orders",
+        json={
+            "client_event_id": "third-party-collision-0001",
+            "tracking_no": "shared real 001",
+            "product_name": "不应创建",
+        },
+    )
+    assert response.status_code == 409
+
+
 def test_manual_arrival_is_audited_idempotent_and_concurrency_safe(
     authenticated_client: TestClient,
     sync_headers: dict[str, str],

@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS receipt_events (
     operator_user_id INTEGER NOT NULL REFERENCES users(id),
     event_type TEXT NOT NULL DEFAULT 'RECEIVE' CHECK (event_type IN ('RECEIVE')),
     input_method TEXT NOT NULL DEFAULT 'PHOTO_CAPTURE'
-        CHECK (input_method IN ('PHOTO_CAPTURE')),
+        CHECK (input_method IN ('PHOTO_CAPTURE', 'PHOTO_LIBRARY')),
     captured_at TEXT NOT NULL,
     server_received_at TEXT NOT NULL,
     device_id TEXT NOT NULL,
@@ -506,6 +506,105 @@ def _migration_normalize_pdd_account_source(
     """)
 
 
+def _migration_manual_orders(connection: sqlite3.Connection) -> None:
+    """Support idempotent, user-entered orders from non-platform purchases."""
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS manual_order_details (
+            order_id INTEGER PRIMARY KEY REFERENCES purchase_orders(id) ON DELETE CASCADE,
+            courier TEXT,
+            remark TEXT,
+            created_by_user_id INTEGER NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS manual_order_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_event_id TEXT NOT NULL UNIQUE,
+            order_id INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
+            actor_user_id INTEGER NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        CREATE INDEX IF NOT EXISTS idx_manual_order_events_order
+            ON manual_order_events(order_id, id DESC)
+    """)
+
+
+def _migration_photo_library_input(connection: sqlite3.Connection) -> None:
+    """Allow the gallery capture mode on databases created before v10."""
+    sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'receipt_events'"
+    ).fetchone()[0]
+    if "PHOTO_LIBRARY" in sql:
+        return
+    # The old table may contain duplicate receipts whose self-referencing
+    # duplicate_of_receipt_id points at a row inserted later.  Defer FK
+    # validation until both rebuilt tables have been copied in full.
+    connection.execute("PRAGMA defer_foreign_keys = ON")
+    # Rebuild both receipt tables so SQLite's CHECK constraint is changed while
+    # preserving ids, files, and tracking-edit audit history.
+    connection.execute("ALTER TABLE receipt_change_events RENAME TO receipt_change_events_old")
+    connection.execute("ALTER TABLE receipt_events RENAME TO receipt_events_old")
+    connection.execute("DROP INDEX IF EXISTS idx_receipts_recent")
+    connection.execute("DROP INDEX IF EXISTS idx_receipts_tracking")
+    connection.execute("DROP INDEX IF EXISTS idx_receipt_change_events_receipt")
+    connection.execute("""
+        CREATE TABLE receipt_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_event_id TEXT NOT NULL UNIQUE,
+            operator_user_id INTEGER NOT NULL REFERENCES users(id),
+            event_type TEXT NOT NULL DEFAULT 'RECEIVE' CHECK (event_type IN ('RECEIVE')),
+            input_method TEXT NOT NULL DEFAULT 'PHOTO_CAPTURE'
+                CHECK (input_method IN ('PHOTO_CAPTURE', 'PHOTO_LIBRARY')),
+            captured_at TEXT NOT NULL, server_received_at TEXT NOT NULL,
+            device_id TEXT NOT NULL, barcode_candidate TEXT, tracking_no TEXT,
+            tracking_no_normalized TEXT,
+            duplicate_of_receipt_id INTEGER REFERENCES receipt_events(id),
+            evidence_status TEXT NOT NULL DEFAULT 'READY'
+                CHECK (evidence_status IN ('PENDING', 'READY', 'FAILED')),
+            photo_storage_path TEXT NOT NULL, photo_original_name TEXT,
+            photo_content_type TEXT NOT NULL, photo_sha256 TEXT NOT NULL,
+            photo_size INTEGER NOT NULL CHECK (photo_size > 0),
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        INSERT INTO receipt_events
+        SELECT id, client_event_id, operator_user_id, event_type, input_method,
+               captured_at, server_received_at, device_id, barcode_candidate,
+               tracking_no, tracking_no_normalized, duplicate_of_receipt_id,
+               evidence_status, photo_storage_path, photo_original_name,
+               photo_content_type, photo_sha256, photo_size, created_at, updated_at
+        FROM receipt_events_old
+    """)
+    connection.execute("""
+        CREATE INDEX idx_receipts_recent ON receipt_events(server_received_at DESC, id DESC)
+    """)
+    connection.execute("CREATE INDEX idx_receipts_tracking ON receipt_events(tracking_no_normalized)")
+    connection.execute("""
+        CREATE TABLE receipt_change_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_event_id TEXT NOT NULL UNIQUE,
+            receipt_id INTEGER NOT NULL REFERENCES receipt_events(id) ON DELETE CASCADE,
+            actor_user_id INTEGER NOT NULL REFERENCES users(id),
+            action TEXT NOT NULL CHECK (action IN ('TRACKING_UPDATE')),
+            previous_tracking_no TEXT, new_tracking_no TEXT NOT NULL, created_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        INSERT INTO receipt_change_events
+        SELECT id, client_event_id, receipt_id, actor_user_id, action,
+               previous_tracking_no, new_tracking_no, created_at
+        FROM receipt_change_events_old
+    """)
+    connection.execute("CREATE INDEX idx_receipt_change_events_receipt ON receipt_change_events(receipt_id, id DESC)")
+    connection.execute("DROP TABLE receipt_change_events_old")
+    connection.execute("DROP TABLE receipt_events_old")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial_schema", apply=_migration_initial_schema),
     Migration(version=2, name="item_identity", apply=_migration_item_identity),
@@ -539,6 +638,12 @@ MIGRATIONS: tuple[Migration, ...] = (
         name="normalize_pdd_account_source",
         apply=_migration_normalize_pdd_account_source,
     ),
+    Migration(
+        version=9,
+        name="manual_orders",
+        apply=_migration_manual_orders,
+    ),
+    Migration(version=10, name="photo_library_input", apply=_migration_photo_library_input),
 )
 
 

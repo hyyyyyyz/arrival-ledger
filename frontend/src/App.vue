@@ -23,6 +23,7 @@ import {
   getCurrentSession,
   getDashboardStats,
   listReceipts,
+  createManualOrder,
   login as loginRequest,
   logout as logoutRequest,
   updateReceiptTracking,
@@ -382,6 +383,7 @@ onBeforeUnmount(() => {
         <ReceiptCapture
           :user="user"
           :save-server-tracking="updateServerTracking"
+          :create-manual-order="createManualOrder"
           @changed="refreshQueueState"
           @server-changed="handleServerReceiptChanged"
         />

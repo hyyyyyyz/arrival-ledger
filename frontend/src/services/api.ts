@@ -8,6 +8,8 @@ import type {
   OrderListParams,
   OrderListResponse,
   CreatePlatformAccountInput,
+  CreateManualOrderInput,
+  ManualOrderCreateResponse,
   PlatformAccount,
   PlatformAccountListResponse,
   Receipt,
@@ -194,11 +196,19 @@ export async function createPlatformAccount(input: CreatePlatformAccountInput): 
   return unwrapPlatformAccount(payload)
 }
 
+export async function createManualOrder(input: CreateManualOrderInput): Promise<ManualOrderCreateResponse> {
+  return request<ManualOrderCreateResponse>('/manual-orders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
 export async function createReceipt(item: UploadQueueItem): Promise<Receipt> {
   const body = new FormData()
   body.append('client_event_id', item.clientEventId)
   body.append('captured_at', item.occurredAt)
-  body.append('input_method', 'PHOTO_CAPTURE')
+  body.append('input_method', item.inputMethod || 'PHOTO_CAPTURE')
   body.append('device_id', item.deviceId)
   if (item.trackingNo) body.append('tracking_no', item.trackingNo)
   body.append('photo', item.photo, item.fileName)

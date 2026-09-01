@@ -90,6 +90,35 @@ def test_receipt_upload_is_idempotent(
     assert authenticated_client.get("/api/receipts").json()["total"] == 1
 
 
+def test_gallery_receipt_persists_photo_library_input_method(
+    authenticated_client: TestClient, jpeg_bytes: bytes
+) -> None:
+    form = receipt_form("event-photo-library-0001")
+    form["input_method"] = "PHOTO_LIBRARY"
+    response = authenticated_client.post(
+        "/api/receipts",
+        data=form,
+        files={"photo": ("gallery.jpg", jpeg_bytes, "image/jpeg")},
+    )
+    assert response.status_code == 201
+
+    with authenticated_client.app.state.database.connect() as connection:
+        stored = connection.execute(
+            "SELECT input_method FROM receipt_events WHERE client_event_id = ?",
+            (form["client_event_id"],),
+        ).fetchone()
+    assert stored["input_method"] == "PHOTO_LIBRARY"
+
+    invalid = receipt_form("event-photo-library-invalid-0002")
+    invalid["input_method"] = "FILE_IMPORT"
+    rejected = authenticated_client.post(
+        "/api/receipts",
+        data=invalid,
+        files={"photo": ("invalid.jpg", jpeg_bytes, "image/jpeg")},
+    )
+    assert rejected.status_code == 422
+
+
 def test_duplicate_tracking_keeps_evidence_and_points_to_first(
     authenticated_client: TestClient, jpeg_bytes: bytes
 ) -> None:

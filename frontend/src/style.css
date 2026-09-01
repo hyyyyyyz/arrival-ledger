@@ -334,6 +334,25 @@ svg {
 .camera-button > span:nth-of-type(2) { display: grid; flex: 1; gap: 2px; }
 .camera-button strong { font-size: 17px; }
 .camera-button small { color: var(--color-brand-100); font-size: var(--text-meta); }
+.gallery-button { position: relative; display: flex; align-items: center; gap: var(--space-3); min-height: 64px; margin-top: var(--space-2); padding: var(--space-3) var(--space-4); color: var(--color-brand-900); border: 1px solid var(--color-brand-200); border-radius: var(--radius-md); background: var(--color-brand-50); cursor: pointer; }
+.gallery-button > span:nth-of-type(2) { display: grid; flex: 1; gap: 2px; }
+.gallery-button small { color: var(--color-neutral-600); font-size: var(--text-meta); }
+.gallery-button.disabled { opacity: .7; }
+.gallery-batch { margin-top: var(--space-3); padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-subtle); }
+.gallery-batch-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-2); font-size: var(--text-meta); }
+.gallery-batch-header button { min-height: 36px; padding: 0 var(--space-3); color: var(--color-white); border: 0; border-radius: var(--radius-sm); background: var(--color-brand-800); font-size: var(--text-meta); font-weight: 700; }
+.gallery-batch-note { margin: 0 0 var(--space-2); color: var(--color-neutral-600); font-size: 11px; line-height: 1.5; }
+.gallery-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-2); }
+.gallery-item { position: relative; min-width: 0; overflow: hidden; border-radius: var(--radius-sm); background: var(--color-neutral-200); }
+.gallery-item img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
+.gallery-item > span { display: block; overflow: hidden; padding: 3px; color: var(--color-neutral-700); font-size: 10px; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.gallery-item > button { position: absolute; top: 2px; right: 2px; width: 24px; height: 24px; color: var(--color-white); border: 0; border-radius: 50%; background: rgb(0 0 0 / 60%); }
+.manual-order-panel { margin-top: var(--space-4); padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-panel); }
+.manual-order-panel summary { color: var(--color-neutral-800); font-weight: 750; cursor: pointer; }
+.manual-order-form { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
+.manual-order-form input { min-height: var(--tap-min); padding: 9px var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); }
+.manual-order-form button { min-height: var(--tap-min); color: var(--color-white); border: 0; border-radius: var(--radius-sm); background: var(--color-brand-800); font-weight: 700; }
+.manual-order-message { margin: var(--space-2) 0 0; color: var(--color-success-800); font-size: var(--text-meta); }
 .capture-error { margin-top: var(--space-3); }
 
 .capture-result { margin-top: var(--space-3); overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-subtle); }
@@ -445,6 +464,7 @@ svg {
 .platform-badge { min-height: 22px; font-size: var(--text-meta); }
 .platform-badge.platform-1688 { color: var(--color-warning-800); background: var(--color-warning-50); }
 .platform-badge.platform-pdd { color: var(--color-danger-800); background: var(--color-danger-50); }
+.platform-badge.platform-other { color: var(--color-info-800); background: var(--color-info-50); }
 
 .purchase-order-number { display: block; margin-top: 2px; overflow: hidden; color: var(--color-neutral-950); font-family: var(--font-mono); font-size: 14px; font-variant-numeric: tabular-nums; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .purchase-account-line { display: flex; align-items: center; gap: 5px; min-width: 0; margin: 3px 0 0; color: var(--color-neutral-600); font-size: var(--text-meta); line-height: 1.35; }

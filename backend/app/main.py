@@ -40,6 +40,8 @@ from .schemas import (
     AuthResponse,
     DashboardStatsOut,
     LoginRequest,
+    ManualOrderCreate,
+    ManualOrderCreateResponse,
     OrderArrivalAuditEventOut,
     OrderArrivalAuditListResponse,
     OrderArrivalStateOut,
@@ -73,6 +75,7 @@ from .sync_ingest import (
     canonical_payload_digest,
     ingest_sync_batch,
     parse_batch_counts,
+    normalize_courier,
 )
 
 
@@ -1125,6 +1128,241 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             raise RuntimeError("platform account could not be read")
         return _platform_account_from_row(row)
 
+    @application.post(
+        "/api/manual-orders",
+        response_model=ManualOrderCreateResponse,
+        status_code=201,
+    )
+    def create_manual_order(
+        payload: ManualOrderCreate,
+        request: Request,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> ManualOrderCreateResponse:
+        """Register a parcel purchased outside 1688/PDD.
+
+        The synthetic order identity is derived from the normalized tracking
+        number, so retries and separate browser clients cannot create a
+        second order for the same manually entered parcel. It is deliberately
+        kept separate from platform order ids and rejects collisions with a
+        real platform package.
+        """
+        tracking_no = payload.tracking_no.strip()[:128]
+        tracking_normalized = normalize_tracking_no(tracking_no)
+        if not tracking_normalized:
+            raise HTTPException(status_code=422, detail="tracking_no has no letters or digits")
+        courier = payload.courier.strip()[:128] if payload.courier else None
+        courier_normalized = normalize_courier(courier or "")
+        product_name = payload.product_name.strip()[:256]
+        remark = payload.remark.strip()[:512] if payload.remark else None
+        order_key = "manual-" + hashlib.sha256(tracking_normalized.encode("utf-8")).hexdigest()[:40]
+        now = db_timestamp(utc_now())
+        database = _database(request)
+
+        with database.connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                replay = connection.execute(
+                    """
+                    SELECT o.id, o.platform_order_id, oi.title, p.tracking_no, p.courier,
+                           d.remark
+                    FROM manual_order_events e
+                    JOIN purchase_orders o ON o.id = e.order_id
+                    JOIN order_items oi ON oi.order_id = o.id
+                    LEFT JOIN package_order_links pol ON pol.order_id = o.id
+                    LEFT JOIN packages p ON p.id = pol.package_id
+                    JOIN manual_order_details d ON d.order_id = o.id
+                    WHERE e.client_event_id = ?
+                    ORDER BY oi.id, p.id
+                    LIMIT 1
+                    """,
+                    (payload.client_event_id,),
+                ).fetchone()
+                if replay is not None:
+                    replay_courier = normalize_courier(replay["courier"] or "")
+                    if (normalize_tracking_no(replay["tracking_no"] or "") != tracking_normalized
+                            or replay["title"] != product_name
+                            or replay_courier != courier_normalized
+                            or replay["remark"] != remark):
+                        connection.rollback()
+                        raise HTTPException(status_code=409, detail="client_event_id 已用于其他第三方订单")
+                    connection.commit()
+                    return ManualOrderCreateResponse(
+                        created=False,
+                        idempotent_replay=True,
+                        order_id=str(replay["id"]),
+                        platform_order_id=replay["platform_order_id"],
+                        tracking_no=replay["tracking_no"] or tracking_no,
+                        product_name=replay["title"],
+                        courier=replay["courier"],
+                        source="THIRD_PARTY_MANUAL",
+                    )
+
+                account = connection.execute(
+                    """
+                    SELECT id FROM platform_accounts
+                    WHERE platform = 'other' AND account_key = 'manual'
+                    """
+                ).fetchone()
+                if account is None:
+                    account_id = connection.execute(
+                        """
+                        INSERT INTO platform_accounts(
+                            platform, account_key, display_label, source,
+                            created_at, updated_at
+                        ) VALUES ('other', 'manual', '第三方/其他渠道', 'MANUAL', ?, ?)
+                        """,
+                        (now, now),
+                    ).lastrowid
+                else:
+                    account_id = account["id"]
+
+                existing_order = connection.execute(
+                    """
+                    SELECT o.id, o.platform_order_id, oi.title, d.courier, d.remark
+                    FROM purchase_orders o
+                    JOIN order_items oi ON oi.order_id = o.id
+                    JOIN manual_order_details d ON d.order_id = o.id
+                    WHERE o.platform_account_id = ? AND o.platform_order_id = ?
+                    ORDER BY oi.id LIMIT 1
+                    """,
+                    (account_id, order_key),
+                ).fetchone()
+                if existing_order is not None:
+                    if existing_order["title"] != product_name:
+                        connection.rollback()
+                        raise HTTPException(
+                            status_code=409,
+                            detail="该运单号已经登记过其他商品，请检查物流公司或商品名称",
+                        )
+                    connection.rollback()
+                    raise HTTPException(status_code=409, detail="该运单号已经登记过，请勿重复录入")
+
+                platform_link = connection.execute(
+                    """
+                    SELECT pa.platform
+                    FROM packages p
+                    JOIN package_order_links l ON l.package_id = p.id
+                    JOIN purchase_orders o ON o.id = l.order_id
+                    JOIN platform_accounts pa ON pa.id = o.platform_account_id
+                    WHERE p.tracking_no_normalized = ? AND pa.platform <> 'other'
+                    LIMIT 1
+                    """,
+                    (tracking_normalized,),
+                ).fetchone()
+                if platform_link is not None:
+                    connection.rollback()
+                    raise HTTPException(
+                        status_code=409,
+                        detail="该运单号已属于已同步的平台订单，不能重复登记为第三方订单",
+                    )
+
+                manual_link = connection.execute(
+                    """
+                    SELECT o.id, oi.title, d.courier
+                    FROM packages p
+                    JOIN package_order_links l ON l.package_id = p.id
+                    JOIN purchase_orders o ON o.id = l.order_id
+                    JOIN order_items oi ON oi.order_id = o.id
+                    JOIN manual_order_details d ON d.order_id = o.id
+                    JOIN platform_accounts pa ON pa.id = o.platform_account_id
+                    WHERE p.tracking_no_normalized = ? AND pa.platform = 'other'
+                    LIMIT 1
+                    """,
+                    (tracking_normalized,),
+                ).fetchone()
+                if manual_link is not None:
+                    connection.rollback()
+                    raise HTTPException(status_code=409, detail="该运单号已经登记过，请勿重复录入")
+
+                package = connection.execute(
+                    """
+                    SELECT id, tracking_no, courier
+                    FROM packages
+                    WHERE tracking_no_normalized = ?
+                    ORDER BY id LIMIT 1
+                    """,
+                    (tracking_normalized,),
+                ).fetchone()
+                if package is not None:
+                    package_id = package["id"]
+                    if courier and not package["courier"]:
+                        connection.execute(
+                            "UPDATE packages SET courier = ?, courier_normalized = ?, updated_at = ? WHERE id = ?",
+                            (courier, courier_normalized, now, package_id),
+                        )
+                else:
+                    package_id = connection.execute(
+                        """
+                        INSERT INTO packages(
+                            courier, courier_normalized, tracking_no,
+                            tracking_no_normalized, package_status, source,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, 'MANUAL', 'THIRD_PARTY_MANUAL', ?, ?)
+                        """,
+                        (courier, courier_normalized, tracking_no, tracking_normalized, now, now),
+                    ).lastrowid
+
+                order_id = connection.execute(
+                    """
+                    INSERT INTO purchase_orders(
+                        platform_account_id, platform_order_id, ordered_at,
+                        order_status, shop_name, source, last_seen_at,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, 'UNKNOWN', NULL, 'THIRD_PARTY_MANUAL', ?, ?, ?)
+                    """,
+                    (account_id, order_key, now, now, now, now),
+                ).lastrowid
+                connection.execute(
+                    """
+                    INSERT INTO order_items(order_id, item_key, title, sku_text, quantity, unit_price)
+                    VALUES (?, ?, ?, NULL, '1', NULL)
+                    """,
+                    (order_id, f"manual:{tracking_normalized}", product_name),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO manual_order_details(
+                        order_id, courier, remark, created_by_user_id,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (order_id, courier, remark, user.id, now, now),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO package_order_links(package_id, order_id, order_item_id, created_at)
+                    VALUES (?, ?, NULL, ?)
+                    """,
+                    (package_id, order_id, now),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO manual_order_events(client_event_id, order_id, actor_user_id, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (payload.client_event_id, order_id, user.id, now),
+                )
+                connection.commit()
+            except HTTPException:
+                raise
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise HTTPException(status_code=409, detail="该第三方订单已存在，请刷新后重试") from exc
+            except BaseException:
+                connection.rollback()
+                raise
+
+        return ManualOrderCreateResponse(
+            created=True,
+            idempotent_replay=False,
+            order_id=str(order_id),
+            platform_order_id=order_key,
+            tracking_no=tracking_no,
+            product_name=product_name,
+            courier=courier,
+            source="THIRD_PARTY_MANUAL",
+        )
+
     @application.post("/api/auth/login", response_model=AuthResponse)
     def login(payload: LoginRequest, request: Request, response: Response) -> AuthResponse:
         settings = _settings(request)
@@ -1659,7 +1897,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                               WHERE ready_receipt_links.receipt_id = receipts.id
                           )
                     ) AS unmatched_photos,
-                    (SELECT COUNT(*) FROM platform_accounts) AS account_count
+                    (SELECT COUNT(*) FROM platform_accounts WHERE platform <> 'other') AS account_count
                 """
             ).fetchone()
 
@@ -1687,7 +1925,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
         offset: Annotated[int, Query(ge=0)] = 0,
         query: Annotated[str | None, Query(max_length=128)] = None,
-        platform: Annotated[Literal["pdd", "1688"] | None, Query()] = None,
+        platform: Annotated[Literal["pdd", "1688", "other"] | None, Query()] = None,
         arrival_status: Annotated[
             Literal["all", "pending", "review", "received"], Query()
         ] = "all",
@@ -1958,6 +2196,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 WITH registered_accounts AS (
                     SELECT platform, account_key
                     FROM platform_accounts
+                    WHERE platform <> 'other'
 
                     UNION
 
@@ -2053,7 +2292,14 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                     responsible.username AS responsible_username,
                     responsible.display_name AS responsible_display_name,
                     responsible.role AS responsible_role,
-                    responsible.is_active AS responsible_is_active
+                    responsible.is_active AS responsible_is_active,
+                    manual_creator.id AS manual_creator_id,
+                    manual_creator.username AS manual_creator_username,
+                    manual_creator.display_name AS manual_creator_display_name,
+                    manual_creator.role AS manual_creator_role,
+                    manual_creator.is_active AS manual_creator_is_active,
+                    manual_details.created_at AS manual_created_at,
+                    manual_details.remark AS manual_remark
                 FROM purchase_orders AS orders
                 JOIN platform_accounts AS accounts
                   ON accounts.id = orders.platform_account_id
@@ -2061,6 +2307,10 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                   ON arrival_states.order_id = orders.id
                 LEFT JOIN users AS responsible
                   ON responsible.id = arrival_states.responsible_user_id
+                LEFT JOIN manual_order_details AS manual_details
+                  ON manual_details.order_id = orders.id
+                LEFT JOIN users AS manual_creator
+                  ON manual_creator.id = manual_details.created_by_user_id
                 WHERE {where_sql}
                 ORDER BY orders.ordered_at DESC, orders.id DESC
                 LIMIT :limit OFFSET :offset
@@ -2222,6 +2472,19 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                     ),
                     manual_revision=row["manual_revision"],
                     changed_at=row["changed_at"],
+                    manual_created_by=(
+                        UserOut(
+                            id=row["manual_creator_id"],
+                            username=row["manual_creator_username"],
+                            display_name=row["manual_creator_display_name"],
+                            role=row["manual_creator_role"],
+                            is_active=bool(row["manual_creator_is_active"]),
+                        )
+                        if row["manual_creator_id"] is not None
+                        else None
+                    ),
+                    manual_created_at=row["manual_created_at"],
+                    manual_remark=row["manual_remark"],
                 )
                 for row in order_rows
             ],
@@ -2453,7 +2716,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             "client_event_id", client_event_id, minimum=8, maximum=128
         )
         device_id = _validate_form_text("device_id", device_id, minimum=1, maximum=128)
-        if input_method != "PHOTO_CAPTURE":
+        if input_method not in {"PHOTO_CAPTURE", "PHOTO_LIBRARY"}:
             raise HTTPException(status_code=422, detail="unsupported input_method")
         capture_value = captured_at or occurred_at
         if not capture_value:
@@ -2532,12 +2795,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                     """
                     INSERT INTO receipt_events(
                         client_event_id, operator_user_id, captured_at,
-                        server_received_at, device_id, barcode_candidate,
+                        server_received_at, device_id, event_type, input_method,
+                        barcode_candidate,
                         tracking_no, tracking_no_normalized, duplicate_of_receipt_id,
                         evidence_status,
                         photo_storage_path, photo_original_name, photo_content_type,
                         photo_sha256, photo_size, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, 'RECEIVE', ?, ?, ?, ?, ?, 'READY', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         client_event_id,
@@ -2545,6 +2809,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                         db_timestamp(captured),
                         timestamp,
                         device_id,
+                        input_method,
                         barcode_candidate,
                         tracking_no,
                         normalized_tracking,

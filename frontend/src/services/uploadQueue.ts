@@ -9,6 +9,11 @@ function retryDelay(attempts: number): number {
   return Math.min(MAX_RETRY_MS, BASE_RETRY_MS * 2 ** Math.min(attempts - 1, 5))
 }
 
+export function isRetryableUploadError(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return true
+  return error.status === 0 || error.status === 408 || error.status === 429 || error.status >= 500
+}
+
 export class UploadQueue extends EventTarget {
   private currentUserId: string | null = null
   private processing = false
@@ -20,11 +25,22 @@ export class UploadQueue extends EventTarget {
     this.initialized = true
 
     const items = await getAllUploads()
-    await Promise.all(
-      items
-        .filter((item) => item.uploadState === 'UPLOADING')
-        .map((item) => putUpload({ ...item, uploadState: 'QUEUED', updatedAt: Date.now() })),
-    )
+    await Promise.all(items.flatMap((item) => {
+      const uploadWasInterrupted = item.uploadState === 'UPLOADING'
+      const recognitionWasInterrupted = item.barcodeState === 'PROCESSING' && !item.readyToUpload
+      if (!uploadWasInterrupted && !recognitionWasInterrupted) return []
+      return [putUpload({
+        ...item,
+        barcodeState: recognitionWasInterrupted ? 'NOT_FOUND' : item.barcodeState,
+        readyToUpload: recognitionWasInterrupted ? true : item.readyToUpload,
+        uploadState: 'QUEUED',
+        nextAttemptAt: 0,
+        lastError: recognitionWasInterrupted
+          ? '照片处理曾意外中断，已保留原图并继续上传；单号可稍后补录'
+          : item.lastError,
+        updatedAt: Date.now(),
+      })]
+    }))
     window.addEventListener('online', () => void this.process())
     this.emitChange()
   }
@@ -55,6 +71,18 @@ export class UploadQueue extends EventTarget {
     })
     this.emitChange()
     void this.process()
+  }
+
+  async replacePreparedPhoto(clientEventId: string, photo: Blob, fileName: string): Promise<void> {
+    const item = await getUpload(clientEventId)
+    if (!item) throw new Error('本机待上传照片不存在')
+    await putUpload({
+      ...item,
+      photo,
+      fileName,
+      updatedAt: Date.now(),
+    })
+    this.emitChange()
   }
 
   async updateTracking(clientEventId: string, trackingNo: string): Promise<void> {
@@ -143,12 +171,13 @@ export class UploadQueue extends EventTarget {
         } catch (error) {
           const attempts = uploading.attempts + 1
           const message = error instanceof Error ? error.message : '上传失败，稍后自动重试'
+          const retryable = isRetryableUploadError(error)
           await putUpload({
             ...uploading,
             attempts,
             uploadState: 'FAILED',
-            nextAttemptAt: Date.now() + retryDelay(attempts),
-            lastError: message,
+            nextAttemptAt: retryable ? Date.now() + retryDelay(attempts) : Number.MAX_SAFE_INTEGER,
+            lastError: retryable ? message : `需要人工处理：${message}`,
             updatedAt: Date.now(),
           })
           if (error instanceof ApiError && error.status === 401) {
@@ -166,7 +195,9 @@ export class UploadQueue extends EventTarget {
 
   private scheduleNext(items: UploadQueueItem[]): void {
     const nextAt = items
-      .filter((item) => item.readyToUpload && item.nextAttemptAt > Date.now())
+      .filter((item) => item.readyToUpload
+        && item.nextAttemptAt > Date.now()
+        && item.nextAttemptAt < Number.MAX_SAFE_INTEGER)
       .reduce((minimum, item) => Math.min(minimum, item.nextAttemptAt), Number.POSITIVE_INFINITY)
     if (!Number.isFinite(nextAt)) return
     const delay = Math.max(250, Math.min(MAX_RETRY_MS, nextAt - Date.now()))

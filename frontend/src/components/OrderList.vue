@@ -63,6 +63,9 @@ const lastResult = computed(() => Math.min(props.offset + props.orders.length, p
 const hasPrevious = computed(() => props.offset > 0)
 const hasNext = computed(() => props.offset + props.limit < props.total)
 const freshness = computed(() => {
+  if (props.platform === 'other') {
+    return { label: '第三方订单由人工录入', stale: false }
+  }
   if (!props.lastSyncedAt) {
     return { label: '有采购账号尚无成功同步记录', stale: true }
   }
@@ -93,7 +96,22 @@ interface ArrivalSummary {
 }
 
 function platformLabel(platform: PurchaseOrder['platform']): string {
-  return platform === '1688' ? '1688' : '拼多多'
+  if (platform === '1688') return '1688'
+  if (platform === 'other') return '第三方'
+  return '拼多多'
+}
+
+function orderReferenceLabel(order: PurchaseOrder): string {
+  return order.platform === 'other' ? '运单号' : '订单号'
+}
+
+function orderReference(order: PurchaseOrder): string {
+  if (order.platform !== 'other') return order.platform_order_id
+  return order.packages[0]?.tracking_no || '运单号待补录'
+}
+
+function accountFieldLabel(order: PurchaseOrder): string {
+  return order.platform === 'other' ? '来源' : '采购账号'
 }
 
 function visibleItems(order: PurchaseOrder) {
@@ -299,6 +317,9 @@ function applyArrivalStatus(arrivalStatus: OrderArrivalFilter): void {
         <button type="button" :class="{ active: draftPlatform === 'pdd' }" :aria-pressed="draftPlatform === 'pdd'" :disabled="loading || !online" @click="applyPlatform('pdd')">
           拼多多
         </button>
+        <button type="button" :class="{ active: draftPlatform === 'other' }" :aria-pressed="draftPlatform === 'other'" :disabled="loading || !online" @click="applyPlatform('other')">
+          第三方
+        </button>
       </div>
       <div class="arrival-filters" role="group" aria-label="收货状态筛选">
         <span>状态</span>
@@ -342,13 +363,20 @@ function applyArrivalStatus(arrivalStatus: OrderArrivalFilter): void {
         <header class="compact-order-header">
           <div class="compact-order-identity">
             <div>
-              <span class="compact-order-label">订单号</span>
+              <span class="compact-order-label">{{ orderReferenceLabel(order) }}</span>
               <span class="platform-badge" :class="`platform-${order.platform}`">{{ platformLabel(order.platform) }}</span>
             </div>
-            <strong :id="`order-${order.id}-number`" class="purchase-order-number">{{ order.platform_order_id }}</strong>
+            <strong :id="`order-${order.id}-number`" class="purchase-order-number">{{ orderReference(order) }}</strong>
             <p class="purchase-account-line">
-              <span>采购账号</span>
+              <span>{{ accountFieldLabel(order) }}</span>
               <strong>{{ order.account_label }}</strong>
+            </p>
+            <p v-if="order.manual_created_by" class="purchase-account-line">
+              <span>录入人</span><strong>{{ order.manual_created_by.display_name }}</strong>
+              <small v-if="order.manual_created_at">· {{ formatDateTime(order.manual_created_at) }}</small>
+            </p>
+            <p v-if="order.manual_remark" class="purchase-account-line manual-order-remark">
+              <span>备注</span><strong>{{ order.manual_remark }}</strong>
             </p>
           </div>
           <div class="compact-order-actions">
@@ -470,7 +498,7 @@ function applyArrivalStatus(arrivalStatus: OrderArrivalFilter): void {
         </span>
         <p class="eyebrow">人工纠正</p>
         <h3 id="order-correction-title">{{ pendingCorrection.status === 'RECEIVED' ? '确认标记为已收货？' : '确认撤销收货状态？' }}</h3>
-        <p class="dialog-order-number">订单 {{ pendingCorrection.order.platform_order_id }}</p>
+        <p class="dialog-order-number">{{ orderReferenceLabel(pendingCorrection.order) }} {{ orderReference(pendingCorrection.order) }}</p>
         <p v-if="pendingCorrection.status === 'RECEIVED'">这会覆盖当前系统判断并标记整单已收货，不会新增或删除到货照片。</p>
         <p v-else>这会覆盖当前系统判断并把整单改为未收货，已有到货照片仍会保留。</p>
         <p class="dialog-accountability">系统将记录当前登录账号、操作时间和修改前后状态，可供之后追责和还原。</p>

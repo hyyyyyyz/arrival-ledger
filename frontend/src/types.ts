@@ -55,6 +55,25 @@ export interface CreatePlatformAccountInput {
   display_label: string
 }
 
+export interface CreateManualOrderInput {
+  client_event_id: string
+  tracking_no: string
+  product_name: string
+  courier?: string
+  remark?: string
+}
+
+export interface ManualOrderCreateResponse {
+  created: boolean
+  idempotent_replay: boolean
+  order_id: string
+  platform_order_id: string
+  tracking_no: string
+  product_name: string
+  courier: string | null
+  source: 'THIRD_PARTY_MANUAL'
+}
+
 export interface AuthSession {
   user: User
   authRequired: boolean
@@ -71,7 +90,7 @@ export interface OrderMatchItem {
 
 export interface OrderMatch {
   order_id?: string
-  platform: 'pdd' | '1688' | string
+  platform: 'pdd' | '1688' | 'other' | string
   platform_order_id: string
   account_label?: string | null
   shop_name?: string | null
@@ -137,6 +156,7 @@ export interface UploadQueueItem {
   lastError: string | null
   createdAt: number
   updatedAt: number
+  inputMethod?: 'PHOTO_CAPTURE' | 'PHOTO_LIBRARY'
 }
 
 export interface QueueStats {
@@ -157,7 +177,7 @@ export interface DashboardStats {
   account_count: number
 }
 
-export type OrderPlatform = 'pdd' | '1688'
+export type OrderPlatform = 'pdd' | '1688' | 'other'
 export type OrderPlatformFilter = '' | OrderPlatform
 
 export interface PurchaseOrderItem {
@@ -197,6 +217,9 @@ export interface PurchaseOrder {
   responsible_user?: User | null
   manual_revision?: number
   changed_at?: string | null
+  manual_created_by?: User | null
+  manual_created_at?: string | null
+  manual_remark?: string | null
 }
 
 export type ManualArrivalStatus = 'RECEIVED' | 'PENDING'

@@ -404,8 +404,8 @@ def test_v8_migration_normalizes_only_pdd_account_source(tmp_path) -> None:
             "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1"
         ).fetchone()
         assert (last_migration["version"], last_migration["name"]) == (
-            8,
-            "normalize_pdd_account_source",
+            10,
+            "photo_library_input",
         )
 
 
@@ -476,8 +476,8 @@ def test_v7_migration_backfills_pdd_accounts_and_enforces_state_constraints(
             "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1"
         ).fetchone()
         assert (last_migration["version"], last_migration["name"]) == (
-            8,
-            "normalize_pdd_account_source",
+            10,
+            "photo_library_input",
         )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(

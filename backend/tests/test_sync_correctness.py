@@ -434,7 +434,7 @@ def test_migration_upgrades_old_database_and_keeps_receipts(
         migrations = connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         tables = {
             row["name"]
             for row in connection.execute(
@@ -548,7 +548,180 @@ def test_legacy_nonnull_links_are_nullified_and_deduped_on_upgrade(
         migrations = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+
+def test_photo_library_migration_preserves_duplicate_receipts_and_audit_history(
+    tmp_path,
+) -> None:
+    """A genuine pre-v10 receipt schema must migrate without dropping evidence."""
+    path = tmp_path / "photo-library-v8" / "arrival.db"
+    path.parent.mkdir(parents=True)
+    raw = sqlite3.connect(path)
+    raw.row_factory = sqlite3.Row
+    _exec_script_in_tx(raw, SCHEMA)
+    raw.execute(
+        """
+        INSERT INTO users(id, username, display_name, role, password_hash, is_active, created_at)
+        VALUES (1, 'admin', '旧管理员', 'ADMIN', 'x', 1, '2026-08-01T00:00:00.000Z')
+        """
+    )
+    # Reconstruct the v8 CHECK constraint while retaining the surrounding
+    # current schema.  This mirrors a real database created before gallery
+    # input_method was introduced.
+    raw.execute("DROP TABLE receipt_change_events")
+    raw.execute("DROP INDEX IF EXISTS idx_receipts_recent")
+    raw.execute("DROP INDEX IF EXISTS idx_receipts_tracking")
+    raw.execute("DROP TABLE receipt_events")
+    raw.execute(
+        """
+        CREATE TABLE receipt_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_event_id TEXT NOT NULL UNIQUE,
+            operator_user_id INTEGER NOT NULL REFERENCES users(id),
+            event_type TEXT NOT NULL DEFAULT 'RECEIVE' CHECK (event_type IN ('RECEIVE')),
+            input_method TEXT NOT NULL DEFAULT 'PHOTO_CAPTURE'
+                CHECK (input_method IN ('PHOTO_CAPTURE')),
+            captured_at TEXT NOT NULL,
+            server_received_at TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            barcode_candidate TEXT,
+            tracking_no TEXT,
+            tracking_no_normalized TEXT,
+            duplicate_of_receipt_id INTEGER REFERENCES receipt_events(id),
+            evidence_status TEXT NOT NULL DEFAULT 'READY'
+                CHECK (evidence_status IN ('PENDING', 'READY', 'FAILED')),
+            photo_storage_path TEXT NOT NULL,
+            photo_original_name TEXT,
+            photo_content_type TEXT NOT NULL,
+            photo_sha256 TEXT NOT NULL,
+            photo_size INTEGER NOT NULL CHECK (photo_size > 0),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    raw.execute("CREATE INDEX idx_receipts_recent ON receipt_events(server_received_at DESC, id DESC)")
+    raw.execute("CREATE INDEX idx_receipts_tracking ON receipt_events(tracking_no_normalized)")
+    raw.execute(
+        """
+        CREATE TABLE receipt_change_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_event_id TEXT NOT NULL UNIQUE,
+            receipt_id INTEGER NOT NULL REFERENCES receipt_events(id) ON DELETE CASCADE,
+            actor_user_id INTEGER NOT NULL REFERENCES users(id),
+            action TEXT NOT NULL CHECK (action IN ('TRACKING_UPDATE')),
+            previous_tracking_no TEXT,
+            new_tracking_no TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    raw.execute("CREATE INDEX idx_receipt_change_events_receipt ON receipt_change_events(receipt_id, id DESC)")
+    receipt_common = (
+        "2026-08-01T00:00:00.000Z",
+        "2026-08-01T00:00:00.000Z",
+        "v8-device",
+        "EMS123456789",
+        "ems123456789",
+        "ems123456789",
+        "/tmp/legacy.jpg",
+        "legacy.jpg",
+        "image/jpeg",
+        "a" * 64,
+        "2026-08-01T00:00:00.000Z",
+        "2026-08-01T00:00:00.000Z",
+    )
+    raw.execute(
+        """
+        INSERT INTO receipt_events(
+            id, client_event_id, operator_user_id, event_type, input_method,
+            captured_at, server_received_at, device_id, barcode_candidate,
+            tracking_no, tracking_no_normalized, duplicate_of_receipt_id,
+            evidence_status, photo_storage_path, photo_original_name,
+            photo_content_type, photo_sha256, photo_size, created_at, updated_at
+        ) VALUES
+            (1, 'legacy-photo-0001', 1, 'RECEIVE', 'PHOTO_CAPTURE', ?, ?, ?, ?, ?, ?, NULL,
+             'READY', ?, ?, ?, ?, 100, ?, ?),
+            (2, 'legacy-photo-0002', 1, 'RECEIVE', 'PHOTO_CAPTURE', ?, ?, ?, ?, ?, ?, 1,
+             'READY', ?, ?, ?, ?, 101, ?, ?)
+        """,
+        receipt_common + receipt_common,
+    )
+    raw.execute(
+        """
+        INSERT INTO receipt_change_events(
+            id, client_event_id, receipt_id, actor_user_id, action,
+            previous_tracking_no, new_tracking_no, created_at
+        ) VALUES (1, 'legacy-change-0001', 2, 1, 'TRACKING_UPDATE', 'old',
+                  'EMS123456789', '2026-08-01T00:01:00.000Z')
+        """
+    )
+    raw.execute(
+        """
+        CREATE TABLE schema_migrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            version INTEGER NOT NULL,
+            name TEXT NOT NULL UNIQUE,
+            applied_at TEXT NOT NULL
+        )
+        """
+    )
+    for version, name in (
+        (1, "initial_schema"),
+        (2, "item_identity"),
+        (3, "package_links_order_level"),
+        (4, "ali1688_sync_state"),
+        (5, "responsibility_and_manual_arrival"),
+        (6, "user_management_audit"),
+        (7, "platform_account_sync_state"),
+        (8, "normalize_pdd_account_source"),
+    ):
+        raw.execute(
+            "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+            (version, name, "2026-08-01T00:00:00.000Z"),
+        )
+    raw.commit()
+    raw.close()
+
+    Database(path).initialize(
+        bootstrap_username="admin",
+        bootstrap_password="correct horse battery staple",
+        bootstrap_display_name="管理员",
+        session_secret="test-session-secret-that-is-long-enough",
+        sync_worker_tokens=(),
+        now="2026-08-30T00:00:00.000Z",
+    )
+
+    with Database(path).connect() as connection:
+        receipts = connection.execute(
+            "SELECT id, duplicate_of_receipt_id, input_method FROM receipt_events ORDER BY id"
+        ).fetchall()
+        assert [(row["id"], row["duplicate_of_receipt_id"], row["input_method"]) for row in receipts] == [
+            (1, None, "PHOTO_CAPTURE"),
+            (2, 1, "PHOTO_CAPTURE"),
+        ]
+        change = connection.execute(
+            "SELECT receipt_id, new_tracking_no FROM receipt_change_events"
+        ).fetchone()
+        assert (change["receipt_id"], change["new_tracking_no"]) == (2, "EMS123456789")
+        inserted = connection.execute(
+            """
+            INSERT INTO receipt_events(
+                client_event_id, operator_user_id, event_type, input_method,
+                captured_at, server_received_at, device_id, evidence_status,
+                photo_storage_path, photo_content_type, photo_sha256, photo_size,
+                created_at, updated_at
+            ) VALUES ('gallery-after-migration', 1, 'RECEIVE', 'PHOTO_LIBRARY',
+                      '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z', 'new-device',
+                      'READY', '/tmp/new.jpg', 'image/jpeg', ?, 100,
+                      '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z')
+            """,
+            ("b" * 64,),
+        )
+        assert inserted.lastrowid == 3
+        connection.commit()
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_failed_migration_leaves_no_partial_schema(tmp_path) -> None:
@@ -657,10 +830,10 @@ def test_responsibility_migration_upgrades_version_four_database(tmp_path) -> No
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
         assert [(row["version"], row["name"]) for row in migrations][-4:] == [
-            (5, "responsibility_and_manual_arrival"),
-            (6, "user_management_audit"),
             (7, "platform_account_sync_state"),
             (8, "normalize_pdd_account_source"),
+            (9, "manual_orders"),
+            (10, "photo_library_input"),
         ]
 
 
@@ -721,6 +894,6 @@ def test_user_audit_migration_upgrades_version_five_database(tmp_path) -> None:
             """
         ).fetchone()
         assert (last_migration["version"], last_migration["name"]) == (
-            8,
-            "normalize_pdd_account_source",
+            10,
+            "photo_library_input",
         )

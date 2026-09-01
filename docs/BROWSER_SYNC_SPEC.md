@@ -387,7 +387,11 @@ Content-Type: application/json
 
 建议新增/迁移以下表（字段可按现有 SQLite 风格调整）：
 
-迁移必须使用编号文件或等价的 `schema_migrations` 记录。迁移前先执行现有备份脚本；只能新增表/索引和兼容字段，不能重建或删除已有 `users`、`sessions`、`receipt_events`。若迁移失败，事务回滚并保持 P0 收货 API 可用。
+迁移必须使用编号文件或等价的 `schema_migrations` 记录，迁移前先执行现有备份脚本。通常只能新增表、
+索引和兼容字段；若 SQLite 既有 `CHECK` 约束无法原位扩展，允许在单一事务内重建对应表，但必须同时
+迁移其子表、保留主键/自引用/审计记录，并以真实旧库结构测试 `PRAGMA foreign_key_check` 与自增序列。
+不得破坏或丢弃已有 `users`、`sessions`、收货照片及责任审计。任何步骤失败必须整体回滚并保持 P0
+收货 API 可用。
 
 ```sql
 platform_accounts(

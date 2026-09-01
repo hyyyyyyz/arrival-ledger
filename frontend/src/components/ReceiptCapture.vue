@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import type { OrderMatch, Receipt, ReceiptTrackingUpdateInput, UploadQueueItem, User } from '@/types'
+import type { CreateManualOrderInput, ManualOrderCreateResponse, OrderMatch, Receipt, ReceiptTrackingUpdateInput, UploadQueueItem, User } from '@/types'
 import { ApiError } from '@/services/api'
 import { recognizeTrackingNo } from '@/services/barcode'
 import { compressImage } from '@/services/image'
@@ -13,6 +13,7 @@ import { isPlausibleTrackingNo, normalizeTrackingNo } from '@/utils/tracking'
 const props = defineProps<{
   user: User
   saveServerTracking: (input: ReceiptTrackingUpdateInput) => Promise<Receipt>
+  createManualOrder: (input: CreateManualOrderInput) => Promise<ManualOrderCreateResponse>
 }>()
 
 const emit = defineEmits<{
@@ -37,10 +38,26 @@ interface CaptureResult {
 
 const input = ref<HTMLInputElement | null>(null)
 const processing = ref(false)
+const galleryProcessing = ref(false)
+const galleryFiles = ref<GalleryPhoto[]>([])
 const latest = ref<CaptureResult | null>(null)
 const manualTracking = ref('')
 const manualSaving = ref(false)
 const captureError = ref('')
+const manualOrder = ref({ trackingNo: '', productName: '', courier: '', remark: '' })
+const manualOrderSaving = ref(false)
+const manualOrderMessage = ref('')
+const manualOrderEventId = ref('')
+const manualOrderEventPayload = ref('')
+
+interface GalleryPhoto {
+  id: string
+  file: File
+  previewUrl: string
+  status: 'STAGED' | 'PROCESSING' | 'QUEUED' | 'SYNCED' | 'FAILED'
+  message: string
+  clientEventId?: string
+}
 
 function notifySuccess(): void {
   if (navigator.vibrate) navigator.vibrate([60, 40, 90])
@@ -50,62 +67,42 @@ function releaseLatestPreview(): void {
   if (latest.value?.previewUrl) URL.revokeObjectURL(latest.value.previewUrl)
 }
 
-async function handleFile(event: Event): Promise<void> {
-  const target = event.target as HTMLInputElement
-  const file = target.files?.[0]
-  target.value = ''
-  if (!file || processing.value) return
-
+async function processPhoto(
+  file: File,
+  inputMethod: 'PHOTO_CAPTURE' | 'PHOTO_LIBRARY' = 'PHOTO_CAPTURE',
+  preparedClientEventId?: string,
+): Promise<string | null> {
   processing.value = true
   captureError.value = ''
-  releaseLatestPreview()
-  latest.value = null
-
+  let createdClientEventId: string | null = preparedClientEventId || null
   try {
     const compressed = await compressImage(file)
-    const clientEventId = createId()
+    const clientEventId = preparedClientEventId || createId()
+    createdClientEventId = clientEventId
     const occurredAt = new Date().toISOString()
-    const previewUrl = URL.createObjectURL(compressed.blob)
     const queueItem: UploadQueueItem = {
-      clientEventId,
-      ownerUserId: String(props.user.id),
-      ownerDisplayName: props.user.display_name,
-      deviceId: getDeviceId(),
-      occurredAt,
-      photo: compressed.blob,
-      fileName: `arrival-${clientEventId}.jpg`,
-      trackingNo: null,
-      barcodeState: 'PROCESSING',
-      uploadState: 'QUEUED',
-      readyToUpload: false,
-      attempts: 0,
-      nextAttemptAt: 0,
-      lastError: null,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
+      clientEventId, ownerUserId: String(props.user.id), ownerDisplayName: props.user.display_name,
+      deviceId: getDeviceId(), occurredAt, photo: compressed.blob,
+      fileName: `arrival-${clientEventId}.jpg`, trackingNo: null, barcodeState: 'PROCESSING',
+      uploadState: 'QUEUED', readyToUpload: false, attempts: 0, nextAttemptAt: 0,
+      lastError: null, createdAt: Date.now(), updatedAt: Date.now(), inputMethod,
     }
-
-    await uploadQueue.enqueue(queueItem)
+    if (preparedClientEventId) {
+      await uploadQueue.replacePreparedPhoto(clientEventId, compressed.blob, queueItem.fileName)
+    } else {
+      await uploadQueue.enqueue(queueItem)
+    }
+    const previewUrl = URL.createObjectURL(compressed.blob)
+    releaseLatestPreview()
     latest.value = {
-      clientEventId,
-      previewUrl,
-      trackingNo: '',
-      serverTrackingNo: null,
-      trackingEditEventId: null,
-      trackingEditDesired: null,
-      serverReceiptId: null,
-      duplicate: false,
-      stage: 'ANALYZING',
-      message: '照片已存本机，正在识别面单条码…',
-      sizeText: `${compressed.width} × ${compressed.height} · ${formatBytes(compressed.compressedBytes)}`,
-      matches: [],
+      clientEventId, previewUrl, trackingNo: '', serverTrackingNo: null,
+      trackingEditEventId: null, trackingEditDesired: null, serverReceiptId: null,
+      duplicate: false, stage: 'ANALYZING', message: '照片已存本机，正在识别面单条码…',
+      sizeText: `${compressed.width} × ${compressed.height} · ${formatBytes(compressed.compressedBytes)}`, matches: [],
     }
     emit('changed')
-
     let trackingNo: string | null = null
-    try {
-      trackingNo = await recognizeTrackingNo(compressed.blob)
-    } catch {
+    try { trackingNo = await recognizeTrackingNo(compressed.blob) } catch {
       captureError.value = '条码识别组件暂时不可用，照片仍会正常上传，可手工补录单号'
     }
     await uploadQueue.markReady(clientEventId, trackingNo)
@@ -113,20 +110,154 @@ async function handleFile(event: Event): Promise<void> {
       latest.value.trackingNo = trackingNo ?? ''
       manualTracking.value = trackingNo ?? ''
       latest.value.stage = 'QUEUED'
-      latest.value.message = trackingNo
-        ? '已识别单号，请核对；照片正在自动同步'
-        : '未识别出单号，照片仍会保存，可现在或稍后补录'
+      latest.value.message = trackingNo ? '已识别单号，请核对；照片正在自动同步' : '未识别出单号，照片仍会保存，可现在或稍后补录'
     }
     emit('changed')
+    return clientEventId
   } catch (error) {
     captureError.value = error instanceof Error ? error.message : '处理照片失败，请重新拍摄'
-    if (latest.value) {
-      latest.value.stage = 'ERROR'
-      latest.value.message = captureError.value
+    if (createdClientEventId) {
+      try {
+        await uploadQueue.markReady(createdClientEventId, null)
+      } catch {
+        // initialize() also recovers an interrupted PROCESSING record after reload.
+      }
+    }
+    if (createdClientEventId && latest.value?.clientEventId === createdClientEventId) {
+      latest.value.stage = 'ERROR'; latest.value.message = captureError.value
+    }
+    return null
+  } finally { processing.value = false }
+}
+
+async function handleFile(event: Event): Promise<void> {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  target.value = ''
+  if (!file || processing.value) return
+  releaseLatestPreview()
+  latest.value = null
+  await processPhoto(file)
+}
+
+function handleGallery(event: Event): void {
+  const target = event.target as HTMLInputElement
+  const selected = Array.from(target.files || [])
+  const remaining = Math.max(0, 30 - galleryFiles.value.length)
+  const files = selected.slice(0, remaining)
+  target.value = ''
+  if (selected.length > remaining) captureError.value = '一次最多保留 30 张相册照片，请分批上传'
+  galleryFiles.value.push(...files.map((file): GalleryPhoto => ({ id: createId(), file, previewUrl: URL.createObjectURL(file), status: 'STAGED', message: '待上传' })))
+}
+
+function removeGalleryPhoto(id: string): void {
+  const item = galleryFiles.value.find((photo) => photo.id === id)
+  if (!item || item.status === 'PROCESSING' || item.status === 'QUEUED') return
+  URL.revokeObjectURL(item.previewUrl)
+  galleryFiles.value = galleryFiles.value.filter((photo) => photo.id !== id)
+}
+
+async function uploadGallery(): Promise<void> {
+  if (galleryProcessing.value) return
+  galleryProcessing.value = true
+  try {
+    const candidates = galleryFiles.value.filter((item) => item.status === 'STAGED' || item.status === 'FAILED')
+
+    // Persist the whole confirmed batch before compression/recognition starts.
+    // If the page is interrupted, initialize() can recover every original.
+    for (const item of candidates) {
+      if (item.clientEventId) continue
+      const clientEventId = createId()
+      const now = Date.now()
+      try {
+        await uploadQueue.enqueue({
+          clientEventId,
+          ownerUserId: String(props.user.id),
+          ownerDisplayName: props.user.display_name,
+          deviceId: getDeviceId(),
+          occurredAt: new Date().toISOString(),
+          photo: item.file,
+          fileName: item.file.name || `arrival-${clientEventId}`,
+          trackingNo: null,
+          barcodeState: 'PROCESSING',
+          uploadState: 'QUEUED',
+          readyToUpload: false,
+          attempts: 0,
+          nextAttemptAt: 0,
+          lastError: null,
+          createdAt: now,
+          updatedAt: now,
+          inputMethod: 'PHOTO_LIBRARY',
+        })
+        item.clientEventId = clientEventId
+        item.message = '原图已保存在本机，等待处理'
+      } catch (error) {
+        item.status = 'FAILED'
+        item.message = error instanceof Error ? error.message : '无法保存到本机，请重试'
+      }
+    }
+
+    for (const item of candidates) {
+      if (!item.clientEventId) continue
+      if (item.status === 'FAILED') {
+        try {
+          await uploadQueue.retryNow(item.clientEventId)
+          item.status = 'QUEUED'; item.message = '已重新加入同步队列'
+        } catch (error) {
+          item.message = error instanceof Error ? error.message : '重试失败，请稍后再试'
+        }
+        continue
+      }
+      item.status = 'PROCESSING'; item.message = '压缩与识别中…'
+      const clientEventId = await processPhoto(item.file, 'PHOTO_LIBRARY', item.clientEventId)
+      if (clientEventId) { item.status = 'QUEUED'; item.message = '已加入同步队列' }
+      else { item.status = 'FAILED'; item.message = captureError.value || '处理失败，可重试' }
     }
   } finally {
-    processing.value = false
+    galleryProcessing.value = false
   }
+}
+
+async function createOtherOrder(): Promise<void> {
+  if (manualOrderSaving.value) return
+  manualOrderMessage.value = ''
+  const trackingNo = normalizeTrackingNo(manualOrder.value.trackingNo)
+  const productName = manualOrder.value.productName.trim()
+  if (!isPlausibleTrackingNo(trackingNo)) {
+    manualOrderMessage.value = '请检查运单号，通常应为 8–32 位且至少包含一个数字'
+    return
+  }
+  if (!productName) {
+    manualOrderMessage.value = '请填写商品名称'
+    return
+  }
+  const normalizedOrder = {
+    trackingNo,
+    productName,
+    courier: manualOrder.value.courier.trim(),
+    remark: manualOrder.value.remark.trim(),
+  }
+  manualOrderSaving.value = true
+  const eventPayload = JSON.stringify(normalizedOrder)
+  if (manualOrderEventPayload.value !== eventPayload) {
+    manualOrderEventPayload.value = eventPayload
+    manualOrderEventId.value = createId()
+  }
+  try {
+    await props.createManualOrder({
+      client_event_id: manualOrderEventId.value,
+      tracking_no: normalizedOrder.trackingNo,
+      product_name: normalizedOrder.productName,
+      courier: normalizedOrder.courier || undefined,
+      remark: normalizedOrder.remark || undefined,
+    })
+    manualOrderMessage.value = '第三方订单已加入订单列表'
+    manualOrder.value = { trackingNo: '', productName: '', courier: '', remark: '' }
+    manualOrderEventId.value = ''
+    manualOrderEventPayload.value = ''
+    emit('serverChanged')
+  } catch (error) { manualOrderMessage.value = error instanceof Error ? error.message : '录入失败，请重试' }
+  finally { manualOrderSaving.value = false }
 }
 
 async function saveManualTracking(): Promise<void> {
@@ -184,8 +315,19 @@ async function saveManualTracking(): Promise<void> {
 
 function handleSynced(event: Event): void {
   const receipt = (event as CustomEvent<Receipt>).detail
+  const galleryItem = galleryFiles.value.find((item) => item.clientEventId === receipt.client_event_id)
+  if (galleryItem) { galleryItem.status = 'SYNCED'; galleryItem.message = '已完成' }
   if (!latest.value || receipt.client_event_id !== latest.value.clientEventId) return
   void reconcileSyncedReceipt(receipt)
+}
+
+async function handleQueueChange(): Promise<void> {
+  const items = await uploadQueue.itemsForCurrentUser()
+  for (const galleryItem of galleryFiles.value) {
+    if (galleryItem.status !== 'QUEUED') continue
+    const queued = items.find((item) => item.clientEventId === galleryItem.clientEventId)
+    if (queued?.uploadState === 'FAILED') { galleryItem.status = 'FAILED'; galleryItem.message = queued.lastError || '同步失败，可重试' }
+  }
 }
 
 async function reconcileSyncedReceipt(receipt: Receipt): Promise<void> {
@@ -251,9 +393,14 @@ async function reconcileSyncedReceipt(receipt: Receipt): Promise<void> {
   emit('changed')
 }
 
-onMounted(() => uploadQueue.addEventListener('synced', handleSynced))
+onMounted(() => {
+  uploadQueue.addEventListener('synced', handleSynced)
+  uploadQueue.addEventListener('change', handleQueueChange)
+})
 onBeforeUnmount(() => {
   uploadQueue.removeEventListener('synced', handleSynced)
+  uploadQueue.removeEventListener('change', handleQueueChange)
+  for (const photo of galleryFiles.value) URL.revokeObjectURL(photo.previewUrl)
   releaseLatestPreview()
 })
 </script>
@@ -270,14 +417,14 @@ onBeforeUnmount(() => {
 
     <p class="capture-tip">一张照片同时作为到货凭证并尝试识别快递单号。尽量正对面单、避开反光。</p>
 
-    <label class="camera-button" :class="{ disabled: processing }">
+    <label class="camera-button" :class="{ disabled: processing || galleryProcessing }">
       <input
         ref="input"
         class="visually-hidden"
         type="file"
         accept="image/*"
         capture="environment"
-        :disabled="processing"
+        :disabled="processing || galleryProcessing"
         @change="handleFile"
       />
       <span class="camera-icon" aria-hidden="true">
@@ -290,7 +437,37 @@ onBeforeUnmount(() => {
       <span v-if="processing" class="spinner spinner-light" aria-hidden="true"></span>
     </label>
 
+    <label class="gallery-button" :class="{ disabled: processing || galleryProcessing }">
+      <input class="visually-hidden" type="file" accept="image/*" multiple :disabled="processing || galleryProcessing" @change="handleGallery" />
+      <span class="camera-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4Z" /><circle cx="9" cy="10" r="1.5" /><path d="m5 17 4-4 3 3 2-2 5 5" /></svg></span>
+      <span><strong>从相册选择</strong><small>可一次选择多张，确认后逐张上传</small></span>
+    </label>
+
+    <div v-if="galleryFiles.length" class="gallery-batch">
+      <div class="gallery-batch-header"><strong>已选照片（{{ galleryFiles.length }}）</strong><button type="button" :disabled="processing || galleryProcessing" @click="uploadGallery">{{ galleryProcessing ? '处理中…' : '上传全部' }}</button></div>
+      <p class="gallery-batch-note">点击后会先把整批原图保存在本机，再逐张压缩上传；处理完成前请勿关闭页面。</p>
+      <div class="gallery-grid">
+        <div v-for="photo in galleryFiles" :key="photo.id" class="gallery-item">
+          <img :src="photo.previewUrl" alt="待上传照片" />
+          <span :title="photo.message">{{ photo.status === 'PROCESSING' ? '处理中' : photo.status === 'QUEUED' ? '已排队' : photo.status === 'FAILED' ? photo.message : photo.status === 'SYNCED' ? '已完成' : '待上传' }}</span>
+          <button v-if="photo.status !== 'PROCESSING' && photo.status !== 'QUEUED'" type="button" aria-label="移除照片" @click="removeGalleryPhoto(photo.id)">×</button>
+        </div>
+      </div>
+    </div>
+
     <p v-if="captureError" class="form-error capture-error" role="alert">{{ captureError }}</p>
+
+    <details class="manual-order-panel">
+      <summary>其他渠道快递（手动录入）</summary>
+      <form class="manual-order-form" @submit.prevent="createOtherOrder">
+        <input v-model="manualOrder.trackingNo" required placeholder="运单号（必填）" aria-label="第三方运单号" />
+        <input v-model="manualOrder.productName" required placeholder="商品名称（必填）" aria-label="第三方商品名称" />
+        <input v-model="manualOrder.courier" placeholder="物流公司（可选）" aria-label="物流公司" />
+        <input v-model="manualOrder.remark" placeholder="备注（可选）" aria-label="备注" />
+        <button type="submit" :disabled="manualOrderSaving">{{ manualOrderSaving ? '保存中…' : '加入订单' }}</button>
+      </form>
+      <p v-if="manualOrderMessage" class="manual-order-message" role="status">{{ manualOrderMessage }}</p>
+    </details>
 
     <article v-if="latest" class="capture-result" :class="[`result-${latest.stage.toLowerCase()}`, { duplicate: latest.duplicate }]">
       <img :src="latest.previewUrl" alt="刚拍摄的包裹面单" />

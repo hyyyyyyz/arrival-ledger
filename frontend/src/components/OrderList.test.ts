@@ -362,6 +362,46 @@ describe('OrderList', () => {
 
     const missing = await renderToString(createSSRApp(OrderList, props({ lastSyncedAt: null })))
     expect(missing).toContain('有采购账号尚无成功同步记录')
+
+    const thirdParty = await renderToString(createSSRApp(OrderList, props({
+      platform: 'other',
+      lastSyncedAt: null,
+      orders: [purchaseOrder({ platform: 'other', source: 'THIRD_PARTY_MANUAL' })],
+    })))
+    expect(thirdParty).toContain('第三方订单由人工录入')
+    expect(thirdParty).not.toContain('有采购账号尚无成功同步记录')
+    expect(thirdParty).not.toContain('可能不是最新')
+  })
+
+  it('renders a manual third-party parcel by tracking number without exposing its synthetic id', async () => {
+    const html = await renderToString(createSSRApp(OrderList, props({
+      platform: 'other',
+      lastSyncedAt: null,
+      orders: [purchaseOrder({
+        platform: 'other',
+        account_label: '第三方/其他渠道',
+        platform_order_id: 'manual-secret-internal-hash',
+        source: 'THIRD_PARTY_MANUAL',
+        items: [{ title: '甲方线下采购样品', sku_text: null, quantity: '1', unit_price: null }],
+        packages: [{ courier: '邮政 EMS', tracking_no: '9818907591847', package_status: 'MANUAL', arrival_status: 'PENDING', arrived: false }],
+        package_count: 1,
+        arrived_package_count: 0,
+        candidate_package_count: 0,
+        manual_created_by: { id: 1, username: 'admin', display_name: '仓库管理员', role: 'ADMIN', is_active: true },
+        manual_created_at: '2026-09-01T08:00:00+08:00',
+        manual_remark: '甲方临时交办',
+      })],
+    })))
+
+    expect(html).toContain('第三方')
+    expect(html).toContain('运单号')
+    expect(html).toContain('9818907591847')
+    expect(html).not.toContain('manual-secret-internal-hash')
+    expect(html).toContain('来源')
+    expect(html).toContain('第三方/其他渠道')
+    expect(html).toContain('录入人')
+    expect(html).toContain('仓库管理员')
+    expect(html).toContain('甲方临时交办')
   })
 
   it('renders first, middle, and last page boundaries', async () => {
