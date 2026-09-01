@@ -29,6 +29,7 @@ export function useOrderPage(options: OrderPageOptions) {
   const lastSyncedAt = ref<string | null>(null)
   const activated = ref(false)
   const loaded = ref(false)
+  const hasMore = ref(false)
   const invalidated = ref(false)
   let requestVersion = 0
   let invalidationVersion = 0
@@ -42,8 +43,9 @@ export function useOrderPage(options: OrderPageOptions) {
   }
 
   async function load(
-    nextOffset = offset.value,
+    nextOffset = 0,
     filters: OrderFilters = appliedFilters(),
+    append = false,
     applyFilters = false,
   ): Promise<boolean> {
     if (!options.isOnline()) {
@@ -65,15 +67,28 @@ export function useOrderPage(options: OrderPageOptions) {
       })
       if (activeVersion !== requestVersion) return false
 
-      if (response.total > 0 && response.offset >= response.total) {
-        const lastValidOffset = Math.floor((response.total - 1) / response.limit) * response.limit
-        return await load(lastValidOffset, filters, applyFilters)
+      // OFFSET pages are separate database snapshots. If synchronization or
+      // another operator changed the matching set while the user was
+      // scrolling, restarting from the first batch avoids silently skipping
+      // an order at the shifted page boundary.
+      if (append && response.total !== total.value) {
+        return await load(0, filters)
       }
 
-      orders.value = response.items
+      if (append) {
+        const known = new Set(orders.value.map((order) => order.id))
+        for (const order of response.items) {
+          if (known.has(order.id)) continue
+          known.add(order.id)
+          orders.value.push(order)
+        }
+      } else {
+        orders.value = response.items
+      }
       total.value = response.total
       limit.value = response.limit
-      offset.value = response.offset
+      offset.value = response.offset + response.items.length
+      hasMore.value = response.items.length > 0 && offset.value < response.total
       if (applyFilters) {
         query.value = filters.query
         platform.value = filters.platform
@@ -100,7 +115,7 @@ export function useOrderPage(options: OrderPageOptions) {
 
   async function activate(): Promise<void> {
     activated.value = true
-    if (!loading.value) await load(loaded.value ? offset.value : 0)
+    if (!loading.value) await load(0)
   }
 
   async function search(
@@ -108,26 +123,24 @@ export function useOrderPage(options: OrderPageOptions) {
     nextPlatform: OrderPlatformFilter,
     nextArrivalStatus: OrderArrivalFilter,
   ): Promise<void> {
-    await load(
-      0,
-      {
-        query: nextQuery.trim(),
-        platform: nextPlatform,
-        arrivalStatus: nextArrivalStatus,
-      },
-      true,
-    )
+    const filters = {
+      query: nextQuery.trim(),
+      platform: nextPlatform,
+      arrivalStatus: nextArrivalStatus,
+    }
+    // Keep the currently applied query and results until the new request
+    // succeeds. The generation token invalidates any in-flight append, so a
+    // response from the old filter can never be mixed into the new set.
+    await load(0, filters, false, true)
   }
 
-  async function goToPage(nextOffset: number): Promise<void> {
-    const lastOffset = total.value > 0 ? Math.floor((total.value - 1) / limit.value) * limit.value : 0
-    const targetOffset = Math.min(Math.max(0, nextOffset), lastOffset)
-    if (targetOffset === offset.value) return
-    await load(targetOffset)
+  async function loadMore(): Promise<boolean> {
+    if (loading.value || !hasMore.value) return false
+    return load(offset.value, appliedFilters(), true)
   }
 
   async function refresh(): Promise<void> {
-    await load(offset.value)
+    await load(0, appliedFilters())
   }
 
   function invalidate(): void {
@@ -148,6 +161,7 @@ export function useOrderPage(options: OrderPageOptions) {
     total.value = 0
     limit.value = options.pageSize ?? 20
     offset.value = 0
+    hasMore.value = false
     query.value = ''
     platform.value = ''
     arrivalStatus.value = ''
@@ -167,6 +181,7 @@ export function useOrderPage(options: OrderPageOptions) {
     query,
     platform,
     arrivalStatus,
+    hasMore,
     loading,
     error,
     lastSyncedAt,
@@ -175,7 +190,7 @@ export function useOrderPage(options: OrderPageOptions) {
     invalidated,
     activate,
     search,
-    goToPage,
+    loadMore,
     refresh,
     invalidate,
     replaceOrder,

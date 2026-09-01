@@ -59,8 +59,6 @@ let dashboardRequestVersion = 0
 const {
   orders,
   total: orderTotal,
-  limit: orderLimit,
-  offset: orderOffset,
   query: orderQuery,
   platform: orderPlatform,
   arrivalStatus: orderArrivalStatus,
@@ -69,7 +67,8 @@ const {
   lastSyncedAt: ordersLastSyncedAt,
   activate: activateOrders,
   search: searchOrders,
-  goToPage: goToOrderPage,
+  hasMore: ordersHasMore,
+  loadMore: loadMoreOrders,
   refresh: refreshOrders,
   invalidate: invalidateOrders,
   replaceOrder,
@@ -439,8 +438,6 @@ onBeforeUnmount(() => {
         v-else
         :orders="orders"
         :total="orderTotal"
-        :limit="orderLimit"
-        :offset="orderOffset"
         :query="orderQuery"
         :platform="orderPlatform"
         :arrival-status="orderArrivalStatus"
@@ -448,9 +445,10 @@ onBeforeUnmount(() => {
         :error="ordersError"
         :last-synced-at="ordersLastSyncedAt"
         :online="online"
+        :has-more="ordersHasMore"
         @search="searchOrders"
         @refresh="refreshOrders"
-        @page="goToOrderPage"
+        @load-more="loadMoreOrders"
         @manual-changed="handleManualOrderChanged"
         @auth-required="handleAuthRequired"
       />

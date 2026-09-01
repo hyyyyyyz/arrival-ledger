@@ -8,8 +8,6 @@ import { createId } from '@/utils/id'
 const props = defineProps<{
   orders: PurchaseOrder[]
   total: number
-  limit: number
-  offset: number
   query: string
   platform: OrderPlatformFilter
   arrivalStatus: OrderArrivalFilter
@@ -17,14 +15,15 @@ const props = defineProps<{
   error: string
   lastSyncedAt: string | null
   online: boolean
+  hasMore: boolean
 }>()
 
 const emit = defineEmits<{
   search: [query: string, platform: OrderPlatformFilter, arrivalStatus: OrderArrivalFilter]
   refresh: []
-  page: [offset: number]
   manualChanged: [order: PurchaseOrder]
   authRequired: []
+  loadMore: []
 }>()
 
 const draftQuery = ref(props.query)
@@ -36,17 +35,39 @@ const pendingCorrection = ref<{ order: PurchaseOrder; status: ManualArrivalStatu
 const savingOrderId = ref<string | null>(null)
 const actionErrors = ref<Record<string, string>>({})
 const confirmationDialog = ref<HTMLElement | null>(null)
+const loadMoreSentinel = ref<HTMLElement | null>(null)
 let freshnessTimer: ReturnType<typeof setInterval> | undefined
+let loadMoreObserver: IntersectionObserver | undefined
 
 onMounted(() => {
   freshnessTimer = setInterval(() => {
     freshnessNow.value = Date.now()
   }, 60_000)
+  setupLoadMoreObserver()
 })
 
 onBeforeUnmount(() => {
   if (freshnessTimer !== undefined) clearInterval(freshnessTimer)
+  loadMoreObserver?.disconnect()
 })
+
+function setupLoadMoreObserver(): void {
+  loadMoreObserver?.disconnect()
+  loadMoreObserver = undefined
+  if (typeof window === 'undefined' || typeof IntersectionObserver === 'undefined') return
+  if (!loadMoreSentinel.value || !props.hasMore || props.error) return
+  loadMoreObserver = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting) && !props.loading && !props.error && props.online) {
+      emit('loadMore')
+    }
+  }, { rootMargin: '240px 0px' })
+  loadMoreObserver.observe(loadMoreSentinel.value)
+}
+
+watch(
+  () => [props.hasMore, props.orders.length, props.error, props.online] as const,
+  () => { void nextTick(setupLoadMoreObserver) },
+)
 
 watch(() => props.query, (value) => { draftQuery.value = value })
 watch(() => props.platform, (value) => { draftPlatform.value = value })
@@ -58,10 +79,6 @@ watch(() => props.error, (value) => {
   draftArrivalStatus.value = props.arrivalStatus
 })
 
-const firstResult = computed(() => props.total > 0 ? props.offset + 1 : 0)
-const lastResult = computed(() => Math.min(props.offset + props.orders.length, props.total))
-const hasPrevious = computed(() => props.offset > 0)
-const hasNext = computed(() => props.offset + props.limit < props.total)
 const freshness = computed(() => {
   if (props.platform === 'other') {
     return { label: '第三方订单由人工录入', stale: false }
@@ -304,29 +321,29 @@ function applyArrivalStatus(arrivalStatus: OrderArrivalFilter): void {
           enterkeyhint="search"
           placeholder="搜索订单号、商品、店铺或物流"
         />
-        <button type="submit" :disabled="loading || !online">搜索</button>
+        <button type="submit" :disabled="!online">搜索</button>
       </form>
 
       <div class="platform-filters" role="group" aria-label="采购平台筛选">
-        <button type="button" :class="{ active: draftPlatform === '' }" :aria-pressed="draftPlatform === ''" :disabled="loading || !online" @click="applyPlatform('')">
+        <button type="button" :class="{ active: draftPlatform === '' }" :aria-pressed="draftPlatform === ''" :disabled="!online" @click="applyPlatform('')">
           全部
         </button>
-        <button type="button" :class="{ active: draftPlatform === '1688' }" :aria-pressed="draftPlatform === '1688'" :disabled="loading || !online" @click="applyPlatform('1688')">
+        <button type="button" :class="{ active: draftPlatform === '1688' }" :aria-pressed="draftPlatform === '1688'" :disabled="!online" @click="applyPlatform('1688')">
           1688
         </button>
-        <button type="button" :class="{ active: draftPlatform === 'pdd' }" :aria-pressed="draftPlatform === 'pdd'" :disabled="loading || !online" @click="applyPlatform('pdd')">
+        <button type="button" :class="{ active: draftPlatform === 'pdd' }" :aria-pressed="draftPlatform === 'pdd'" :disabled="!online" @click="applyPlatform('pdd')">
           拼多多
         </button>
-        <button type="button" :class="{ active: draftPlatform === 'other' }" :aria-pressed="draftPlatform === 'other'" :disabled="loading || !online" @click="applyPlatform('other')">
+        <button type="button" :class="{ active: draftPlatform === 'other' }" :aria-pressed="draftPlatform === 'other'" :disabled="!online" @click="applyPlatform('other')">
           第三方
         </button>
       </div>
       <div class="arrival-filters" role="group" aria-label="收货状态筛选">
         <span>状态</span>
-        <button type="button" :class="{ active: draftArrivalStatus === '' }" :aria-pressed="draftArrivalStatus === ''" :disabled="loading || !online" @click="applyArrivalStatus('')">全部</button>
-        <button type="button" :class="{ active: draftArrivalStatus === 'pending' }" :aria-pressed="draftArrivalStatus === 'pending'" :disabled="loading || !online" @click="applyArrivalStatus('pending')">未收货</button>
-        <button type="button" :class="{ active: draftArrivalStatus === 'review' }" :aria-pressed="draftArrivalStatus === 'review'" :disabled="loading || !online" @click="applyArrivalStatus('review')">待确认</button>
-        <button type="button" :class="{ active: draftArrivalStatus === 'received' }" :aria-pressed="draftArrivalStatus === 'received'" :disabled="loading || !online" @click="applyArrivalStatus('received')">已收货</button>
+        <button type="button" :class="{ active: draftArrivalStatus === '' }" :aria-pressed="draftArrivalStatus === ''" :disabled="!online" @click="applyArrivalStatus('')">全部</button>
+        <button type="button" :class="{ active: draftArrivalStatus === 'pending' }" :aria-pressed="draftArrivalStatus === 'pending'" :disabled="!online" @click="applyArrivalStatus('pending')">未收货</button>
+        <button type="button" :class="{ active: draftArrivalStatus === 'review' }" :aria-pressed="draftArrivalStatus === 'review'" :disabled="!online" @click="applyArrivalStatus('review')">待确认</button>
+        <button type="button" :class="{ active: draftArrivalStatus === 'received' }" :aria-pressed="draftArrivalStatus === 'received'" :disabled="!online" @click="applyArrivalStatus('received')">已收货</button>
       </div>
     </div>
 
@@ -474,12 +491,20 @@ function applyArrivalStatus(arrivalStatus: OrderArrivalFilter): void {
       <p>{{ query || platform || arrivalStatus ? '没有符合当前筛选条件的采购订单。' : '还没有导入采购订单。' }}</p>
     </div>
 
-    <footer v-if="total > 0" class="orders-pagination" aria-label="订单分页">
-      <p>第 {{ firstResult }}–{{ lastResult }} 条，共 {{ total }} 条</p>
-      <div>
-        <button type="button" :disabled="loading || !hasPrevious" @click="emit('page', offset - limit)">上一页</button>
-        <button type="button" :disabled="loading || !hasNext" @click="emit('page', offset + limit)">下一页</button>
-      </div>
+    <footer v-if="orders.length" class="orders-load-footer" aria-label="订单加载状态">
+      <div ref="loadMoreSentinel" class="orders-load-sentinel" aria-hidden="true"></div>
+      <p v-if="loading" class="orders-load-status" role="status">正在加载订单…已显示 {{ orders.length }} / {{ total }} 条</p>
+      <p v-else-if="hasMore" class="orders-load-status">已显示 {{ orders.length }} / {{ total }} 条</p>
+      <p v-else-if="!hasMore" class="orders-load-status" role="status">已显示 {{ orders.length }} 条订单</p>
+      <button
+        v-if="hasMore"
+        class="orders-load-more"
+        type="button"
+        :disabled="loading || !online"
+        @click="emit('loadMore')"
+      >
+        {{ loading ? '正在加载…' : error ? '重试加载更多' : '加载更多订单' }}
+      </button>
     </footer>
 
     <div v-if="pendingCorrection" class="modal-backdrop" @click.self="closeCorrection">

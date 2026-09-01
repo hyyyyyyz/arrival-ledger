@@ -54,7 +54,7 @@ describe('order tab data behavior', () => {
     expect(request).toHaveBeenCalledTimes(3)
   })
 
-  it('resets pagination for search and clamps page navigation', async () => {
+  it('resets to the first batch for search and appends subsequent batches', async () => {
     const request = vi.fn((params: OrderListParams) => Promise.resolve(response(String(params.offset), params.offset, 41)))
     const page = useOrderPage({ isOnline: () => true, onAuthRequired: vi.fn(), request })
 
@@ -62,33 +62,27 @@ describe('order tab data behavior', () => {
     await page.search('  螺丝套装  ', '1688', 'pending')
     expect(request).toHaveBeenLastCalledWith({ limit: 20, offset: 0, query: '螺丝套装', platform: '1688', arrival_status: 'pending' })
 
-    await page.goToPage(20)
-    await page.goToPage(999)
-    expect(request).toHaveBeenLastCalledWith({ limit: 20, offset: 40, query: '螺丝套装', platform: '1688', arrival_status: 'pending' })
-
-    const callsAtLastPage = request.mock.calls.length
-    await page.goToPage(999)
-    expect(request).toHaveBeenCalledTimes(callsAtLastPage)
+    await page.loadMore()
+    expect(request).toHaveBeenLastCalledWith({ limit: 20, offset: 1, query: '螺丝套装', platform: '1688', arrival_status: 'pending' })
+    await page.loadMore()
+    expect(request).toHaveBeenLastCalledWith({ limit: 20, offset: 2, query: '螺丝套装', platform: '1688', arrival_status: 'pending' })
+    expect(page.orders.value.map((item) => item.id)).toEqual(['0', '1', '2'])
+    expect(page.hasMore.value).toBe(true)
   })
 
-  it('moves back to the last valid page when refreshed data shrinks', async () => {
+  it('refreshes the accumulated list from the first batch when the total shrinks', async () => {
     let shrunk = false
-    const request = vi.fn((params: OrderListParams) => {
-      if (shrunk && params.offset === 40) {
-        return Promise.resolve({ ...response('gone', 40, 15), items: [] })
-      }
-      if (shrunk) return Promise.resolve(response('recovered', 0, 15))
-      return Promise.resolve(response(String(params.offset), params.offset, 41))
-    })
+    const request = vi.fn((params: OrderListParams) =>
+      Promise.resolve(shrunk ? response('recovered', params.offset, 15) : response(String(params.offset), params.offset, 41)))
     const page = useOrderPage({ isOnline: () => true, onAuthRequired: vi.fn(), request })
 
     await page.activate()
-    await page.goToPage(40)
+    await page.loadMore()
     shrunk = true
     await page.refresh()
 
     expect(request).toHaveBeenLastCalledWith({ limit: 20, offset: 0, query: '', platform: '', arrival_status: '' })
-    expect(page.offset.value).toBe(0)
+    expect(page.offset.value).toBe(1)
     expect(page.total.value).toBe(15)
     expect(page.orders.value[0]?.id).toBe('recovered')
   })
@@ -108,6 +102,43 @@ describe('order tab data behavior', () => {
     expect(page.arrivalStatus.value).toBe('')
     expect(page.orders.value[0]?.id).toBe('existing')
     expect(page.error.value).toBe('筛选服务失败')
+  })
+
+  it('deduplicates concurrent load-more calls and retries the same batch after failure', async () => {
+    const nextBatch = deferred<OrderListResponse>()
+    const request = vi.fn()
+      .mockResolvedValueOnce(response('first', 0, 2))
+      .mockImplementationOnce(() => nextBatch.promise)
+    const page = useOrderPage({ isOnline: () => true, onAuthRequired: vi.fn(), request })
+
+    await page.activate()
+    const firstLoad = page.loadMore()
+    expect(await page.loadMore()).toBe(false)
+    nextBatch.reject(new Error('temporary load failure'))
+    expect(await firstLoad).toBe(false)
+    expect(page.orders.value.map((item) => item.id)).toEqual(['first'])
+    expect(page.hasMore.value).toBe(true)
+    expect(page.error.value).toBe('temporary load failure')
+
+    request.mockResolvedValueOnce(response('next', 1, 2))
+    expect(await page.loadMore()).toBe(true)
+    expect(page.orders.value.map((item) => item.id)).toEqual(['first', 'next'])
+  })
+
+  it('restarts from the first batch when the result set changes while scrolling', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(response('first', 0, 3))
+      .mockResolvedValueOnce(response('shifted-page', 1, 4))
+      .mockResolvedValueOnce(response('refreshed-first', 0, 4))
+    const page = useOrderPage({ isOnline: () => true, onAuthRequired: vi.fn(), request })
+
+    await page.activate()
+    expect(await page.loadMore()).toBe(true)
+
+    expect(request).toHaveBeenCalledTimes(3)
+    expect(request).toHaveBeenLastCalledWith({ limit: 20, offset: 0, query: '', platform: '', arrival_status: '' })
+    expect(page.orders.value.map((item) => item.id)).toEqual(['refreshed-first'])
+    expect(page.total.value).toBe(4)
   })
 
   it('keeps only the latest result when searches resolve out of order', async () => {

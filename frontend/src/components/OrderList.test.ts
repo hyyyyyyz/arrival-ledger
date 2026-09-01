@@ -64,8 +64,6 @@ function purchaseOrder(overrides: Partial<PurchaseOrder> = {}): PurchaseOrder {
 interface OrderListProps extends Record<string, unknown> {
   orders: PurchaseOrder[]
   total: number
-  limit: number
-  offset: number
   query: string
   platform: OrderPlatformFilter
   arrivalStatus: OrderArrivalFilter
@@ -73,14 +71,13 @@ interface OrderListProps extends Record<string, unknown> {
   error: string
   lastSyncedAt: string | null
   online: boolean
+  hasMore: boolean
 }
 
 function props(overrides: Partial<OrderListProps> = {}): OrderListProps {
   return {
     orders: [purchaseOrder()],
     total: 41,
-    limit: 20,
-    offset: 0,
     query: '',
     platform: '',
     arrivalStatus: '',
@@ -88,6 +85,7 @@ function props(overrides: Partial<OrderListProps> = {}): OrderListProps {
     error: '',
     lastSyncedAt: '2026-08-30T01:30:00.000Z',
     online: true,
+    hasMore: false,
     ...overrides,
   }
 }
@@ -100,6 +98,7 @@ describe('OrderList', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+    vi.unstubAllGlobals()
   })
 
   it('renders a compact order, product, logistics, and warehouse arrival summary', async () => {
@@ -129,8 +128,8 @@ describe('OrderList', () => {
     expect(html).not.toContain('商品丁')
     expect(html).not.toContain('YT0003')
     expect(html).not.toContain('OTHER0004')
-    expect(html).toMatch(/<button[^>]*disabled[^>]*>上一页<\/button>/)
-    expect(html).toMatch(/<button[^>]*>下一页<\/button>/)
+    expect(html).not.toContain('上一页')
+    expect(html).not.toContain('下一页')
   })
 
   it('derives red, orange, and green receipt states only from confirmed warehouse arrivals', async () => {
@@ -404,19 +403,61 @@ describe('OrderList', () => {
     expect(html).toContain('甲方临时交办')
   })
 
-  it('renders first, middle, and last page boundaries', async () => {
-    const orders = Array.from({ length: 20 }, (_, index) => purchaseOrder({ id: String(index + 1) }))
-    const first = await renderToString(createSSRApp(OrderList, props({ orders, total: 41, offset: 0 })))
-    const middle = await renderToString(createSSRApp(OrderList, props({ orders, total: 41, offset: 20 })))
-    const last = await renderToString(createSSRApp(OrderList, props({ orders: [purchaseOrder({ id: '41' })], total: 41, offset: 40 })))
-    const none = await renderToString(createSSRApp(OrderList, props({ orders: [], total: 0 })))
+  it('renders infinite-scroll loading, fallback, and completed states', async () => {
+    const loading = await renderToString(createSSRApp(OrderList, props({ hasMore: true, loading: true })))
+    expect(loading).toContain('正在加载订单')
+    expect(loading).toContain('正在加载…')
 
-    expect(first).toContain('第 1–20 条，共 41 条')
-    expect(first).toMatch(/<button[^>]*disabled[^>]*>上一页<\/button>/)
-    expect(middle).toContain('第 21–40 条，共 41 条')
-    expect(middle).not.toMatch(/<button[^>]*disabled[^>]*>上一页<\/button>/)
-    expect(last).toContain('第 41–41 条，共 41 条')
-    expect(last).toMatch(/<button[^>]*disabled[^>]*>下一页<\/button>/)
-    expect(none).not.toContain('aria-label="订单分页"')
+    const more = await renderToString(createSSRApp(OrderList, props({ hasMore: true })))
+    expect(more).toContain('已显示 1 / 41 条')
+    expect(more).toContain('加载更多订单')
+    expect(more).not.toContain('上一页')
+    expect(more).not.toContain('下一页')
+
+    const complete = await renderToString(createSSRApp(OrderList, props({ total: 1, hasMore: false })))
+    expect(complete).toContain('已显示 1 条订单')
+
+    const failed = await renderToString(createSSRApp(OrderList, props({ hasMore: true, error: '网络失败' })))
+    expect(failed).toContain('重试加载更多')
+  })
+
+  it('keeps an accessible fallback button for loading the next batch', async () => {
+    const wrapper = mount(OrderList, { props: props({ hasMore: true }) })
+    await wrapper.get('.orders-load-more').trigger('click')
+    expect(wrapper.emitted('loadMore')).toHaveLength(1)
+  })
+
+  it('loads automatically near the sentinel and disconnects when complete', async () => {
+    let callback: IntersectionObserverCallback | undefined
+    const observe = vi.fn()
+    const disconnect = vi.fn()
+    class MockIntersectionObserver {
+      readonly root = null
+      readonly rootMargin = '240px 0px'
+      readonly thresholds = [0]
+      constructor(nextCallback: IntersectionObserverCallback) { callback = nextCallback }
+      observe = observe
+      disconnect = disconnect
+      unobserve = vi.fn()
+      takeRecords = vi.fn(() => [])
+    }
+    vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
+
+    const wrapper = mount(OrderList, { props: props({ hasMore: true }) })
+    await nextTick()
+    expect(observe).toHaveBeenCalledTimes(1)
+
+    callback?.([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver)
+    await nextTick()
+    expect(wrapper.emitted('loadMore')).toHaveLength(1)
+
+    await wrapper.setProps({ loading: true })
+    callback?.([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver)
+    expect(wrapper.emitted('loadMore')).toHaveLength(1)
+
+    await wrapper.setProps({ loading: false, hasMore: false })
+    await nextTick()
+    expect(disconnect).toHaveBeenCalled()
+    wrapper.unmount()
   })
 })
