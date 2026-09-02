@@ -132,6 +132,18 @@ describe('OrderList', () => {
     expect(html).not.toContain('下一页')
   })
 
+  it('keeps secondary filters collapsed until the filter button is opened', async () => {
+    const html = await renderToString(createSSRApp(OrderList, props()))
+    expect(html).toContain('筛选')
+    expect(html).not.toContain('采购平台')
+
+    const wrapper = mount(OrderList, { props: props() })
+    expect(wrapper.find('#order-filter-panel').exists()).toBe(false)
+    await wrapper.get('.filter-toggle').trigger('click')
+    expect(wrapper.find('#order-filter-panel').exists()).toBe(true)
+    expect(wrapper.text()).toContain('采购平台')
+  })
+
   it('derives red, orange, and green receipt states only from confirmed warehouse arrivals', async () => {
     const pending = await renderToString(createSSRApp(OrderList, props({
       orders: [purchaseOrder({
