@@ -65,6 +65,20 @@ function releaseLatestPreview(): void {
   if (latest.value?.previewUrl) URL.revokeObjectURL(latest.value.previewUrl)
 }
 
+function clearLatestCapture(clientEventId: string): void {
+  if (latest.value?.clientEventId !== clientEventId) return
+  releaseLatestPreview()
+  latest.value = null
+  manualTracking.value = ''
+}
+
+function removeSyncedGalleryPhoto(clientEventId: string): void {
+  const item = galleryFiles.value.find((photo) => photo.clientEventId === clientEventId)
+  if (!item || item.status !== 'SYNCED') return
+  URL.revokeObjectURL(item.previewUrl)
+  galleryFiles.value = galleryFiles.value.filter((photo) => photo.clientEventId !== clientEventId)
+}
+
 async function processPhoto(
   file: File,
   inputMethod: 'PHOTO_CAPTURE' | 'PHOTO_LIBRARY' = 'PHOTO_CAPTURE',
@@ -210,8 +224,13 @@ async function uploadGallery(): Promise<void> {
       }
       item.status = 'PROCESSING'; item.message = '压缩与识别中…'
       const clientEventId = await processPhoto(item.file, 'PHOTO_LIBRARY', item.clientEventId)
-      if (clientEventId) { item.status = 'QUEUED'; item.message = '已加入同步队列' }
-      else { item.status = 'FAILED'; item.message = captureError.value || '处理失败，可重试' }
+      if (!clientEventId) {
+        item.status = 'FAILED'
+        item.message = captureError.value || '处理失败，可重试'
+      } else if (galleryFiles.value.find((photo) => photo.id === item.id)?.status !== 'SYNCED') {
+        item.status = 'QUEUED'
+        item.message = '已加入同步队列'
+      }
     }
   } finally {
     galleryProcessing.value = false
@@ -274,7 +293,13 @@ async function saveManualTracking(): Promise<void> {
 function handleSynced(event: Event): void {
   const receipt = (event as CustomEvent<Receipt>).detail
   const galleryItem = galleryFiles.value.find((item) => item.clientEventId === receipt.client_event_id)
-  if (galleryItem) { galleryItem.status = 'SYNCED'; galleryItem.message = '已完成' }
+  if (galleryItem) {
+    galleryItem.status = 'SYNCED'
+    galleryItem.message = '已完成'
+    // A successfully uploaded gallery item no longer belongs in the selected
+    // batch. Revoke its object URL so repeated batches do not retain images.
+    removeSyncedGalleryPhoto(receipt.client_event_id || '')
+  }
   if (!latest.value || receipt.client_event_id !== latest.value.clientEventId) return
   void reconcileSyncedReceipt(receipt)
 }
@@ -349,6 +374,13 @@ async function reconcileSyncedReceipt(receipt: Receipt): Promise<void> {
         : '照片已同步，单号仍待补录')
   notifySuccess()
   emit('changed')
+
+  // Once the server has both accepted the photo and matched its tracking
+  // number, clear the capture panel. The server receipt list and dashboard
+  // have already been refreshed by App.vue's synced handler.
+  if (receipt.tracking_no && (receipt.order_matches?.length || 0) > 0) {
+    clearLatestCapture(receipt.client_event_id || '')
+  }
 }
 
 onMounted(() => {
