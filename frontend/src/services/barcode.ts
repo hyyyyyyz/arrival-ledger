@@ -16,16 +16,29 @@ type NativeBarcodeDetectorConstructor = {
   getSupportedFormats?: () => Promise<string[]>
 }
 interface LoadedImage { source: CanvasImageSource; width: number; height: number; dispose: () => void }
-interface VariantSpec { x: number; y: number; width: number; height: number; rotation: 0 | 90 | 270; enhance: boolean }
+interface VariantSpec {
+  x: number
+  y: number
+  width: number
+  height: number
+  rotation: 0 | 90 | 270
+  enhance: boolean
+  threshold?: number
+}
 
 // The first two passes are fast. Extra passes are bounded fallbacks for
 // angled photos or labels where the barcode occupies only a narrow band.
 const VARIANT_SPECS: VariantSpec[] = [
   { x: 0, y: 0, width: 1, height: 1, rotation: 0, enhance: false },
-  { x: 0, y: 0.18, width: 1, height: 0.64, rotation: 0, enhance: false },
-  { x: 0.08, y: 0.08, width: 0.84, height: 0.84, rotation: 0, enhance: true },
+  // Most courier labels put the primary horizontal code in the upper third.
+  { x: 0, y: 0.04, width: 1, height: 0.52, rotation: 0, enhance: false },
+  { x: 0, y: 0.10, width: 1, height: 0.36, rotation: 0, enhance: true },
+  { x: 0.04, y: 0.08, width: 0.92, height: 0.48, rotation: 0, enhance: true, threshold: 158 },
+  { x: 0.08, y: 0.08, width: 0.84, height: 0.84, rotation: 0, enhance: true, threshold: 170 },
   { x: 0, y: 0, width: 1, height: 1, rotation: 90, enhance: false },
   { x: 0, y: 0, width: 1, height: 1, rotation: 270, enhance: false },
+  // Some labels repeat a vertical code along the right edge.
+  { x: 0.52, y: 0.26, width: 0.46, height: 0.58, rotation: 90, enhance: true, threshold: 160 },
 ]
 
 function plausibleResult(raw: string | undefined): string | null {
@@ -55,11 +68,12 @@ async function loadImage(photo: Blob): Promise<LoadedImage> {
   })
 }
 
-function enhanceContrast(context: CanvasRenderingContext2D, width: number, height: number): void {
+function enhanceContrast(context: CanvasRenderingContext2D, width: number, height: number, threshold?: number): void {
   const imageData = context.getImageData(0, 0, width, height)
   for (let i = 0; i < imageData.data.length; i += 4) {
     const luminance = 0.299 * (imageData.data[i] ?? 0) + 0.587 * (imageData.data[i + 1] ?? 0) + 0.114 * (imageData.data[i + 2] ?? 0)
-    const value = Math.max(0, Math.min(255, (luminance - 128) * 1.65 + 128))
+    const contrasted = Math.max(0, Math.min(255, (luminance - 128) * 1.85 + 128))
+    const value = threshold === undefined ? contrasted : (contrasted < threshold ? 0 : 255)
     imageData.data[i] = value; imageData.data[i + 1] = value; imageData.data[i + 2] = value
   }
   context.putImageData(imageData, 0, 0)
@@ -79,14 +93,16 @@ function renderVariant(image: LoadedImage, spec: VariantSpec): HTMLCanvasElement
   canvas.height = rotated ? width : height
   const context = canvas.getContext('2d', { alpha: false, willReadFrequently: spec.enhance })
   if (!context) throw new Error('当前浏览器无法处理照片')
-  context.imageSmoothingEnabled = true
-  context.imageSmoothingQuality = 'high'
+  // Preserve 1-D bar edges for the barcode passes; smoothing can erase narrow
+  // bars after a phone photo has already been resampled by the camera app.
+  context.imageSmoothingEnabled = !spec.enhance
+  context.imageSmoothingQuality = spec.enhance ? 'medium' : 'high'
   context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height)
   context.save(); context.translate(canvas.width / 2, canvas.height / 2)
   context.rotate((spec.rotation * Math.PI) / 180)
   context.drawImage(image.source, cropX, cropY, cropWidth, cropHeight, -width / 2, -height / 2, width, height)
   context.restore()
-  if (spec.enhance) enhanceContrast(context, canvas.width, canvas.height)
+  if (spec.enhance) enhanceContrast(context, canvas.width, canvas.height, spec.threshold)
   return canvas
 }
 
