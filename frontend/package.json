@@ -11,6 +11,7 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
+    "@undecaf/barcode-detector-polyfill": "^0.9.23",
     "@zxing/browser": "^0.1.5",
     "@zxing/library": "^0.21.3",
     "read-excel-file": "^9.3.10",

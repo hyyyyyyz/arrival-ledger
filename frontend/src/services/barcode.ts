@@ -8,6 +8,7 @@ const NATIVE_FORMAT_NAMES = [
   'code_128', 'code_39', 'code_93', 'codabar', 'itf',
   'ean_13', 'ean_8', 'upc_a', 'upc_e', 'rss_14', 'rss_expanded',
 ] as const
+const POLYFILL_FORMAT_NAMES = ['codabar', 'code_39', 'code_93', 'code_128', 'itf', 'ean_8', 'ean_13', 'upc_a', 'upc_e'] as const
 const MAX_DECODE_DIMENSION = 2400
 
 type NativeBarcodeDetector = { detect: (source: CanvasImageSource) => Promise<Array<{ rawValue?: string }>> }
@@ -130,6 +131,17 @@ async function zxingReaders(): Promise<Array<{ decodeFromCanvas: (canvas: HTMLCa
   return [new BrowserMultiFormatOneDReader(hints), new BrowserMultiFormatReader(hints)]
 }
 
+async function zbarDetector(): Promise<{ detect: (source: CanvasImageSource) => Promise<Array<{ rawValue?: string }>> } | null> {
+  try {
+    const { BarcodeDetectorPolyfill } = await import('@undecaf/barcode-detector-polyfill')
+    return new BarcodeDetectorPolyfill({ formats: [...POLYFILL_FORMAT_NAMES] })
+  } catch {
+    // The fallback is optional: an unavailable WASM runtime must never block
+    // saving the receipt or the manual correction path.
+    return null
+  }
+}
+
 async function decodeVariants(photo: Blob): Promise<string | null> {
   const image = await loadImage(photo)
   const [detector, readers] = await Promise.all([nativeDetector(), zxingReaders()])
@@ -155,6 +167,22 @@ async function decodeVariants(photo: Blob): Promise<string | null> {
       // A native hit is reliable; return without paying for the slower crops.
       const best = [...candidates.entries()].sort((a, b) => b[1] - a[1])[0]
       if (best && best[1] >= 2) return best[0]
+    }
+    // ZBar's WASM decoder is intentionally a bounded last resort. It is more
+    // tolerant of moire, low contrast and photographed labels than the pure
+    // JavaScript reader, while still processing the image entirely in-browser.
+    const fallback = await zbarDetector()
+    if (fallback) {
+      for (const spec of VARIANT_SPECS.slice(1)) {
+        const canvas = renderVariant(image, spec)
+        try {
+          for (const barcode of await fallback.detect(canvas)) {
+            const value = plausibleResult(barcode.rawValue)
+            if (value) return value
+          }
+        } catch { /* continue with the next bounded crop */ }
+        finally { canvas.width = 1; canvas.height = 1 }
+      }
     }
     const ranked = [...candidates.entries()].sort((a, b) => b[1] - a[1])
     if (!ranked[0] || ranked[1]?.[1] === ranked[0][1]) return null
