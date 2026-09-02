@@ -77,6 +77,9 @@ class Settings:
     ali1688_retries: int = 2
     ali1688_max_pages: int = 25
     ali1688_backfill_days: int = 30
+    zhipu_vl_api_key: str = ""
+    zhipu_vl_model: str = "glm-4.1v-thinking-flash"
+    zhipu_vl_timeout_seconds: float = 12.0
 
     def validate(self) -> None:
         if len(self.session_secret) < 32:
@@ -117,6 +120,10 @@ class Settings:
             raise ValueError("ALI1688_MAX_PAGES must be between 1 and 100")
         if self.ali1688_backfill_days < 1 or self.ali1688_backfill_days > 3650:
             raise ValueError("ALI1688_BACKFILL_DAYS must be between 1 and 3650")
+        if not self.zhipu_vl_model.strip():
+            raise ValueError("ZHIPU_VL_MODEL cannot be blank")
+        if self.zhipu_vl_timeout_seconds <= 0 or self.zhipu_vl_timeout_seconds > 60:
+            raise ValueError("ZHIPU_VL_TIMEOUT_SECONDS must be between 0 and 60")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -170,6 +177,9 @@ class Settings:
             ali1688_retries=_env_int("ALI1688_RETRIES", 2, 0),
             ali1688_max_pages=_env_int("ALI1688_MAX_PAGES", 25, 1),
             ali1688_backfill_days=_env_int("ALI1688_BACKFILL_DAYS", 30, 1),
+            zhipu_vl_api_key=os.getenv("ZHIPU_VL_API_KEY", ""),
+            zhipu_vl_model=os.getenv("ZHIPU_VL_MODEL", "glm-4.1v-thinking-flash"),
+            zhipu_vl_timeout_seconds=float(os.getenv("ZHIPU_VL_TIMEOUT_SECONDS", "12")),
         )
         settings.validate()
         return settings

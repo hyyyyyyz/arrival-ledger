@@ -89,6 +89,7 @@ from .sync_ingest import (
     parse_batch_counts,
     normalize_courier,
 )
+from .zhipu_vl import extract_tracking_candidates, resolve_tracking_candidate
 
 
 logger = logging.getLogger(__name__)
@@ -3042,12 +3043,31 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         moved = False
 
         try:
+            os.replace(temporary_path, destination_path)
+            moved = True
+            # Local BarcodeDetector/ZXing remains the fast path.  Only photos
+            # without a client result use the optional, free GLM-V fallback.
+            if normalized_tracking is None and settings.zhipu_vl_api_key.strip():
+                candidates = await asyncio.to_thread(
+                    extract_tracking_candidates,
+                    destination_path,
+                    api_key=settings.zhipu_vl_api_key,
+                    model=settings.zhipu_vl_model,
+                    timeout_seconds=settings.zhipu_vl_timeout_seconds,
+                )
+                if candidates:
+                    with database.connect() as candidate_connection:
+                        resolved = resolve_tracking_candidate(candidate_connection, candidates)
+                    if resolved is not None:
+                        tracking_no, normalized_tracking = resolved
+
             with database.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 existing = _fetch_receipt(connection, client_event_id=client_event_id)
                 if existing is not None:
                     connection.rollback()
                     temporary_path.unlink(missing_ok=True)
+                    destination_path.unlink(missing_ok=True)
                     response.status_code = 200
                     return ReceiptCreateResponse(
                         created=False,
@@ -3055,8 +3075,6 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                         receipt=_receipt_from_row(connection, existing),
                     )
 
-                os.replace(temporary_path, destination_path)
-                moved = True
                 timestamp = db_timestamp(received)
                 duplicate_of_id = None
                 if normalized_tracking:
