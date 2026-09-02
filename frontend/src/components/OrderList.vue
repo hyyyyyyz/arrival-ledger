@@ -29,6 +29,7 @@ const emit = defineEmits<{
 const draftQuery = ref(props.query)
 const draftPlatform = ref<OrderPlatformFilter>(props.platform)
 const draftArrivalStatus = ref<OrderArrivalFilter>(props.arrivalStatus)
+const filtersOpen = ref(false)
 const expandedOrders = ref<Set<string>>(new Set())
 const freshnessNow = ref(Date.now())
 const pendingCorrection = ref<{ order: PurchaseOrder; status: ManualArrivalStatus; clientEventId: string } | null>(null)
@@ -102,6 +103,14 @@ const freshness = computed(() => {
     label: `全部账号至少同步至 ${time}${stale ? ' · 可能不是最新' : ''}`,
     stale,
   }
+})
+
+const activeFilterCount = computed(() => Number(Boolean(props.platform)) + Number(Boolean(props.arrivalStatus)))
+const activeFilterSummary = computed(() => {
+  const labels: string[] = []
+  if (props.platform) labels.push(props.platform === '1688' ? '1688' : props.platform === 'pdd' ? '拼多多' : '第三方')
+  if (props.arrivalStatus) labels.push(props.arrivalStatus === 'pending' ? '未收货' : props.arrivalStatus === 'review' ? '待确认' : '已收货')
+  return labels.join(' · ')
 })
 
 type ArrivalTone = 'pending' | 'candidate' | 'partial' | 'received' | 'closed'
@@ -305,45 +314,68 @@ function applyArrivalStatus(arrivalStatus: OrderArrivalFilter): void {
   draftArrivalStatus.value = arrivalStatus
   emit('search', draftQuery.value.trim(), draftPlatform.value, arrivalStatus)
 }
+
+function clearFilters(): void {
+  draftPlatform.value = ''
+  draftArrivalStatus.value = ''
+  submitSearch()
+}
 </script>
 
 <template>
   <section class="orders-page" aria-labelledby="orders-list-title">
     <div class="order-filters">
-      <form class="order-search" role="search" @submit.prevent="submitSearch">
-        <label class="visually-hidden" for="order-search-input">搜索采购订单</label>
-        <input
-          id="order-search-input"
-          v-model="draftQuery"
-          type="search"
-          maxlength="128"
-          autocomplete="off"
-          enterkeyhint="search"
-          placeholder="搜索订单号、商品、店铺或物流"
-        />
-        <button type="submit" :disabled="!online">搜索</button>
-      </form>
-
-      <div class="platform-filters" role="group" aria-label="采购平台筛选">
-        <button type="button" :class="{ active: draftPlatform === '' }" :aria-pressed="draftPlatform === ''" :disabled="!online" @click="applyPlatform('')">
-          全部
-        </button>
-        <button type="button" :class="{ active: draftPlatform === '1688' }" :aria-pressed="draftPlatform === '1688'" :disabled="!online" @click="applyPlatform('1688')">
-          1688
-        </button>
-        <button type="button" :class="{ active: draftPlatform === 'pdd' }" :aria-pressed="draftPlatform === 'pdd'" :disabled="!online" @click="applyPlatform('pdd')">
-          拼多多
-        </button>
-        <button type="button" :class="{ active: draftPlatform === 'other' }" :aria-pressed="draftPlatform === 'other'" :disabled="!online" @click="applyPlatform('other')">
-          第三方
+      <div class="filter-toolbar">
+        <form class="order-search" role="search" @submit.prevent="submitSearch">
+          <label class="visually-hidden" for="order-search-input">搜索采购订单</label>
+          <input
+            id="order-search-input"
+            v-model="draftQuery"
+            type="search"
+            maxlength="128"
+            autocomplete="off"
+            enterkeyhint="search"
+            placeholder="搜索订单号、商品、店铺或物流"
+          />
+          <button type="submit" :disabled="!online">搜索</button>
+        </form>
+        <button
+          class="filter-toggle"
+          type="button"
+          :aria-expanded="filtersOpen"
+          aria-controls="order-filter-panel"
+          :disabled="!online"
+          @click="filtersOpen = !filtersOpen"
+        >
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4" /></svg>
+          <span>筛选</span>
+          <strong v-if="activeFilterCount">{{ activeFilterCount }}</strong>
         </button>
       </div>
-      <div class="arrival-filters" role="group" aria-label="收货状态筛选">
-        <span>状态</span>
-        <button type="button" :class="{ active: draftArrivalStatus === '' }" :aria-pressed="draftArrivalStatus === ''" :disabled="!online" @click="applyArrivalStatus('')">全部</button>
-        <button type="button" :class="{ active: draftArrivalStatus === 'pending' }" :aria-pressed="draftArrivalStatus === 'pending'" :disabled="!online" @click="applyArrivalStatus('pending')">未收货</button>
-        <button type="button" :class="{ active: draftArrivalStatus === 'review' }" :aria-pressed="draftArrivalStatus === 'review'" :disabled="!online" @click="applyArrivalStatus('review')">待确认</button>
-        <button type="button" :class="{ active: draftArrivalStatus === 'received' }" :aria-pressed="draftArrivalStatus === 'received'" :disabled="!online" @click="applyArrivalStatus('received')">已收货</button>
+
+      <p v-if="!filtersOpen && activeFilterSummary" class="active-filter-summary">
+        当前筛选：{{ activeFilterSummary }}
+      </p>
+
+      <div v-if="filtersOpen" id="order-filter-panel" class="filter-panel">
+        <div class="filter-panel-heading">
+          <strong>筛选订单</strong>
+          <button type="button" class="clear-filter-button" :disabled="!online || !activeFilterCount" @click="clearFilters">清除筛选</button>
+        </div>
+        <div class="platform-filters" role="group" aria-label="采购平台筛选">
+          <span class="filter-label">采购平台</span>
+          <button type="button" :class="{ active: draftPlatform === '' }" :aria-pressed="draftPlatform === ''" :disabled="!online" @click="applyPlatform('')">全部</button>
+          <button type="button" :class="{ active: draftPlatform === '1688' }" :aria-pressed="draftPlatform === '1688'" :disabled="!online" @click="applyPlatform('1688')">1688</button>
+          <button type="button" :class="{ active: draftPlatform === 'pdd' }" :aria-pressed="draftPlatform === 'pdd'" :disabled="!online" @click="applyPlatform('pdd')">拼多多</button>
+          <button type="button" :class="{ active: draftPlatform === 'other' }" :aria-pressed="draftPlatform === 'other'" :disabled="!online" @click="applyPlatform('other')">第三方</button>
+        </div>
+        <div class="arrival-filters" role="group" aria-label="收货状态筛选">
+          <span class="filter-label">收货状态</span>
+          <button type="button" :class="{ active: draftArrivalStatus === '' }" :aria-pressed="draftArrivalStatus === ''" :disabled="!online" @click="applyArrivalStatus('')">全部</button>
+          <button type="button" :class="{ active: draftArrivalStatus === 'pending' }" :aria-pressed="draftArrivalStatus === 'pending'" :disabled="!online" @click="applyArrivalStatus('pending')">未收货</button>
+          <button type="button" :class="{ active: draftArrivalStatus === 'review' }" :aria-pressed="draftArrivalStatus === 'review'" :disabled="!online" @click="applyArrivalStatus('review')">待确认</button>
+          <button type="button" :class="{ active: draftArrivalStatus === 'received' }" :aria-pressed="draftArrivalStatus === 'received'" :disabled="!online" @click="applyArrivalStatus('received')">已收货</button>
+        </div>
       </div>
     </div>
 
