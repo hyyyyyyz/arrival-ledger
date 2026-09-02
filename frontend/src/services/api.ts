@@ -9,6 +9,8 @@ import type {
   OrderListResponse,
   CreatePlatformAccountInput,
   CreateManualOrderInput,
+  ManualOrderBatchCreateInput,
+  ManualOrderBatchCreateResponse,
   ManualOrderCreateResponse,
   PlatformAccount,
   PlatformAccountListResponse,
@@ -198,6 +200,14 @@ export async function createPlatformAccount(input: CreatePlatformAccountInput): 
 
 export async function createManualOrder(input: CreateManualOrderInput): Promise<ManualOrderCreateResponse> {
   return request<ManualOrderCreateResponse>('/manual-orders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export async function createManualOrderBatch(input: ManualOrderBatchCreateInput): Promise<ManualOrderBatchCreateResponse> {
+  return request<ManualOrderBatchCreateResponse>('/manual-orders/batch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),

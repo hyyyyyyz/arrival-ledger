@@ -434,7 +434,7 @@ def test_migration_upgrades_old_database_and_keeps_receipts(
         migrations = connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         tables = {
             row["name"]
             for row in connection.execute(
@@ -548,7 +548,7 @@ def test_legacy_nonnull_links_are_nullified_and_deduped_on_upgrade(
         migrations = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        assert [row["version"] for row in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
 
 def test_photo_library_migration_preserves_duplicate_receipts_and_audit_history(
@@ -830,10 +830,10 @@ def test_responsibility_migration_upgrades_version_four_database(tmp_path) -> No
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
         assert [(row["version"], row["name"]) for row in migrations][-4:] == [
-            (7, "platform_account_sync_state"),
             (8, "normalize_pdd_account_source"),
             (9, "manual_orders"),
             (10, "photo_library_input"),
+            (11, "manual_order_batches"),
         ]
 
 
@@ -894,6 +894,6 @@ def test_user_audit_migration_upgrades_version_five_database(tmp_path) -> None:
             """
         ).fetchone()
         assert (last_migration["version"], last_migration["name"]) == (
-            10,
-            "photo_library_input",
+            11,
+            "manual_order_batches",
         )

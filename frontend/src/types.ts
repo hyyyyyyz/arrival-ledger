@@ -74,6 +74,53 @@ export interface ManualOrderCreateResponse {
   source: 'THIRD_PARTY_MANUAL'
 }
 
+export interface ManualOrderBatchRowInput {
+  row_number: number
+  tracking_no: string
+  product_name?: string
+  courier?: string
+  remark?: string
+}
+
+export interface ManualOrderBatchCreateInput {
+  client_batch_id: string
+  tracking_text?: string
+  product_name?: string
+  courier?: string
+  remark?: string
+  rows?: ManualOrderBatchRowInput[]
+}
+
+export type ManualOrderBatchItemStatus = 'CREATED' | 'IDEMPOTENT' | 'DUPLICATE_INPUT' | 'FAILED'
+
+export interface ManualOrderBatchResultItem {
+  input_index: number
+  status: ManualOrderBatchItemStatus
+  tracking_no?: string | null
+  tracking_no_normalized?: string | null
+  row_number?: number | null
+  created?: boolean
+  idempotent_replay?: boolean
+  order_id?: string | null
+  platform_order_id?: string | null
+  product_name?: string | null
+  courier?: string | null
+  error_code?: string | null
+  message?: string | null
+}
+
+export interface ManualOrderBatchCreateResponse {
+  client_batch_id: string
+  idempotent_replay: boolean
+  total_count: number
+  unique_count: number
+  created_count: number
+  idempotent_count: number
+  duplicate_count: number
+  failed_count: number
+  items: ManualOrderBatchResultItem[]
+}
+
 export interface AuthSession {
   user: User
   authRequired: boolean

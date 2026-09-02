@@ -62,7 +62,57 @@ describe("loadConfig", () => {
     expect(config.profile_dirs["pdd"]).toBe(join(dir, "profiles", "pdd"));
     expect(config.profile_dirs["1688"]).toBe(join(dir, "profiles", "1688"));
     expect(config.order_list_urls["1688"]).toContain("1688.com");
+    expect(config.browser).toEqual({
+      display: null,
+      channel: null,
+      executable_path: null,
+    });
     expect(issues).toEqual([]);
+  });
+
+  it("loads Linux display and an installed browser channel", () => {
+    const { config, issues } = loadConfig({
+      cwd: tempDir(),
+      env: {
+        PDD_BROWSER_DISPLAY: ":99",
+        PDD_BROWSER_CHANNEL: "chrome",
+      },
+    });
+    expect(config.browser).toEqual({
+      display: ":99",
+      channel: "chrome",
+      executable_path: null,
+    });
+    expect(issues).toEqual([]);
+  });
+
+  it("loads an absolute browser executable path", () => {
+    const dir = tempDir();
+    const executable = join(dir, "chrome");
+    const { config, issues } = loadConfig({
+      cwd: dir,
+      env: { PDD_BROWSER_EXECUTABLE_PATH: executable },
+    });
+    expect(config.browser.executable_path).toBe(executable);
+    expect(config.browser.channel).toBeNull();
+    expect(issues).toEqual([]);
+  });
+
+  it("rejects invalid browser selection and display configuration", () => {
+    const dir = tempDir();
+    const { issues } = loadConfig({
+      cwd: dir,
+      env: {
+        PDD_BROWSER_DISPLAY: "not a display",
+        PDD_BROWSER_CHANNEL: "firefox",
+        PDD_BROWSER_EXECUTABLE_PATH: "relative/chrome",
+      },
+    });
+    const fields = issues.map((issue) => issue.field);
+    expect(fields).toContain("PDD_BROWSER_DISPLAY");
+    expect(fields).toContain("PDD_BROWSER_CHANNEL");
+    expect(fields).toContain("PDD_BROWSER_EXECUTABLE_PATH");
+    expect(fields).toContain("PDD_BROWSER_CHANNEL/PDD_BROWSER_EXECUTABLE_PATH");
   });
 
   it("reads an env file from the package root", () => {

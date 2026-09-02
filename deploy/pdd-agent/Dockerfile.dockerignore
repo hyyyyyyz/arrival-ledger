@@ -1,0 +1,15 @@
+# This allowlist prevents private profiles, .env.local, state, reports, media,
+# database files, and 1688 secrets from even entering the Docker build context.
+**
+
+!sync-agent
+!sync-agent/package.json
+!sync-agent/package-lock.json
+!sync-agent/tsconfig.json
+!sync-agent/tsconfig.build.json
+!sync-agent/src
+!sync-agent/src/**
+
+!deploy
+!deploy/pdd-agent
+!deploy/pdd-agent/entrypoint.sh

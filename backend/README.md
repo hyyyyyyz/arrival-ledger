@@ -103,6 +103,12 @@ dry-run，再按账号确认后提交。每个账号有独立游标和锁，失�
 `client_event_id`、`tracking_no` 和 `product_name`，`courier`、`remark` 可选。标准化运单号全局去重；
 若已属于 1688/PDD 订单则返回 `409`，不会误建重复订单。创建人和创建时间会随统一订单列表返回。
 
+多单可通过 `POST /api/manual-orders/batch` 批量录入。接口接受逗号、中文逗号、分号或换行
+分隔的 `tracking_text`，也接受前端从 `.xlsx` / CSV 解析后的 `rows`。单批最多 500 条、JSON
+请求体最多 512 KiB；每行独立校验并返回创建、幂等重放、批内重复或失败结果。已存在的平台运单
+和既有手工运单只会报告冲突，不会被覆盖。`client_batch_id` 绑定原始负载和操作人，网络重试不会
+重复建单，也不能由另一名用户复用。
+
 相同 `client_event_id` 重试返回既有记录，不重复写照片或数据库行。不同事件使用相同标准化快递单号时仍保存新照片以供审计，并通过 `is_duplicate`、`duplicate_of_id` 和 `duplicate_of` 指向首次记录。
 
 ## 测试

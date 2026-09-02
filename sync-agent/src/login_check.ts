@@ -20,6 +20,10 @@ export interface LoginCheckOptions {
   launcher?: BrowserLauncher;
   adapter?: PlatformAdapter;
   waitForInput?: () => Promise<void>;
+  nonInteractiveWait?: {
+    timeout_ms: number;
+    poll_interval_ms?: number;
+  };
   output?: (line: string) => void;
 }
 
@@ -43,6 +47,10 @@ export function waitForEnter(): Promise<void> {
     process.stdin.resume();
     process.stdin.on("data", listeners.onData);
   });
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 export async function runLoginCheck(options: LoginCheckOptions): Promise<LoginCheckOutcome> {
@@ -131,7 +139,7 @@ export async function runLoginCheck(options: LoginCheckOptions): Promise<LoginCh
       });
       return { exitCode: 1, state: null, checkedAt: null };
     }
-    browser = await launcher(profileDir);
+    browser = await launcher(profileDir, config.browser);
     const page: Page = browser.context.pages()[0] ?? (await browser.context.newPage());
     await adapter.openOrders(page, {
       max_pages: 1,
@@ -141,22 +149,53 @@ export async function runLoginCheck(options: LoginCheckOptions): Promise<LoginCh
 
     let state = await checkPageState(page, adapter);
     let checkedAt = new Date().toISOString();
-    let attempts = 0;
+    const nonInteractiveWait = options.nonInteractiveWait;
+    const waitDeadline = nonInteractiveWait === undefined
+      ? null
+      : Date.now() + nonInteractiveWait.timeout_ms;
+    const pollIntervalMs = Math.max(10, nonInteractiveWait?.poll_interval_ms ?? 2000);
+    let lastManualNotice = "";
+    let pollingAnnounced = false;
     while (state.status === "NEEDS_LOGIN" || state.status === "CAPTCHA_OR_BLOCKED") {
-      attempts += 1;
-      if (state.status === "CAPTCHA_OR_BLOCKED") {
-        write(`[WARN] ${platform} security verification: ${state.detail}`);
-        write(
-          "Please complete the visible verification manually. This tool never solves or bypasses captchas.",
-        );
-      } else {
-        write(`[WARN] ${platform} login state: ${state.detail}`);
-        write(
-          "Please finish the login manually in the visible browser window. This tool never fills passwords, solves captchas or scans QR codes.",
-        );
+      const manualNotice = `${state.status}:${state.detail}`;
+      if (manualNotice !== lastManualNotice) {
+        lastManualNotice = manualNotice;
+        if (state.status === "CAPTCHA_OR_BLOCKED") {
+          write(`[WARN] ${platform} security verification: ${state.detail}`);
+          write(
+            "Please complete the visible verification manually. This tool never solves or bypasses captchas.",
+          );
+        } else {
+          write(`[WARN] ${platform} login state: ${state.detail}`);
+          write(
+            "Please finish the login manually in the visible browser window. This tool never fills passwords, solves captchas or scans QR codes.",
+          );
+        }
       }
-      write("Press Enter here after the login is complete (Ctrl+C to abort)...");
-      await waitForInput();
+      if (waitDeadline !== null) {
+        if (!pollingAnnounced) {
+          pollingAnnounced = true;
+          write(
+            `Watching the existing visible page for up to ${Math.ceil(nonInteractiveWait!.timeout_ms / 1000)}s; no refresh or captcha action will be attempted...`,
+          );
+        }
+        const remainingMs = waitDeadline - Date.now();
+        if (remainingMs <= 0) {
+          write(`[FAIL] ${platform} manual login wait timed out: ${state.detail}`);
+          logger.warn({
+            command: "login-check",
+            platform,
+            status: state.status,
+            message: `manual login wait timed out: ${state.detail}`,
+            error_code: state.status,
+          });
+          return { exitCode: 1, state, checkedAt };
+        }
+        await delay(Math.min(pollIntervalMs, remainingMs));
+      } else {
+        write("Press Enter here after the login is complete (Ctrl+C to abort)...");
+        await waitForInput();
+      }
       state = await checkPageState(page, adapter);
       checkedAt = new Date().toISOString();
     }

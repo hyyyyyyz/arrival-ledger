@@ -98,7 +98,7 @@ export async function runCapturePage(options: CapturePageOptions): Promise<Captu
       });
       return { exitCode: 1, path: null, status: "DISABLED" };
     }
-    browser = await launcher(profileDir);
+    browser = await launcher(profileDir, config.browser);
     const page = browser.context.pages()[0] ?? (await browser.context.newPage());
     await adapter.openOrders(page, {
       max_pages: 1,

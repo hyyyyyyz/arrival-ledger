@@ -605,6 +605,26 @@ def _migration_photo_library_input(connection: sqlite3.Connection) -> None:
     connection.execute("DROP TABLE receipt_events_old")
 
 
+def _migration_manual_order_batches(connection: sqlite3.Connection) -> None:
+    """Record idempotency ownership for bounded manual-order batch requests."""
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS manual_order_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_batch_id TEXT NOT NULL UNIQUE
+                CHECK (length(client_batch_id) BETWEEN 8 AND 128),
+            payload_sha256 TEXT NOT NULL
+                CHECK (length(payload_sha256) = 64),
+            actor_user_id INTEGER NOT NULL REFERENCES users(id),
+            item_count INTEGER NOT NULL CHECK (item_count BETWEEN 1 AND 500),
+            created_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        CREATE INDEX IF NOT EXISTS idx_manual_order_batches_actor
+            ON manual_order_batches(actor_user_id, id DESC)
+    """)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial_schema", apply=_migration_initial_schema),
     Migration(version=2, name="item_identity", apply=_migration_item_identity),
@@ -644,6 +664,7 @@ MIGRATIONS: tuple[Migration, ...] = (
         apply=_migration_manual_orders,
     ),
     Migration(version=10, name="photo_library_input", apply=_migration_photo_library_input),
+    Migration(version=11, name="manual_order_batches", apply=_migration_manual_order_batches),
 )
 
 

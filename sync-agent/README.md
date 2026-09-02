@@ -1,4 +1,4 @@
-# sync-agent（到货管家 Mac/Windows 拼多多同步端）
+# sync-agent（到货管家可见浏览器拼多多同步端）
 
 本包只从用户已经登录的拼多多可见网页低频读取订单，dry-run 预览后把规范化批次
 上传到到货管家自己的 `/api/sync/v1/batches`。1688 已迁移到后端官方 Open API；本包不调用
@@ -39,8 +39,8 @@
 待手工验收（唯一剩余项）：
 
 - 按 [`docs/PDD_MULTI_ACCOUNT.md`](../docs/PDD_MULTI_ACCOUNT.md) 和
-  [`docs/SYNC_MANUAL_ACCEPTANCE.md`](../docs/SYNC_MANUAL_ACCEPTANCE.md) 在实际 Mac/Windows 同步电脑上仅对
-  PDD 执行：逐账号 login-check 手工登录 → dry-run 20–30 条真实订单 → 核对报告 → 单账号
+  [`docs/SYNC_MANUAL_ACCEPTANCE.md`](../docs/SYNC_MANUAL_ACCEPTANCE.md) 在实际 Mac/Windows 同步电脑或本文所述
+  受控 Linux X display 上仅对 PDD 执行：逐账号 login-check 手工登录 → dry-run 20–30 条真实订单 → 核对报告 → 单账号
   commit --from-report；1688 改在服务器按 [`docs/ALI1688_OPEN_API.md`](../docs/ALI1688_OPEN_API.md) 验收；
 - 真实页面结构不一致时程序会以 `SCHEMA_CHANGED` 熔断，需按真实页面调整对应 adapter 选择器并补充脱敏 fixture 后重新跑测试；
 - PDD 手工验收通过后才评估系统计划任务；1688 是否定时由 backend 的独立配置控制。
@@ -50,8 +50,8 @@
 ## 环境要求
 
 - Node.js 20 LTS（或更高）；
-- macOS 或 Windows 10/11（运行同步时），以及能够显示真实浏览器窗口的桌面会话；
-- 纯 Server/无桌面环境不属于第一阶段运行目标。
+- macOS、Windows 10/11，或带受控 X display 的 Linux；同步时必须能看到真实浏览器窗口；
+- Linux Server 只能按本文“Linux 服务器人工试验”配置 Xvfb/noVNC。没有 `DISPLAY` 的纯无头模式仍不支持。
 
 ## 安装
 
@@ -68,6 +68,7 @@ npm run doctor                                  # 额外检查本机 Chromium �
 npm run doctor -- --platform pdd                # 只检查 pdd 一项
 npm run accounts -- --platform pdd              # 列出账号，不启动浏览器
 npm run login-check -- --platform pdd --account pdd-main
+npm run login-check -- --platform pdd --account pdd-main --wait-seconds 900 # SSH/noVNC：无需终端按 Enter
 npm run sync-once -- --platform pdd --account pdd-main --mode dry-run
 npm run sync-once -- --platform pdd --account pdd-main --mode commit --from-report .\state\snapshot-pdd-pdd-main-<batch_id>.json --yes
 npm run sync-all -- --platform pdd --mode dry-run # 严格串行检查全部账号；不支持 commit
@@ -96,12 +97,17 @@ SYNC_PAGE_DELAY_MS=2500
 SYNC_MIN_INTERVAL_MINUTES=15
 ARRIVAL_STATE_DIR=state
 ARRIVAL_LOG_DIR=logs
+# Linux 服务器使用 Xvfb 时设置：PDD_BROWSER_DISPLAY=:99
+# 二选一；通常都不设置，使用 Playwright 随包 Chromium
+# PDD_BROWSER_CHANNEL=chrome
+# PDD_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ```
 
 ### 拼多多多账号配置
 
-第一阶段仍在运行同步端的 Mac/Windows 上保留真实、可见、持久化的 Playwright profile；服务器只接收
-规范化的业务订单和账号状态，不接收 Cookie、localStorage 或 profile。创建
+默认仍在运行同步端的 Mac/Windows 上保留真实、可见、持久化的 Playwright profile；受控 Linux
+服务器试验也必须把 profile 保存在运行同步端的专用本地目录。无论运行位置，服务端业务 API 都只接收
+规范化订单和账号状态，不接收 Cookie、localStorage 或 profile。创建
 `C:\ArrivalLedger\config\pdd-accounts.json`：
 
 ```json
@@ -140,8 +146,74 @@ ARRIVAL_LOG_DIR=logs
   `--account` 和 `--from-report` 的 `sync-once --mode commit --yes`。
 
 管理员网页中的“拼多多账号”只登记相同的稳定 `account_key` 和显示名称，并展示同步器上报的状态；
-网页不会保存 `profile_dir`、密码、Cookie 或登录态，也不会远程启动浏览器。远程 noVNC、服务器端
-Playwright、Cookie 注入、定时 dry-run/commit 均未实现。
+网页不会保存 `profile_dir`、密码、Cookie 或登录态，也不会远程启动浏览器。Linux 服务器试验的 noVNC、
+X display 和 CLI 由服务器管理员通过 SSH 管理；网页控制浏览器、Cookie 注入和定时 dry-run/commit 均未实现。
+
+### 浏览器运行配置
+
+- 默认不配置选择器，使用 `npx playwright install chromium` 安装的 Playwright Chromium；
+- `PDD_BROWSER_CHANNEL=chrome` 可选择 Playwright 支持的已安装 Chrome/Edge channel；
+- `PDD_BROWSER_EXECUTABLE_PATH=/绝对路径` 可选择 Chromium 系可执行文件；它与 channel 互斥；
+- Linux 可用 `PDD_BROWSER_DISPLAY=:99` 指定 Xvfb display。未设置时继承进程的 `DISPLAY`；
+- 同步始终是 `headless: false`。这些配置不会启用隐藏浏览器，也不会改变验证码人工处理边界；
+- 浏览器子进程不会继承名称含 `TOKEN`、`SECRET`、`PASSWORD`、`CREDENTIAL` 的环境变量或
+  `ARRIVAL_SYNC_WORKER_KEY`，但会保留 `PATH`、`HOME`、`DISPLAY` 等运行所需变量；
+- 非离线 `doctor` 会用临时 profile 真实启动并关闭一次同样的可见 persistent browser，但不会访问拼多多。
+
+## Linux 服务器人工试验
+
+这条路径用于先验证服务器 IP、真实页面结构和登录风控，暂不代表可以无人值守。建议使用专用、非 root
+系统用户运行同步端，并把账号清单、profiles、state、logs 都放在该用户的私有目录（目录 `0700`，文件
+`0600`）。不要复用到货管家后端容器，也不要把 profile 加入服务器常规备份。
+
+1. 安装 Node.js 20+，在 `sync-agent` 执行：
+
+   ```bash
+   npm ci
+   npx playwright install --with-deps chromium
+   ```
+
+2. 在服务器启动一个持久 Xvfb display、轻量窗口管理器和 VNC/noVNC。VNC 与 noVNC 必须只监听
+   `127.0.0.1`，并设置 VNC 密码；禁止把 5900/6080 直接开放到公网。示意拓扑：
+
+   ```text
+   Chromium (DISPLAY=:99) → Xvfb :99 → x11vnc 127.0.0.1:5900
+                                          ↑
+   Mac 浏览器 ← SSH tunnel 6080 ← noVNC 127.0.0.1:6080
+   ```
+
+3. Mac 建立 SSH 隧道后再打开 noVNC：
+
+   ```bash
+   ssh -L 6080:127.0.0.1:6080 <server-user>@<server-ip>
+   ```
+
+   浏览器只访问 `http://127.0.0.1:6080/vnc.html`。SSH 连接断开后入口随即不可达。
+
+4. 在服务器的 `.env.local` 设置 `PDD_BROWSER_DISPLAY=:99`，然后验证真实可见启动：
+
+   ```bash
+   npm run doctor -- --platform pdd
+   npm run accounts -- --platform pdd
+   ```
+
+   `doctor` 必须显示 `headed chromium: OK`。只运行 `doctor --offline` 不能证明 X display 可用。
+
+5. noVNC 窗口保持打开，服务器终端执行：
+
+   ```bash
+   npm run login-check -- --platform pdd --account pdd-main --wait-seconds 900
+   ```
+
+   程序只轮询当前页面的可见 DOM，最多等待 900 秒；不会刷新页面、填写账号、扫描二维码或处理验证码。
+   登录完成会提前退出；超时会关闭浏览器并保留 profile，下次等待账号冷却后重试。交互式 SSH 终端也可
+   省略 `--wait-seconds`，完成登录后按 Enter。
+
+6. 首次只验证一个账号。等页面访问冷却结束后执行一次 `dry-run`，人工检查报告，再在 30 分钟内按原
+   命令 commit。服务器 IP 若出现风控或验证码，立即停止，不连续重试，回退到 Mac/Windows 同步电脑。
+
+当前仍没有 `sync-all --mode commit`、后台自动确认或无人值守登录。真实单账号稳定验收完成前，不要添加
+systemd 定时任务。
 
 兼容旧安装：如果没有设置 `PDD_ACCOUNTS_FILE`，原来的 `PDD_ACCOUNT_KEY`、`PDD_PROFILE_DIR` 和
 不带 `--account` 的命令保持原样。设置多账号文件后，若清单包含多个账号，单账号命令必须明确传
@@ -163,7 +235,8 @@ Playwright、Cookie 注入、定时 dry-run/commit 均未实现。
 - 只有 PDD 需要浏览器 profile；1688 授权配置和游标由后端管理；
 - worker key 的明文只保存在同步电脑受权限保护的 `.env.local` 和服务器受限 `.env`；
   数据库只保存其摘要，日志和输出中始终脱敏；
-- 公网隧道使用时 `ARRIVAL_API_BASE_URL` 必须为 `https://`。
+- 经公网访问到货管家 API 时 `ARRIVAL_API_BASE_URL` 必须为 `https://`；与后端位于同一台服务器、同一条
+  私有 Docker 网络时可使用内部地址 `http://backend:8000`。
 
 ## 目录
 
@@ -206,7 +279,7 @@ tests/            脱敏 fixture 与单元/适配器测试
 ## 隐私警告
 
 - `state\report-*.json` 与 `state\snapshot-*.json` 包含**真实订单号、商品标题和运单号**；
-  这些文件只属于同步电脑，严禁分享、截图外发或提交 Git（已被 .gitignore 排除）。
+  这些文件只属于实际同步运行端，严禁分享、截图外发或提交 Git（已被 .gitignore 排除）。
 - `state\diagnostics\structure-*.json` 不含自由文本、原始 class、属性值或 URL 路径，但分享前仍应
   人工检查；POSIX 使用 `0700/0600`，Windows 必须按安装教程用 NTFS ACL 限制 `state`/`logs`。
 - `logs\sync-agent.jsonl` 已自动脱敏，但报告文件是明文业务数据，处理时按真实订单对待。
@@ -214,12 +287,13 @@ tests/            脱敏 fixture 与单元/适配器测试
 ## 安全红线
 
 
-- 密码、Cookie、登录态、profile 永远只留在 Mac/Windows 同步电脑，不上传、不提交 Git、不写日志；
+- 密码、Cookie、登录态、profile 永远只留在实际同步运行端，不进入后端 API/业务数据库、不提交 Git、
+  不写日志；桌面端 profile 不复制到 Linux，服务器 profile 只通过服务器官方登录页生成；
 - 日志采用 JSON Lines 并自动打码 Authorization/手机号/长数字串/敏感键名；
 - 同一平台同一 profile 同时只允许一个同步进程（lock 文件）；
 - 只读、低频、手动确认；`login-check` 只保留可见窗口供用户本人处理验证，任何 dry-run/capture
   检测到验证码或风控都会立即熔断，不点击、不刷新、不重试。
 - 1688 不在本同步端中运行；后端 API 的网络/429/5xx 重试和风控错误见
   [`docs/ALI1688_OPEN_API.md`](../docs/ALI1688_OPEN_API.md)。
-- 第一阶段没有远程 noVNC、服务器浏览器、Cookie 注入或定时 commit；不要用自建脚本绕开
-  dry-run → 人工核对 → commit。
+- Linux 服务器只允许通过回环地址 + SSH 隧道访问管理员自行配置的 noVNC；产品网页不会暴露或控制它。
+  没有 Cookie 注入或定时 commit；不要用自建脚本绕开 dry-run → 人工核对 → commit。

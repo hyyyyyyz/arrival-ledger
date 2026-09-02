@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   createPlatformAccount,
+  createManualOrderBatch,
   createUser,
   getCurrentSession,
   getDashboardStats,
@@ -205,6 +206,37 @@ describe('platform account management', () => {
       body: JSON.stringify({ platform: 'pdd', account_key: 'pdd-main', display_label: '主采购账号' }),
     }))
     expect(String(fetchMock.mock.calls[1]?.[1]?.body)).not.toMatch(/password|cookie|token/i)
+  })
+})
+
+describe('manual order batch import', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('posts one idempotent batch request to the backend contract', async () => {
+    const response = {
+      client_batch_id: 'manual-batch-12345678',
+      idempotent_replay: false,
+      total_count: 1,
+      unique_count: 1,
+      created_count: 1,
+      idempotent_count: 0,
+      duplicate_count: 0,
+      failed_count: 0,
+      items: [{ input_index: 1, status: 'CREATED', tracking_no: 'SF12345678' }],
+    }
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(response), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const request = {
+      client_batch_id: 'manual-batch-12345678',
+      rows: [{ row_number: 2, tracking_no: 'SF12345678', product_name: '办公用品' }],
+    }
+    await expect(createManualOrderBatch(request)).resolves.toEqual(response)
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/manual-orders/batch',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify(request) }),
+    )
   })
 })
 

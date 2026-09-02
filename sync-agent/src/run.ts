@@ -8,7 +8,7 @@ import type { PlatformAdapter } from "./adapters/base.js";
 import { getAdapter } from "./adapters/index.js";
 import { launchSyncBrowser, type SyncBrowser } from "./browser/context.js";
 import { checkPageState } from "./browser/guards.js";
-import type { SyncConfig } from "./config.js";
+import type { BrowserRuntimeConfig, SyncConfig } from "./config.js";
 import {
   buildUnifiedOrder,
   dedupeOrders,
@@ -29,6 +29,7 @@ import {
   buildSnapshot,
   evaluateSnapshotTime,
   readSnapshot,
+  removeSnapshot,
   snapshotToBatch,
   verifySnapshot,
   writeSnapshot,
@@ -39,7 +40,10 @@ import { loadCursor, updateCursor } from "./state/cursor.js";
 import { reservePlatformAccess } from "./state/platform_access.js";
 import { postBatch, TransportError } from "./transport.js";
 
-export type BrowserLauncher = (profileDir: string) => Promise<SyncBrowser>;
+export type BrowserLauncher = (
+  profileDir: string,
+  runtime?: BrowserRuntimeConfig,
+) => Promise<SyncBrowser>;
 
 export interface RunOptions {
   config: SyncConfig;
@@ -230,7 +234,7 @@ async function runDryRun(options: RunOptions): Promise<RunOutcome> {
         report: buildReport("sync-once", platform, "dry-run", null, "DISABLED", "RATE_LIMITED", startedAt, emptyCounts(), []),
       };
     }
-    browser = await launcher(profileDir);
+    browser = await launcher(profileDir, config.browser);
     const page = browser.context.pages()[0] ?? (await browser.context.newPage());
     try {
       await adapter.openOrders(page, {
@@ -760,6 +764,20 @@ async function runCommit(options: RunOptions): Promise<RunOutcome> {
         options.snapshotPath,
       );
       writeReportFile(config, platform, report, batch.orders, logger);
+      try {
+        removeSnapshot(options.snapshotPath);
+      } catch (error) {
+        // The server has already accepted the idempotent batch and the cursor
+        // has advanced.  Do not report a false upload failure, but make the
+        // privacy cleanup problem visible to the operator.
+        logger.warn({
+          command: "sync-once",
+          platform,
+          batch_id: snapshot.batch_id,
+          message: `server accepted the batch but the private snapshot could not be removed: ${(error as Error).message}`,
+          error_code: "SNAPSHOT_CLEANUP_FAILED",
+        });
+      }
       return { exitCode: 0, report };
     } catch (error) {
       const transport = error instanceof TransportError ? error : null;

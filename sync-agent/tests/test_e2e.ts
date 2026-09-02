@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -233,6 +233,7 @@ describe("sync-agent against a contract-compliant mock server", () => {
     ) as { last_status: string; last_batch_id: string | null };
     expect(cursor.last_status).toBe("OK");
     expect(cursor.last_batch_id).toBe(snapshot!.batch_id);
+    expect(existsSync(snapshotPath)).toBe(false);
   });
 
   it("replays an identical batch id with the original counts", async () => {

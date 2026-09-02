@@ -9,7 +9,7 @@ import {
   readFileSync,
   realpathSync,
 } from "node:fs";
-import { dirname, join, parse as parsePath, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse as parsePath, resolve } from "node:path";
 
 import { LIMITS, PLATFORMS, type Platform } from "./models.js";
 import { inspectProfilePath } from "./profile_path.js";
@@ -29,6 +29,30 @@ export interface SyncConfig {
   order_list_urls: Record<Platform, string>;
   pdd_accounts_file: string | null;
   pdd_accounts: PddAccountConfig[];
+  browser: BrowserRuntimeConfig;
+}
+
+export const BROWSER_CHANNELS = [
+  "chromium",
+  "chrome",
+  "chrome-beta",
+  "chrome-dev",
+  "chrome-canary",
+  "msedge",
+  "msedge-beta",
+  "msedge-dev",
+  "msedge-canary",
+] as const;
+
+export type BrowserChannel = (typeof BROWSER_CHANNELS)[number];
+
+export interface BrowserRuntimeConfig {
+  /** Linux X display used by the visible browser, for example :99. */
+  display: string | null;
+  /** Optional Playwright browser channel. Null uses bundled Chromium. */
+  channel: BrowserChannel | null;
+  /** Optional absolute Chromium-family executable. Mutually exclusive with channel. */
+  executable_path: string | null;
 }
 
 export interface PddAccountConfig {
@@ -51,6 +75,7 @@ const ACCOUNT_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const MAX_ACCOUNTS_FILE_BYTES = 256 * 1024;
 const MAX_PDD_ACCOUNTS = 50;
 const DISPLAY_LABEL_MAX_LENGTH = 128;
+const DISPLAY_PATTERN = /^(?:[A-Za-z0-9._-]+)?:\d+(?:\.\d+)?$/;
 
 export const DEFAULT_ORDER_LIST_URLS: Record<Platform, string> = {
   pdd: "https://mobile.yangkeduo.com/orders.html",
@@ -425,6 +450,47 @@ export function loadConfig(
   const env = { ...fileValues, ...(options.env ?? process.env) };
   const accountsFileRaw = env["PDD_ACCOUNTS_FILE"]?.trim() ?? "";
 
+  const browserDisplayRaw = env["PDD_BROWSER_DISPLAY"]?.trim() ?? "";
+  const browserDisplay = browserDisplayRaw.length === 0 ? null : browserDisplayRaw;
+  if (browserDisplay !== null && !DISPLAY_PATTERN.test(browserDisplay)) {
+    issues.push({
+      field: "PDD_BROWSER_DISPLAY",
+      message: "must be an X display such as :99 or localhost:10.0",
+      severity: "FAIL",
+    });
+  }
+
+  const browserChannelRaw = env["PDD_BROWSER_CHANNEL"]?.trim().toLowerCase() ?? "";
+  const browserChannel = browserChannelRaw.length === 0
+    ? null
+    : BROWSER_CHANNELS.includes(browserChannelRaw as BrowserChannel)
+      ? browserChannelRaw as BrowserChannel
+      : null;
+  if (browserChannelRaw.length > 0 && browserChannel === null) {
+    issues.push({
+      field: "PDD_BROWSER_CHANNEL",
+      message: `must be one of: ${BROWSER_CHANNELS.join(", ")}`,
+      severity: "FAIL",
+    });
+  }
+
+  const browserExecutableRaw = env["PDD_BROWSER_EXECUTABLE_PATH"]?.trim() ?? "";
+  const browserExecutablePath = browserExecutableRaw.length === 0 ? null : browserExecutableRaw;
+  if (browserExecutablePath !== null && !isAbsolute(browserExecutablePath)) {
+    issues.push({
+      field: "PDD_BROWSER_EXECUTABLE_PATH",
+      message: "must be an absolute path",
+      severity: "FAIL",
+    });
+  }
+  if (browserChannelRaw.length > 0 && browserExecutablePath !== null) {
+    issues.push({
+      field: "PDD_BROWSER_CHANNEL/PDD_BROWSER_EXECUTABLE_PATH",
+      message: "set only one browser selector; omit both to use Playwright bundled Chromium",
+      severity: "FAIL",
+    });
+  }
+
   const apiBaseUrlRaw = env["ARRIVAL_API_BASE_URL"] ?? "http://192.168.1.5:8766";
   const api_base_url = apiBaseUrlRaw.trim().replace(/\/+$/, "");
   if (!/^https?:\/\/[^\s]+$/.test(api_base_url)) {
@@ -512,6 +578,11 @@ export function loadConfig(
     order_list_urls,
     pdd_accounts_file: null,
     pdd_accounts: [],
+    browser: {
+      display: browserDisplay,
+      channel: browserChannel,
+      executable_path: browserExecutablePath,
+    },
   };
 
   if (accountsFileRaw.length > 0) {

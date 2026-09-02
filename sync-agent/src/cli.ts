@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, accessSync, constants } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, accessSync, constants, rmSync } from "node:fs";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 
 import {
@@ -11,6 +12,13 @@ import {
   type SyncConfig,
 } from "./config.js";
 import { runCapturePage } from "./capture_page.js";
+import {
+  browserRuntimeLabel,
+  effectiveBrowserDisplay,
+  headedRuntimeIssue,
+  launchSyncBrowser,
+  type SyncBrowser,
+} from "./browser/context.js";
 import { runLoginCheck as runLoginCheckFlow } from "./login_check.js";
 import { JsonLogger } from "./log.js";
 import { isPlatform, type Platform } from "./models.js";
@@ -30,7 +38,7 @@ const HELP = `arrival-ledger sync-agent (browser sync MVP)
 Usage:
   sync-agent doctor [--offline] [--platform pdd]
   sync-agent accounts --platform pdd
-  sync-agent login-check --platform pdd [--account pdd-main]
+  sync-agent login-check --platform pdd [--account pdd-main] [--wait-seconds 900]
   sync-agent capture-page --platform pdd
   sync-agent sync-once --platform pdd --mode dry-run [--account pdd-main]
   sync-agent sync-once --platform pdd --mode commit --from-report <snapshot> --yes
@@ -57,6 +65,8 @@ Flags:
   --offline       doctor: skip the Chromium check
   --platform      pdd (1688 browser sync is retired; use the backend Open API)
   --account       PDD account_key from PDD_ACCOUNTS_FILE
+  --wait-seconds  login-check: watch the already-open visible page for 1-3600s
+                  instead of waiting for terminal Enter (no refresh/captcha action)
   --mode          dry-run | commit
   --from-report   path to the dry-run snapshot (required for commit)
   --yes           confirm commit after reviewing the dry-run report
@@ -95,27 +105,38 @@ function ensureWritableDirectory(path: string): { state: DoctorCheck["state"]; d
   }
 }
 
-async function checkLocalChromium(): Promise<{ state: DoctorCheck["state"]; detail: string }> {
-  let chromium: typeof import("playwright").chromium | null = null;
+async function checkLocalChromium(
+  config: SyncConfig,
+): Promise<{ state: DoctorCheck["state"]; detail: string }> {
+  const runtimeIssue = headedRuntimeIssue(config.browser);
+  if (runtimeIssue !== null) return { state: "FAIL", detail: runtimeIssue };
+  let browser: SyncBrowser | null = null;
+  let temporaryProfile: string | null = null;
   try {
-    chromium = (await import("playwright")).chromium;
-  } catch (error) {
+    temporaryProfile = mkdtempSync(join(config.state_dir, ".doctor-browser-"));
+    browser = await launchSyncBrowser(temporaryProfile, config.browser);
+    const version = browser.context.browser()?.version() ?? "unknown version";
+    const display = effectiveBrowserDisplay(config.browser);
     return {
-      state: "FAIL",
-      detail: `playwright module unavailable: ${(error as Error).message}`,
+      state: "OK",
+      detail: `${browserRuntimeLabel(config.browser)} ${version}; visible launch succeeded${display === null ? "" : ` on DISPLAY=${display}`}`,
     };
-  }
-  let browser: import("playwright").Browser | null = null;
-  try {
-    browser = await chromium.launch({ headless: true });
-    return { state: "OK", detail: `chromium ${browser.version()}` };
   } catch (error) {
     return {
       state: "FAIL",
-      detail: `cannot launch chromium: ${(error as Error).message}. Run "npx playwright install chromium" on this machine.`,
+      detail: `cannot launch the configured visible Chromium: ${(error as Error).message}. Install it with "npx playwright install chromium" (or fix the configured channel/executable and X display).`,
     };
   } finally {
     await browser?.close().catch(() => undefined);
+    if (temporaryProfile !== null) {
+      // Browser shutdown can briefly leave files busy on Windows.  A doctor
+      // cleanup failure must not turn a successful browser check into a crash.
+      try {
+        rmSync(temporaryProfile, { recursive: true, force: true });
+      } catch {
+        // The private temporary profile is best-effort cleanup only.
+      }
+    }
   }
 }
 
@@ -251,12 +272,12 @@ async function runDoctor(options: {
   }
 
   if (!options.offline) {
-    checks.push({ label: "chromium", ...(await checkLocalChromium()) });
+    checks.push({ label: "headed chromium", ...(await checkLocalChromium(config)) });
   } else {
     checks.push({
-      label: "chromium",
+      label: "headed chromium",
       state: "WARN",
-      detail: "skipped (--offline); run without --offline on the Mac/Windows sync computer to verify Chromium",
+      detail: "skipped (--offline); run without --offline in the actual desktop/Xvfb session to verify a visible launch",
     });
   }
 
@@ -282,7 +303,11 @@ function selectedPddConfig(
   return { config: configForPddAccount(config, selected.account), account: selected.account };
 }
 
-async function runLoginCheckCommand(platform: Platform, accountKey?: string): Promise<number> {
+async function runLoginCheckCommand(
+  platform: Platform,
+  accountKey?: string,
+  waitSeconds?: number,
+): Promise<number> {
   const { config, issues } = loadConfig();
   const configExit = requireValidConfig(issues);
   if (configExit !== null) return configExit;
@@ -291,7 +316,14 @@ async function runLoginCheckCommand(platform: Platform, accountKey?: string): Pr
   if (platform !== "pdd") return fail("only PDD login-check is supported", 1);
   const selected = selectedPddConfig(config, accountKey);
   if ("error" in selected) return fail(selected.error, 1);
-  const outcome = await runLoginCheckFlow({ config: selected.config, platform, logger });
+  const outcome = await runLoginCheckFlow({
+    config: selected.config,
+    platform,
+    logger,
+    ...(waitSeconds === undefined
+      ? {}
+      : { nonInteractiveWait: { timeout_ms: waitSeconds * 1000 } }),
+  });
   if (outcome.state !== null && outcome.checkedAt !== null) {
     await postPddAccountStatusBestEffort({
       config,
@@ -386,6 +418,7 @@ async function main(): Promise<number> {
       offline: { type: "boolean", default: false },
       platform: { type: "string" },
       account: { type: "string" },
+      "wait-seconds": { type: "string" },
       mode: { type: "string" },
       "from-report": { type: "string" },
       yes: { type: "boolean", default: false },
@@ -412,6 +445,19 @@ async function main(): Promise<number> {
   if (platform === "1688") {
     return fail("1688 browser sync is retired; configure the backend official Open API (see docs/ALI1688_OPEN_API.md)", 1);
   }
+  let waitSeconds: number | undefined;
+  if (values["wait-seconds"] !== undefined) {
+    if (!/^\d+$/.test(values["wait-seconds"])) {
+      return fail("--wait-seconds must be an integer between 1 and 3600");
+    }
+    waitSeconds = Number.parseInt(values["wait-seconds"], 10);
+    if (waitSeconds < 1 || waitSeconds > 3600) {
+      return fail("--wait-seconds must be an integer between 1 and 3600");
+    }
+    if (command !== "login-check") {
+      return fail("--wait-seconds is only valid with login-check");
+    }
+  }
 
   switch (command) {
     case "doctor":
@@ -422,7 +468,7 @@ async function main(): Promise<number> {
       return runAccountsCommand();
     case "login-check":
       if (platform === null) return fail(`--platform is required for login-check`);
-      return runLoginCheckCommand(platform, values.account);
+      return runLoginCheckCommand(platform, values.account, waitSeconds);
     case "capture-page":
       if (platform === null) return fail(`--platform is required for capture-page`);
       return runCapturePageCommand(platform, values.account);

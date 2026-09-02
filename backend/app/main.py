@@ -36,10 +36,22 @@ from .ali1688_config import Ali1688Config, Ali1688ConfigError, load_config
 from .ali1688_client import ClientLimits
 from .ali1688_sync import ensure_state, sync_config
 from .database import Database
+from .manual_order_batch import (
+    expand_manual_batch_inputs,
+    manual_batch_event_id,
+    manual_batch_payload_digest,
+    read_manual_batch_payload,
+    manual_tracking_format_error,
+    validate_manual_batch_input,
+    ManualBatchValidationFailure,
+)
 from .schemas import (
     AuthResponse,
     DashboardStatsOut,
     LoginRequest,
+    ManualOrderBatchCreate,
+    ManualOrderBatchCreateResponse,
+    ManualOrderBatchItemResult,
     ManualOrderCreate,
     ManualOrderCreateResponse,
     OrderArrivalAuditEventOut,
@@ -1128,6 +1140,222 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             raise RuntimeError("platform account could not be read")
         return _platform_account_from_row(row)
 
+    def persist_manual_order(
+        payload: ManualOrderCreate,
+        connection: sqlite3.Connection,
+        user: AuthenticatedUser,
+        now: str,
+    ) -> ManualOrderCreateResponse:
+        """Persist one manual order inside a caller-owned write transaction."""
+        tracking_no = payload.tracking_no.strip()[:128]
+        tracking_format_error = manual_tracking_format_error(tracking_no)
+        if tracking_format_error is not None:
+            raise HTTPException(
+                status_code=422,
+                detail=tracking_format_error,
+            )
+        tracking_normalized = normalize_tracking_no(tracking_no)
+        if (
+            not 8 <= len(tracking_normalized) <= 32
+            or not any(character.isdigit() for character in tracking_normalized)
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="规范化运单号必须为 8–32 位英文字母/数字，且至少包含一个数字",
+            )
+        courier = payload.courier.strip()[:128] if payload.courier else None
+        courier_normalized = normalize_courier(courier or "")
+        product_name = payload.product_name.strip()[:256]
+        remark = payload.remark.strip()[:512] if payload.remark else None
+        order_key = "manual-" + hashlib.sha256(tracking_normalized.encode("utf-8")).hexdigest()[:40]
+        replay = connection.execute(
+            """
+            SELECT o.id, o.platform_order_id, oi.title, p.tracking_no, p.courier,
+                   d.remark
+            FROM manual_order_events e
+            JOIN purchase_orders o ON o.id = e.order_id
+            JOIN order_items oi ON oi.order_id = o.id
+            LEFT JOIN package_order_links pol ON pol.order_id = o.id
+            LEFT JOIN packages p ON p.id = pol.package_id
+            JOIN manual_order_details d ON d.order_id = o.id
+            WHERE e.client_event_id = ?
+            ORDER BY oi.id, p.id
+            LIMIT 1
+            """,
+            (payload.client_event_id,),
+        ).fetchone()
+        if replay is not None:
+            replay_courier = normalize_courier(replay["courier"] or "")
+            if (
+                normalize_tracking_no(replay["tracking_no"] or "") != tracking_normalized
+                or replay["title"] != product_name
+                or replay_courier != courier_normalized
+                or replay["remark"] != remark
+            ):
+                raise HTTPException(status_code=409, detail="client_event_id 已用于其他第三方订单")
+            return ManualOrderCreateResponse(
+                created=False,
+                idempotent_replay=True,
+                order_id=str(replay["id"]),
+                platform_order_id=replay["platform_order_id"],
+                tracking_no=replay["tracking_no"] or tracking_no,
+                product_name=replay["title"],
+                courier=replay["courier"],
+                source="THIRD_PARTY_MANUAL",
+            )
+
+        account = connection.execute(
+            """
+            SELECT id FROM platform_accounts
+            WHERE platform = 'other' AND account_key = 'manual'
+            """
+        ).fetchone()
+        if account is None:
+            account_id = connection.execute(
+                """
+                INSERT INTO platform_accounts(
+                    platform, account_key, display_label, source,
+                    created_at, updated_at
+                ) VALUES ('other', 'manual', '第三方/其他渠道', 'MANUAL', ?, ?)
+                """,
+                (now, now),
+            ).lastrowid
+        else:
+            account_id = account["id"]
+
+        existing_order = connection.execute(
+            """
+            SELECT o.id, o.platform_order_id, oi.title, d.courier, d.remark
+            FROM purchase_orders o
+            JOIN order_items oi ON oi.order_id = o.id
+            JOIN manual_order_details d ON d.order_id = o.id
+            WHERE o.platform_account_id = ? AND o.platform_order_id = ?
+            ORDER BY oi.id LIMIT 1
+            """,
+            (account_id, order_key),
+        ).fetchone()
+        if existing_order is not None:
+            if existing_order["title"] != product_name:
+                raise HTTPException(
+                    status_code=409,
+                    detail="该运单号已经登记过其他商品，请检查物流公司或商品名称",
+                )
+            raise HTTPException(status_code=409, detail="该运单号已经登记过，请勿重复录入")
+
+        platform_link = connection.execute(
+            """
+            SELECT pa.platform
+            FROM packages p
+            JOIN package_order_links l ON l.package_id = p.id
+            JOIN purchase_orders o ON o.id = l.order_id
+            JOIN platform_accounts pa ON pa.id = o.platform_account_id
+            WHERE p.tracking_no_normalized = ? AND pa.platform <> 'other'
+            LIMIT 1
+            """,
+            (tracking_normalized,),
+        ).fetchone()
+        if platform_link is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="该运单号已属于已同步的平台订单，不能重复登记为第三方订单",
+            )
+
+        manual_link = connection.execute(
+            """
+            SELECT o.id, oi.title, d.courier
+            FROM packages p
+            JOIN package_order_links l ON l.package_id = p.id
+            JOIN purchase_orders o ON o.id = l.order_id
+            JOIN order_items oi ON oi.order_id = o.id
+            JOIN manual_order_details d ON d.order_id = o.id
+            JOIN platform_accounts pa ON pa.id = o.platform_account_id
+            WHERE p.tracking_no_normalized = ? AND pa.platform = 'other'
+            LIMIT 1
+            """,
+            (tracking_normalized,),
+        ).fetchone()
+        if manual_link is not None:
+            raise HTTPException(status_code=409, detail="该运单号已经登记过，请勿重复录入")
+
+        package = connection.execute(
+            """
+            SELECT id, tracking_no, courier
+            FROM packages
+            WHERE tracking_no_normalized = ?
+            ORDER BY id LIMIT 1
+            """,
+            (tracking_normalized,),
+        ).fetchone()
+        if package is not None:
+            package_id = package["id"]
+            if courier and not package["courier"]:
+                connection.execute(
+                    "UPDATE packages SET courier = ?, courier_normalized = ?, updated_at = ? WHERE id = ?",
+                    (courier, courier_normalized, now, package_id),
+                )
+        else:
+            package_id = connection.execute(
+                """
+                INSERT INTO packages(
+                    courier, courier_normalized, tracking_no,
+                    tracking_no_normalized, package_status, source,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'MANUAL', 'THIRD_PARTY_MANUAL', ?, ?)
+                """,
+                (courier, courier_normalized, tracking_no, tracking_normalized, now, now),
+            ).lastrowid
+
+        order_id = connection.execute(
+            """
+            INSERT INTO purchase_orders(
+                platform_account_id, platform_order_id, ordered_at,
+                order_status, shop_name, source, last_seen_at,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, 'UNKNOWN', NULL, 'THIRD_PARTY_MANUAL', ?, ?, ?)
+            """,
+            (account_id, order_key, now, now, now, now),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO order_items(order_id, item_key, title, sku_text, quantity, unit_price)
+            VALUES (?, ?, ?, NULL, '1', NULL)
+            """,
+            (order_id, f"manual:{tracking_normalized}", product_name),
+        )
+        connection.execute(
+            """
+            INSERT INTO manual_order_details(
+                order_id, courier, remark, created_by_user_id,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (order_id, courier, remark, user.id, now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO package_order_links(package_id, order_id, order_item_id, created_at)
+            VALUES (?, ?, NULL, ?)
+            """,
+            (package_id, order_id, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO manual_order_events(client_event_id, order_id, actor_user_id, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (payload.client_event_id, order_id, user.id, now),
+        )
+        return ManualOrderCreateResponse(
+            created=True,
+            idempotent_replay=False,
+            order_id=str(order_id),
+            platform_order_id=order_key,
+            tracking_no=tracking_no,
+            product_name=product_name,
+            courier=courier,
+            source="THIRD_PARTY_MANUAL",
+        )
+
     @application.post(
         "/api/manual-orders",
         response_model=ManualOrderCreateResponse,
@@ -1138,229 +1366,281 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         request: Request,
         user: Annotated[AuthenticatedUser, Depends(require_user)],
     ) -> ManualOrderCreateResponse:
-        """Register a parcel purchased outside 1688/PDD.
-
-        The synthetic order identity is derived from the normalized tracking
-        number, so retries and separate browser clients cannot create a
-        second order for the same manually entered parcel. It is deliberately
-        kept separate from platform order ids and rejects collisions with a
-        real platform package.
-        """
-        tracking_no = payload.tracking_no.strip()[:128]
-        tracking_normalized = normalize_tracking_no(tracking_no)
-        if not tracking_normalized:
-            raise HTTPException(status_code=422, detail="tracking_no has no letters or digits")
-        courier = payload.courier.strip()[:128] if payload.courier else None
-        courier_normalized = normalize_courier(courier or "")
-        product_name = payload.product_name.strip()[:256]
-        remark = payload.remark.strip()[:512] if payload.remark else None
-        order_key = "manual-" + hashlib.sha256(tracking_normalized.encode("utf-8")).hexdigest()[:40]
-        now = db_timestamp(utc_now())
+        """Register a parcel purchased outside 1688/PDD."""
         database = _database(request)
-
+        now = db_timestamp(utc_now())
         with database.connect() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                replay = connection.execute(
-                    """
-                    SELECT o.id, o.platform_order_id, oi.title, p.tracking_no, p.courier,
-                           d.remark
-                    FROM manual_order_events e
-                    JOIN purchase_orders o ON o.id = e.order_id
-                    JOIN order_items oi ON oi.order_id = o.id
-                    LEFT JOIN package_order_links pol ON pol.order_id = o.id
-                    LEFT JOIN packages p ON p.id = pol.package_id
-                    JOIN manual_order_details d ON d.order_id = o.id
-                    WHERE e.client_event_id = ?
-                    ORDER BY oi.id, p.id
-                    LIMIT 1
-                    """,
-                    (payload.client_event_id,),
-                ).fetchone()
-                if replay is not None:
-                    replay_courier = normalize_courier(replay["courier"] or "")
-                    if (normalize_tracking_no(replay["tracking_no"] or "") != tracking_normalized
-                            or replay["title"] != product_name
-                            or replay_courier != courier_normalized
-                            or replay["remark"] != remark):
-                        connection.rollback()
-                        raise HTTPException(status_code=409, detail="client_event_id 已用于其他第三方订单")
-                    connection.commit()
-                    return ManualOrderCreateResponse(
-                        created=False,
-                        idempotent_replay=True,
-                        order_id=str(replay["id"]),
-                        platform_order_id=replay["platform_order_id"],
-                        tracking_no=replay["tracking_no"] or tracking_no,
-                        product_name=replay["title"],
-                        courier=replay["courier"],
-                        source="THIRD_PARTY_MANUAL",
-                    )
-
-                account = connection.execute(
-                    """
-                    SELECT id FROM platform_accounts
-                    WHERE platform = 'other' AND account_key = 'manual'
-                    """
-                ).fetchone()
-                if account is None:
-                    account_id = connection.execute(
-                        """
-                        INSERT INTO platform_accounts(
-                            platform, account_key, display_label, source,
-                            created_at, updated_at
-                        ) VALUES ('other', 'manual', '第三方/其他渠道', 'MANUAL', ?, ?)
-                        """,
-                        (now, now),
-                    ).lastrowid
-                else:
-                    account_id = account["id"]
-
-                existing_order = connection.execute(
-                    """
-                    SELECT o.id, o.platform_order_id, oi.title, d.courier, d.remark
-                    FROM purchase_orders o
-                    JOIN order_items oi ON oi.order_id = o.id
-                    JOIN manual_order_details d ON d.order_id = o.id
-                    WHERE o.platform_account_id = ? AND o.platform_order_id = ?
-                    ORDER BY oi.id LIMIT 1
-                    """,
-                    (account_id, order_key),
-                ).fetchone()
-                if existing_order is not None:
-                    if existing_order["title"] != product_name:
-                        connection.rollback()
-                        raise HTTPException(
-                            status_code=409,
-                            detail="该运单号已经登记过其他商品，请检查物流公司或商品名称",
-                        )
-                    connection.rollback()
-                    raise HTTPException(status_code=409, detail="该运单号已经登记过，请勿重复录入")
-
-                platform_link = connection.execute(
-                    """
-                    SELECT pa.platform
-                    FROM packages p
-                    JOIN package_order_links l ON l.package_id = p.id
-                    JOIN purchase_orders o ON o.id = l.order_id
-                    JOIN platform_accounts pa ON pa.id = o.platform_account_id
-                    WHERE p.tracking_no_normalized = ? AND pa.platform <> 'other'
-                    LIMIT 1
-                    """,
-                    (tracking_normalized,),
-                ).fetchone()
-                if platform_link is not None:
-                    connection.rollback()
-                    raise HTTPException(
-                        status_code=409,
-                        detail="该运单号已属于已同步的平台订单，不能重复登记为第三方订单",
-                    )
-
-                manual_link = connection.execute(
-                    """
-                    SELECT o.id, oi.title, d.courier
-                    FROM packages p
-                    JOIN package_order_links l ON l.package_id = p.id
-                    JOIN purchase_orders o ON o.id = l.order_id
-                    JOIN order_items oi ON oi.order_id = o.id
-                    JOIN manual_order_details d ON d.order_id = o.id
-                    JOIN platform_accounts pa ON pa.id = o.platform_account_id
-                    WHERE p.tracking_no_normalized = ? AND pa.platform = 'other'
-                    LIMIT 1
-                    """,
-                    (tracking_normalized,),
-                ).fetchone()
-                if manual_link is not None:
-                    connection.rollback()
-                    raise HTTPException(status_code=409, detail="该运单号已经登记过，请勿重复录入")
-
-                package = connection.execute(
-                    """
-                    SELECT id, tracking_no, courier
-                    FROM packages
-                    WHERE tracking_no_normalized = ?
-                    ORDER BY id LIMIT 1
-                    """,
-                    (tracking_normalized,),
-                ).fetchone()
-                if package is not None:
-                    package_id = package["id"]
-                    if courier and not package["courier"]:
-                        connection.execute(
-                            "UPDATE packages SET courier = ?, courier_normalized = ?, updated_at = ? WHERE id = ?",
-                            (courier, courier_normalized, now, package_id),
-                        )
-                else:
-                    package_id = connection.execute(
-                        """
-                        INSERT INTO packages(
-                            courier, courier_normalized, tracking_no,
-                            tracking_no_normalized, package_status, source,
-                            created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, 'MANUAL', 'THIRD_PARTY_MANUAL', ?, ?)
-                        """,
-                        (courier, courier_normalized, tracking_no, tracking_normalized, now, now),
-                    ).lastrowid
-
-                order_id = connection.execute(
-                    """
-                    INSERT INTO purchase_orders(
-                        platform_account_id, platform_order_id, ordered_at,
-                        order_status, shop_name, source, last_seen_at,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, 'UNKNOWN', NULL, 'THIRD_PARTY_MANUAL', ?, ?, ?)
-                    """,
-                    (account_id, order_key, now, now, now, now),
-                ).lastrowid
-                connection.execute(
-                    """
-                    INSERT INTO order_items(order_id, item_key, title, sku_text, quantity, unit_price)
-                    VALUES (?, ?, ?, NULL, '1', NULL)
-                    """,
-                    (order_id, f"manual:{tracking_normalized}", product_name),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO manual_order_details(
-                        order_id, courier, remark, created_by_user_id,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (order_id, courier, remark, user.id, now, now),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO package_order_links(package_id, order_id, order_item_id, created_at)
-                    VALUES (?, ?, NULL, ?)
-                    """,
-                    (package_id, order_id, now),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO manual_order_events(client_event_id, order_id, actor_user_id, created_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (payload.client_event_id, order_id, user.id, now),
-                )
+                result = persist_manual_order(payload, connection, user, now)
                 connection.commit()
+                return result
             except HTTPException:
+                connection.rollback()
                 raise
             except sqlite3.IntegrityError as exc:
                 connection.rollback()
-                raise HTTPException(status_code=409, detail="该第三方订单已存在，请刷新后重试") from exc
+                raise HTTPException(
+                    status_code=409,
+                    detail="该第三方订单已存在，请刷新后重试",
+                ) from exc
             except BaseException:
                 connection.rollback()
                 raise
 
-        return ManualOrderCreateResponse(
-            created=True,
-            idempotent_replay=False,
-            order_id=str(order_id),
-            platform_order_id=order_key,
-            tracking_no=tracking_no,
-            product_name=product_name,
-            courier=courier,
-            source="THIRD_PARTY_MANUAL",
+    def manual_batch_conflict_code(
+        *,
+        connection: sqlite3.Connection,
+        tracking_no_normalized: str,
+        client_event_id: str,
+    ) -> Literal[
+        "PLATFORM_ORDER_EXISTS",
+        "MANUAL_ORDER_EXISTS",
+        "EVENT_CONFLICT",
+        "DATABASE_CONFLICT",
+    ]:
+        event = connection.execute(
+            "SELECT 1 FROM manual_order_events WHERE client_event_id = ?",
+            (client_event_id,),
+        ).fetchone()
+        if event is not None:
+            return "EVENT_CONFLICT"
+        platforms = connection.execute(
+            """
+            SELECT DISTINCT pa.platform
+            FROM packages p
+            JOIN package_order_links l ON l.package_id = p.id
+            JOIN purchase_orders o ON o.id = l.order_id
+            JOIN platform_accounts pa ON pa.id = o.platform_account_id
+            WHERE p.tracking_no_normalized = ?
+            """,
+            (tracking_no_normalized,),
+        ).fetchall()
+        if any(row["platform"] != "other" for row in platforms):
+            return "PLATFORM_ORDER_EXISTS"
+        if platforms:
+            return "MANUAL_ORDER_EXISTS"
+        return "DATABASE_CONFLICT"
+
+    @application.post(
+        "/api/manual-orders/batch",
+        response_model=ManualOrderBatchCreateResponse,
+        status_code=200,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": ManualOrderBatchCreate.model_json_schema()
+                    }
+                },
+            }
+        },
+    )
+    def create_manual_orders_batch(
+        request: Request,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+        payload: Annotated[
+            ManualOrderBatchCreate,
+            Depends(read_manual_batch_payload),
+        ],
+    ) -> ManualOrderBatchCreateResponse:
+        """Import bounded text or frontend-parsed spreadsheet rows.
+
+        Expected row conflicts are isolated with savepoints, while the batch
+        marker and all successful rows commit atomically. A canonical digest
+        prevents an idempotency key from being reused with different content
+        or by a different user.
+        """
+
+        inputs = expand_manual_batch_inputs(payload)
+        payload_sha256 = manual_batch_payload_digest(payload)
+        now = db_timestamp(utc_now())
+        database = _database(request)
+        results: list[ManualOrderBatchItemResult] = []
+        seen_tracking_numbers: set[str] = set()
+        unique_count = 0
+        created_count = 0
+        idempotent_count = 0
+        duplicate_count = 0
+        failed_count = 0
+
+        # One write transaction avoids up to 500 SQLite fsync cycles and keeps
+        # the accepted batch marker atomic with every successfully handled row.
+        with database.connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                existing_batch = connection.execute(
+                    """
+                    SELECT payload_sha256, actor_user_id, item_count
+                    FROM manual_order_batches
+                    WHERE client_batch_id = ?
+                    """,
+                    (payload.client_batch_id,),
+                ).fetchone()
+                if existing_batch is not None:
+                    if existing_batch["actor_user_id"] != user.id:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="client_batch_id 已由其他用户使用",
+                        )
+                    if (
+                        existing_batch["payload_sha256"] != payload_sha256
+                        or existing_batch["item_count"] != len(inputs)
+                    ):
+                        raise HTTPException(
+                            status_code=409,
+                            detail="client_batch_id 已用于其他批量录入内容",
+                        )
+                    batch_replay = True
+                else:
+                    connection.execute(
+                        """
+                        INSERT INTO manual_order_batches(
+                            client_batch_id, payload_sha256, actor_user_id,
+                            item_count, created_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            payload.client_batch_id,
+                            payload_sha256,
+                            user.id,
+                            len(inputs),
+                            now,
+                        ),
+                    )
+                    batch_replay = False
+
+                for raw_item in inputs:
+                    item = validate_manual_batch_input(raw_item)
+                    if isinstance(item, ManualBatchValidationFailure):
+                        failed_count += 1
+                        results.append(
+                            ManualOrderBatchItemResult(
+                                input_index=item.input_index,
+                                row_number=item.row_number,
+                                tracking_no=item.tracking_no,
+                                tracking_no_normalized=item.tracking_no_normalized,
+                                status="FAILED",
+                                error_code=item.error_code,
+                                message=item.message,
+                            )
+                        )
+                        continue
+
+                    if item.tracking_no_normalized in seen_tracking_numbers:
+                        duplicate_count += 1
+                        results.append(
+                            ManualOrderBatchItemResult(
+                                input_index=item.input_index,
+                                row_number=item.row_number,
+                                tracking_no=item.tracking_no,
+                                tracking_no_normalized=item.tracking_no_normalized,
+                                status="DUPLICATE_INPUT",
+                                product_name=item.product_name,
+                                courier=item.courier,
+                                message="同一批次中的重复运单号已跳过",
+                            )
+                        )
+                        continue
+
+                    seen_tracking_numbers.add(item.tracking_no_normalized)
+                    unique_count += 1
+                    client_event_id = manual_batch_event_id(
+                        payload.client_batch_id,
+                        item.tracking_no_normalized,
+                    )
+                    connection.execute("SAVEPOINT manual_batch_item")
+                    try:
+                        created = persist_manual_order(
+                            ManualOrderCreate(
+                                client_event_id=client_event_id,
+                                tracking_no=item.tracking_no,
+                                product_name=item.product_name,
+                                courier=item.courier,
+                                remark=item.remark,
+                            ),
+                            connection,
+                            user,
+                            now,
+                        )
+                    except HTTPException as exc:
+                        connection.execute("ROLLBACK TO SAVEPOINT manual_batch_item")
+                        connection.execute("RELEASE SAVEPOINT manual_batch_item")
+                        if exc.status_code != 409:
+                            raise
+                        failed_count += 1
+                        error_code = manual_batch_conflict_code(
+                            connection=connection,
+                            tracking_no_normalized=item.tracking_no_normalized,
+                            client_event_id=client_event_id,
+                        )
+                        messages = {
+                            "PLATFORM_ORDER_EXISTS": "该运单号已属于 1688 或拼多多订单",
+                            "MANUAL_ORDER_EXISTS": "该运单号已由其他手工录入创建",
+                            "EVENT_CONFLICT": "该批次条目的幂等标识已用于其他内容",
+                            "DATABASE_CONFLICT": "该运单号与现有数据冲突",
+                        }
+                        results.append(
+                            ManualOrderBatchItemResult(
+                                input_index=item.input_index,
+                                row_number=item.row_number,
+                                tracking_no=item.tracking_no,
+                                tracking_no_normalized=item.tracking_no_normalized,
+                                status="FAILED",
+                                product_name=item.product_name,
+                                courier=item.courier,
+                                error_code=error_code,
+                                message=messages[error_code],
+                            )
+                        )
+                        continue
+                    else:
+                        connection.execute("RELEASE SAVEPOINT manual_batch_item")
+
+                    if created.idempotent_replay:
+                        idempotent_count += 1
+                        item_status = "IDEMPOTENT"
+                        message = "该批次条目已处理，本次未重复创建"
+                    else:
+                        created_count += 1
+                        item_status = "CREATED"
+                        message = "第三方订单已创建"
+                    results.append(
+                        ManualOrderBatchItemResult(
+                            input_index=item.input_index,
+                            row_number=item.row_number,
+                            tracking_no=created.tracking_no,
+                            tracking_no_normalized=item.tracking_no_normalized,
+                            status=item_status,
+                            created=created.created,
+                            idempotent_replay=created.idempotent_replay,
+                            order_id=created.order_id,
+                            platform_order_id=created.platform_order_id,
+                            product_name=created.product_name,
+                            courier=created.courier,
+                            message=message,
+                        )
+                    )
+
+                connection.commit()
+            except HTTPException:
+                connection.rollback()
+                raise
+            except BaseException:
+                connection.rollback()
+                raise
+
+        return ManualOrderBatchCreateResponse(
+            client_batch_id=payload.client_batch_id,
+            idempotent_replay=batch_replay,
+            total_count=len(inputs),
+            unique_count=unique_count,
+            created_count=created_count,
+            idempotent_count=idempotent_count,
+            duplicate_count=duplicate_count,
+            failed_count=failed_count,
+            items=results,
         )
 
     @application.post("/api/auth/login", response_model=AuthResponse)

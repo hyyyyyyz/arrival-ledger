@@ -21,4 +21,12 @@ describe('page scrolling safeguards', () => {
     expect(filters).toContain('overflow-x: auto')
     expect(filters).toContain('overflow-y: hidden')
   })
+
+  it('lets the page scroll through manual previews and keeps full tracking numbers selectable', () => {
+    expect(declarations('.manual-preview-list')).not.toContain('overflow-y')
+    expect(declarations('.manual-preview-list')).not.toContain('max-height')
+    expect(declarations('.manual-preview-list strong')).toContain('overflow-x: auto')
+    expect(declarations('.manual-preview-list strong')).toContain('user-select: text')
+    expect(declarations('.manual-preview-list strong')).not.toContain('ellipsis')
+  })
 })

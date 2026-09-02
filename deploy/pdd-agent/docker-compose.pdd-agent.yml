@@ -1,0 +1,95 @@
+name: arrival-ledger-pdd
+
+services:
+  pdd-agent:
+    profiles:
+      - pdd-agent
+    build:
+      # pdd-agent.sh fixes the Compose project directory at the repository root.
+      context: .
+      dockerfile: deploy/pdd-agent/Dockerfile
+      args:
+        PDD_AGENT_UID: ${PDD_AGENT_UID:-10002}
+        PDD_AGENT_GID: ${PDD_AGENT_GID:-10002}
+    image: ${PDD_AGENT_IMAGE:-arrival-ledger-pdd-agent:local}
+    init: true
+    restart: unless-stopped
+    user: "${PDD_AGENT_UID:-10002}:${PDD_AGENT_GID:-10002}"
+    working_dir: /data/config
+    environment:
+      DISPLAY: ":99"
+      # compose exec does not inherit exports made by entrypoint.sh.  Keep
+      # Chromium's HOME/config and runtime sockets on writable tmpfs paths.
+      HOME: /tmp/pdd-home
+      XDG_RUNTIME_DIR: /tmp/pdd-runtime
+      PDD_DISPLAY_SIZE: ${PDD_DISPLAY_SIZE:-1280x900}
+      PDD_VNC_PASSWORD_FILE: /data/config/vnc-password
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${PDD_NOVNC_PORT:-6080}:6080"
+    volumes:
+      - type: bind
+        source: ${PDD_AGENT_DATA_ROOT:-/var/lib/arrival-ledger/pdd}/config
+        target: /data/config
+        read_only: true
+      - type: bind
+        source: ${PDD_AGENT_DATA_ROOT:-/var/lib/arrival-ledger/pdd}/profiles
+        target: /data/profiles
+      - type: bind
+        source: ${PDD_AGENT_DATA_ROOT:-/var/lib/arrival-ledger/pdd}/state
+        target: /data/state
+      - type: bind
+        source: ${PDD_AGENT_DATA_ROOT:-/var/lib/arrival-ledger/pdd}/logs
+        target: /data/logs
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,mode=1777
+      - /run/pdd-agent:rw,nosuid,nodev,noexec,size=4m,mode=700,uid=${PDD_AGENT_UID:-10002},gid=${PDD_AGENT_GID:-10002}
+    shm_size: ${PDD_AGENT_SHM_SIZE:-256m}
+    mem_limit: ${PDD_AGENT_MEMORY_LIMIT:-900m}
+    mem_reservation: ${PDD_AGENT_MEMORY_RESERVATION:-512m}
+    cpus: ${PDD_AGENT_CPU_LIMIT:-1.5}
+    pids_limit: ${PDD_AGENT_PIDS_LIMIT:-256}
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=${PDD_SECCOMP_PROFILE:?set PDD_SECCOMP_PROFILE to the pinned Playwright seccomp profile}
+    cap_drop:
+      - ALL
+    # Chromium's Linux sandbox chroots its zygote.  This is the only retained
+    # capability; the pinned seccomp profile still constrains the syscall set.
+    cap_add:
+      - SYS_CHROOT
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          const net = require('node:net');
+          const socket = net.createConnection({host: '127.0.0.1', port: 6080});
+          const done = (code) => { socket.destroy(); process.exit(code); };
+          socket.setTimeout(3000, () => done(1));
+          socket.once('connect', () => done(0));
+          socket.once('error', () => done(1));
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - arrival-ledger-app
+
+networks:
+  arrival-ledger-app:
+    external: true
+    name: ${ARRIVAL_LEDGER_APP_NETWORK:-arrival-ledger_app}

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import type { CreateManualOrderInput, ManualOrderCreateResponse, OrderMatch, Receipt, ReceiptTrackingUpdateInput, UploadQueueItem, User } from '@/types'
+import ManualOrderImport from '@/components/ManualOrderImport.vue'
+import type { CreateManualOrderInput, ManualOrderBatchCreateInput, ManualOrderBatchCreateResponse, ManualOrderCreateResponse, OrderMatch, Receipt, ReceiptTrackingUpdateInput, UploadQueueItem, User } from '@/types'
 import { ApiError } from '@/services/api'
 import { recognizeTrackingNo } from '@/services/barcode'
 import { compressImage } from '@/services/image'
@@ -14,11 +15,13 @@ const props = defineProps<{
   user: User
   saveServerTracking: (input: ReceiptTrackingUpdateInput) => Promise<Receipt>
   createManualOrder: (input: CreateManualOrderInput) => Promise<ManualOrderCreateResponse>
+  createManualOrderBatch: (input: ManualOrderBatchCreateInput) => Promise<ManualOrderBatchCreateResponse>
 }>()
 
 const emit = defineEmits<{
   changed: []
   serverChanged: []
+  authRequired: []
 }>()
 
 interface CaptureResult {
@@ -44,11 +47,6 @@ const latest = ref<CaptureResult | null>(null)
 const manualTracking = ref('')
 const manualSaving = ref(false)
 const captureError = ref('')
-const manualOrder = ref({ trackingNo: '', productName: '', courier: '', remark: '' })
-const manualOrderSaving = ref(false)
-const manualOrderMessage = ref('')
-const manualOrderEventId = ref('')
-const manualOrderEventPayload = ref('')
 
 interface GalleryPhoto {
   id: string
@@ -102,7 +100,9 @@ async function processPhoto(
     }
     emit('changed')
     let trackingNo: string | null = null
-    try { trackingNo = await recognizeTrackingNo(compressed.blob) } catch {
+    // Decode from the original file; the upload copy is intentionally
+    // compressed for mobile storage and network transfer.
+    try { trackingNo = await recognizeTrackingNo(file) } catch {
       captureError.value = '条码识别组件暂时不可用，照片仍会正常上传，可手工补录单号'
     }
     await uploadQueue.markReady(clientEventId, trackingNo)
@@ -216,48 +216,6 @@ async function uploadGallery(): Promise<void> {
   } finally {
     galleryProcessing.value = false
   }
-}
-
-async function createOtherOrder(): Promise<void> {
-  if (manualOrderSaving.value) return
-  manualOrderMessage.value = ''
-  const trackingNo = normalizeTrackingNo(manualOrder.value.trackingNo)
-  const productName = manualOrder.value.productName.trim()
-  if (!isPlausibleTrackingNo(trackingNo)) {
-    manualOrderMessage.value = '请检查运单号，通常应为 8–32 位且至少包含一个数字'
-    return
-  }
-  if (!productName) {
-    manualOrderMessage.value = '请填写商品名称'
-    return
-  }
-  const normalizedOrder = {
-    trackingNo,
-    productName,
-    courier: manualOrder.value.courier.trim(),
-    remark: manualOrder.value.remark.trim(),
-  }
-  manualOrderSaving.value = true
-  const eventPayload = JSON.stringify(normalizedOrder)
-  if (manualOrderEventPayload.value !== eventPayload) {
-    manualOrderEventPayload.value = eventPayload
-    manualOrderEventId.value = createId()
-  }
-  try {
-    await props.createManualOrder({
-      client_event_id: manualOrderEventId.value,
-      tracking_no: normalizedOrder.trackingNo,
-      product_name: normalizedOrder.productName,
-      courier: normalizedOrder.courier || undefined,
-      remark: normalizedOrder.remark || undefined,
-    })
-    manualOrderMessage.value = '第三方订单已加入订单列表'
-    manualOrder.value = { trackingNo: '', productName: '', courier: '', remark: '' }
-    manualOrderEventId.value = ''
-    manualOrderEventPayload.value = ''
-    emit('serverChanged')
-  } catch (error) { manualOrderMessage.value = error instanceof Error ? error.message : '录入失败，请重试' }
-  finally { manualOrderSaving.value = false }
 }
 
 async function saveManualTracking(): Promise<void> {
@@ -457,17 +415,13 @@ onBeforeUnmount(() => {
 
     <p v-if="captureError" class="form-error capture-error" role="alert">{{ captureError }}</p>
 
-    <details class="manual-order-panel">
-      <summary>其他渠道快递（手动录入）</summary>
-      <form class="manual-order-form" @submit.prevent="createOtherOrder">
-        <input v-model="manualOrder.trackingNo" required placeholder="运单号（必填）" aria-label="第三方运单号" />
-        <input v-model="manualOrder.productName" required placeholder="商品名称（必填）" aria-label="第三方商品名称" />
-        <input v-model="manualOrder.courier" placeholder="物流公司（可选）" aria-label="物流公司" />
-        <input v-model="manualOrder.remark" placeholder="备注（可选）" aria-label="备注" />
-        <button type="submit" :disabled="manualOrderSaving">{{ manualOrderSaving ? '保存中…' : '加入订单' }}</button>
-      </form>
-      <p v-if="manualOrderMessage" class="manual-order-message" role="status">{{ manualOrderMessage }}</p>
-    </details>
+    <ManualOrderImport
+      :owner-user-id="String(props.user.id)"
+      :create-manual-order="props.createManualOrder"
+      :create-manual-order-batch="props.createManualOrderBatch"
+      @imported="emit('serverChanged')"
+      @auth-required="emit('authRequired')"
+    />
 
     <article v-if="latest" class="capture-result" :class="[`result-${latest.stage.toLowerCase()}`, { duplicate: latest.duplicate }]">
       <img :src="latest.previewUrl" alt="刚拍摄的包裹面单" />

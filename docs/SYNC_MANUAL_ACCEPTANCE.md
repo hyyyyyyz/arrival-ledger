@@ -1,8 +1,8 @@
 # 平台订单同步手工验收清单
 
-验收范围分成两条互不依赖的路线：1688 在服务器调用官方 Open API；拼多多在 Mac/Windows 同步电脑的
-可见 Playwright 浏览器中同步。不要在同步电脑上运行 1688 浏览器命令。真实页面、token、订单号、运单号和截图不得
-进入 Git、Issue 或聊天。
+验收范围分成两条互不依赖的路线：1688 在服务器调用官方 Open API；拼多多在 Mac/Windows 桌面或
+Linux 服务器 Xvfb/noVNC 的可见 Playwright 浏览器中同步。不要在同步端运行 1688 浏览器命令。真实页面、
+token、订单号、运单号和截图不得进入 Git、Issue 或聊天。
 
 ## A. 1688 服务器 API 验收
 
@@ -27,10 +27,11 @@ docker compose run --rm backend python -m app.cli sync-once --all
 `logisticsBillNo` 优先且缺失时安全回退；重复运行不新增订单/商品/包裹；地址、电话、买卖双方联系方式
 不出现在数据库和日志；一个账号失败不影响其它账号。
 
-## B. 拼多多 Mac/Windows 多账号验收
+## B. 拼多多可见浏览器多账号验收
 
 先按 [`PDD_MULTI_ACCOUNT.md`](PDD_MULTI_ACCOUNT.md) 在管理员网页登记相同的稳定账号键，再在一台有
-桌面会话的 Mac 或 Windows 同步电脑配置 `PDD_ACCOUNTS_FILE`。Windows 首次安装细节另见
+桌面会话的 Mac/Windows 同步电脑，或按 [`PDD_SERVER_AGENT.md`](PDD_SERVER_AGENT.md) 在 Linux
+服务器 Agent 中配置 `PDD_ACCOUNTS_FILE`。Windows 首次安装细节另见
 [`WINDOWS_SYNC_FROM_SCRATCH.md`](WINDOWS_SYNC_FROM_SCRATCH.md)。每个账号必须使用不同的持久化 profile。
 
 ```bash
@@ -98,6 +99,6 @@ PDD sync-all dry-run：严格串行 / 失败；失败账号 N
 异常：<脱敏状态码和处理方式>
 ```
 
-当前没有 PDD 远程 noVNC、服务器端浏览器、Cookie 注入或计划任务 commit。只有服务器 API 与以上 PDD
-手工验收都通过后，才能把 macOS/Windows 计划任务作为新的开发阶段评估；仍须低频、串行、可停止，且
+当前有仅经 SSH 隧道访问的服务器 noVNC 监督式 Agent，但没有 Cookie 注入或计划任务 commit。只有服务器
+API 与以上 PDD 手工验收都通过后，才能把定时任务作为新的开发阶段评估；仍须低频、串行、可停止，且
 不能跳过 dry-run → 人工核对 → 单账号 commit。

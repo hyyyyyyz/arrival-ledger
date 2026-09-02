@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 from fastapi.testclient import TestClient
 
 from test_sync_api import batch_payload, post_batch
@@ -168,6 +172,471 @@ def test_third_party_order_rejects_tracking_collision_with_platform_order(
         },
     )
     assert response.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "tracking_no",
+    [
+        "9.818907591847E+12",
+        "9.818907591847 E+12",
+        "9818907591847.0",
+        "9818907591847,0",
+        "2026-09-02",
+        "02/09/2026",
+        "SF12345678/YT87654321",
+        "SF12345678\nYT87654321",
+        "运单号SF12345678",
+    ],
+)
+def test_single_manual_order_rejects_unsafe_tracking_number_formats(
+    authenticated_client: TestClient,
+    tracking_no: str,
+) -> None:
+    response = authenticated_client.post(
+        "/api/manual-orders",
+        json={
+            "client_event_id": f"single-coercion-{hashlib.sha256(tracking_no.encode()).hexdigest()[:16]}",
+            "tracking_no": tracking_no,
+            "product_name": "不应创建",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]
+
+
+def test_single_manual_order_rejects_implausible_normalized_tracking_number(
+    authenticated_client: TestClient,
+) -> None:
+    for index, tracking_no in enumerate(("1234567", "ABCDEFGH"), start=1):
+        response = authenticated_client.post(
+            "/api/manual-orders",
+            json={
+                "client_event_id": f"single-invalid-{index:04d}",
+                "tracking_no": tracking_no,
+                "product_name": "不应创建",
+            },
+        )
+        assert response.status_code == 422
+
+
+def test_manual_order_batch_requires_authentication(client: TestClient) -> None:
+    response = client.post(
+        "/api/manual-orders/batch",
+        json={
+            "client_batch_id": "manual-batch-unauthenticated-0001",
+            "tracking_text": "YT-UNAUTH-001",
+        },
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "tracking_text",
+    [
+        "9818907591847,0",
+        "SF12345678; 9818907591847，0\nYT87654321",
+    ],
+)
+def test_manual_order_batch_tracking_text_rejects_truncated_decimal_pair(
+    authenticated_client: TestClient,
+    tracking_text: str,
+) -> None:
+    response = authenticated_client.post(
+        "/api/manual-orders/batch",
+        json={
+            "client_batch_id": f"batch-decimal-{hashlib.sha256(tracking_text.encode()).hexdigest()[:16]}",
+            "tracking_text": tracking_text,
+        },
+    )
+
+    assert response.status_code == 422
+    assert authenticated_client.get("/api/orders", params={"platform": "other"}).json()["total"] == 0
+
+
+def test_manual_order_batch_tracking_text_accepts_two_long_numeric_numbers(
+    authenticated_client: TestClient,
+) -> None:
+    response = authenticated_client.post(
+        "/api/manual-orders/batch",
+        json={
+            "client_batch_id": "batch-two-long-numeric-0001",
+            "tracking_text": "9818907591847,9818907591848",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["created_count"] == 2
+
+
+def test_manual_order_batch_enforces_body_limit(
+    authenticated_client: TestClient,
+) -> None:
+    oversized = authenticated_client.post(
+        "/api/manual-orders/batch",
+        content=(
+            '{"client_batch_id":"manual-batch-too-large-0001",'
+            '"tracking_text":"' + ("A" * (512 * 1024)) + '"}'
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert oversized.status_code == 413
+    assert "512 KiB" in oversized.json()["detail"]
+
+
+def test_manual_order_batch_parses_deduplicates_validates_and_replays(
+    authenticated_client: TestClient,
+) -> None:
+    payload = {
+        "client_batch_id": "manual-batch-mixed-0001",
+        "tracking_text": " YT-000001，yt 000001\nSF-000002;；",
+        "courier": "圆通速递",
+        "rows": [
+            {
+                "row_number": 2,
+                "tracking_no": "JD-000003",
+                "product_name": "逐行商品",
+                "courier": "京东物流",
+            },
+            {"row_number": 3, "tracking_no": "  "},
+            {"row_number": 4, "tracking_no": "!!!"},
+            {"row_number": 5, "tracking_no": 12345678},
+            {"row_number": 6, "tracking_no": 12.0},
+            {"row_number": 7, "tracking_no": 9_007_199_254_740_992},
+            {
+                "row_number": 8,
+                "tracking_no": "PRODUCT-0008",
+                "product_name": "商" * 257,
+            },
+        ],
+    }
+    response = authenticated_client.post("/api/manual-orders/batch", json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["idempotent_replay"] is False
+    assert {
+        key: body[key]
+        for key in (
+            "total_count",
+            "unique_count",
+            "created_count",
+            "idempotent_count",
+            "duplicate_count",
+            "failed_count",
+        )
+    } == {
+        "total_count": 10,
+        "unique_count": 3,
+        "created_count": 3,
+        "idempotent_count": 0,
+        "duplicate_count": 1,
+        "failed_count": 6,
+    }
+    assert [item["status"] for item in body["items"]] == [
+        "CREATED",
+        "DUPLICATE_INPUT",
+        "CREATED",
+        "CREATED",
+        "FAILED",
+        "FAILED",
+        "FAILED",
+        "FAILED",
+        "FAILED",
+        "FAILED",
+    ]
+    failures = {
+        item["row_number"]: item["error_code"]
+        for item in body["items"]
+        if item["status"] == "FAILED"
+    }
+    assert failures == {
+        3: "MISSING_TRACKING",
+        4: "INVALID_TRACKING",
+        5: "INVALID_FIELD_TYPE",
+        6: "INVALID_FIELD_TYPE",
+        7: "INVALID_FIELD_TYPE",
+        8: "PRODUCT_NAME_TOO_LONG",
+    }
+    created = [item for item in body["items"] if item["status"] == "CREATED"]
+    assert {item["tracking_no_normalized"] for item in created} == {
+        "YT000001",
+        "SF000002",
+        "JD000003",
+    }
+    assert next(item for item in created if item["tracking_no_normalized"] == "YT000001")[
+        "product_name"
+    ] == "未填写商品名称"
+
+    orders = authenticated_client.get("/api/orders", params={"platform": "other", "limit": 100})
+    assert orders.status_code == 200
+    assert orders.json()["total"] == 3
+    assert all(
+        order["manual_created_by"]["username"] == "admin"
+        for order in orders.json()["items"]
+    )
+    with authenticated_client.app.state.database.connect() as connection:
+        batch = connection.execute(
+            """
+            SELECT b.client_batch_id, b.item_count, u.username
+            FROM manual_order_batches b
+            JOIN users u ON u.id = b.actor_user_id
+            WHERE b.client_batch_id = ?
+            """,
+            (payload["client_batch_id"],),
+        ).fetchone()
+        assert dict(batch) == {
+            "client_batch_id": payload["client_batch_id"],
+            "item_count": 10,
+            "username": "admin",
+        }
+
+    replay = authenticated_client.post("/api/manual-orders/batch", json=payload)
+    assert replay.status_code == 200
+    replay_body = replay.json()
+    assert replay_body["idempotent_replay"] is True
+    assert replay_body["created_count"] == 0
+    assert replay_body["idempotent_count"] == 3
+    assert replay_body["duplicate_count"] == 1
+    assert replay_body["failed_count"] == 6
+    assert authenticated_client.get(
+        "/api/orders", params={"platform": "other"}
+    ).json()["total"] == 3
+
+    changed_replay = authenticated_client.post(
+        "/api/manual-orders/batch",
+        json={**payload, "product_name": "不能复用批次号"},
+    )
+    assert changed_replay.status_code == 409
+
+
+def test_manual_order_batch_rejects_unsafe_or_implausible_tracking_values(
+    authenticated_client: TestClient,
+) -> None:
+    response = authenticated_client.post(
+        "/api/manual-orders/batch",
+        json={
+            "client_batch_id": "manual-batch-tracking-validation-0001",
+            "rows": [
+                {"row_number": 2, "tracking_no": "1234567"},
+                {"row_number": 3, "tracking_no": "ABCDEFGH"},
+                {"row_number": 4, "tracking_no": ("A" * 32) + "1"},
+                {"row_number": 5, "tracking_no": "1" * 129},
+                {"row_number": 6, "tracking_no": 9_007_199_254_740_991},
+                {"row_number": 7, "tracking_no": 9_007_199_254_740_992},
+                {"row_number": 8, "tracking_no": 12345678.0},
+                {"row_number": 9, "tracking_no": True},
+                {"row_number": 10, "tracking_no": None},
+                {"row_number": 11, "tracking_no": {"value": "SF12345678"}},
+                {"row_number": 12, "tracking_no": "1.23456789E+12"},
+                {"row_number": 13, "tracking_no": "2026-09-02"},
+                {"row_number": 14, "tracking_no": "9818907591847.0"},
+                {"row_number": 15, "tracking_no": "9818907591847,0"},
+                {"row_number": 16, "tracking_no": "SF12345678/YT87654321"},
+                {"row_number": 17, "tracking_no": "SF12345678\nYT87654321"},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["created_count"] == 0
+    assert body["failed_count"] == 16
+    assert [item["error_code"] for item in body["items"]] == [
+        "INVALID_TRACKING",
+        "INVALID_TRACKING",
+        "INVALID_TRACKING",
+        "TRACKING_TOO_LONG",
+        "INVALID_FIELD_TYPE",
+        "INVALID_FIELD_TYPE",
+        "INVALID_FIELD_TYPE",
+        "INVALID_FIELD_TYPE",
+        "INVALID_FIELD_TYPE",
+        "INVALID_FIELD_TYPE",
+        "INVALID_TRACKING",
+        "INVALID_TRACKING",
+        "INVALID_TRACKING",
+        "INVALID_TRACKING",
+        "INVALID_TRACKING",
+        "INVALID_TRACKING",
+    ]
+
+
+def test_manual_order_batch_rejects_spreadsheet_number_and_date_coercions(
+    authenticated_client: TestClient,
+) -> None:
+    suspicious = [
+        "9.81 E+12",
+        "2026-09-02",
+        "2026.09.02",
+        "2026/09/02",
+        "09/02/2026",
+        "02-09-2026",
+        "2026年9月2日",
+        "2026 年 9 月 2 日",
+    ]
+    response = authenticated_client.post(
+        "/api/manual-orders/batch",
+        json={
+            "client_batch_id": "manual-batch-spreadsheet-coercion-0001",
+            "rows": [
+                {"row_number": index + 2, "tracking_no": tracking_no}
+                for index, tracking_no in enumerate([*suspicious, "20260902"])
+            ],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["created_count"] == 1
+    assert body["failed_count"] == len(suspicious)
+    assert [item["error_code"] for item in body["items"]] == [
+        *(["INVALID_TRACKING"] * len(suspicious)),
+        None,
+    ]
+    assert body["items"][-1]["tracking_no_normalized"] == "20260902"
+
+
+def test_manual_order_batch_accepts_exactly_500_rows_and_replays_atomically(
+    authenticated_client: TestClient,
+) -> None:
+    payload = {
+        "client_batch_id": "manual-batch-exact-limit-0001",
+        "rows": [
+            {"row_number": index + 2, "tracking_no": f"MAX{index:08d}"}
+            for index in range(500)
+        ],
+    }
+    created = authenticated_client.post("/api/manual-orders/batch", json=payload)
+    assert created.status_code == 200
+    assert created.json()["total_count"] == 500
+    assert created.json()["created_count"] == 500
+    assert created.json()["failed_count"] == 0
+
+    replay = authenticated_client.post("/api/manual-orders/batch", json=payload)
+    assert replay.status_code == 200
+    assert replay.json()["idempotent_replay"] is True
+    assert replay.json()["created_count"] == 0
+    assert replay.json()["idempotent_count"] == 500
+    with authenticated_client.app.state.database.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS count FROM manual_order_batches"
+        ).fetchone()["count"] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) AS count FROM manual_order_events"
+        ).fetchone()["count"] == 500
+        assert connection.execute(
+            "SELECT COUNT(*) AS count FROM purchase_orders"
+        ).fetchone()["count"] == 500
+
+
+def test_concurrent_identical_manual_batches_create_only_one_copy(
+    authenticated_client: TestClient,
+) -> None:
+    payload = {
+        "client_batch_id": "manual-batch-concurrent-0001",
+        "tracking_text": "RACE-BATCH-0001\nRACE-BATCH-0002\nRACE-BATCH-0003",
+    }
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(
+            executor.map(
+                lambda _: authenticated_client.post(
+                    "/api/manual-orders/batch", json=payload
+                ),
+                range(2),
+            )
+        )
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert sorted(response.json()["created_count"] for response in responses) == [0, 3]
+    assert sorted(response.json()["idempotent_count"] for response in responses) == [0, 3]
+    assert sorted(response.json()["idempotent_replay"] for response in responses) == [
+        False,
+        True,
+    ]
+    with authenticated_client.app.state.database.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS count FROM manual_order_batches"
+        ).fetchone()["count"] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) AS count FROM manual_order_events"
+        ).fetchone()["count"] == 3
+        assert connection.execute(
+            "SELECT COUNT(*) AS count FROM purchase_orders"
+        ).fetchone()["count"] == 3
+
+
+def test_manual_order_batch_reports_platform_and_manual_conflicts_without_overwrite(
+    authenticated_client: TestClient,
+    sync_headers: dict[str, str],
+) -> None:
+    _seed_order(
+        authenticated_client,
+        sync_headers,
+        order_id="BATCH-PLATFORM-001",
+        tracking_no="PLATFORM-COLLISION-001",
+    )
+    single = authenticated_client.post(
+        "/api/manual-orders",
+        json={
+            "client_event_id": "manual-before-batch-0001",
+            "tracking_no": "MANUAL-COLLISION-001",
+            "product_name": "原手工商品",
+        },
+    )
+    assert single.status_code == 201
+
+    response = authenticated_client.post(
+        "/api/manual-orders/batch",
+        json={
+            "client_batch_id": "manual-batch-conflicts-0001",
+            "rows": [
+                {
+                    "tracking_no": "platform collision 001",
+                    "product_name": "不得覆盖平台订单",
+                },
+                {
+                    "tracking_no": "manual collision 001",
+                    "product_name": "不得覆盖原手工订单",
+                },
+                {"tracking_no": "BATCH-GOOD-001", "product_name": "可创建商品"},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["created_count"] == 1
+    assert body["failed_count"] == 2
+    assert [item["error_code"] for item in body["items"][:2]] == [
+        "PLATFORM_ORDER_EXISTS",
+        "MANUAL_ORDER_EXISTS",
+    ]
+    original = authenticated_client.get(
+        "/api/orders", params={"query": "MANUAL-COLLISION-001"}
+    ).json()["items"][0]
+    assert original["items"][0]["title"] == "原手工商品"
+
+
+def test_manual_order_batch_rejects_too_many_inputs_and_cross_user_batch_reuse(
+    authenticated_client: TestClient,
+) -> None:
+    too_many = authenticated_client.post(
+        "/api/manual-orders/batch",
+        json={
+            "client_batch_id": "manual-batch-too-many-0001",
+            "rows": [{"tracking_no": f"TRACK-{index}"} for index in range(501)],
+        },
+    )
+    assert too_many.status_code == 422
+
+    _create_receiver(authenticated_client)
+    payload = {
+        "client_batch_id": "manual-batch-owned-by-admin-0001",
+        "tracking_text": "OWNED-001",
+    }
+    assert authenticated_client.post("/api/manual-orders/batch", json=payload).status_code == 200
+    _login(authenticated_client, "receiver.one", RECEIVER_PASSWORD)
+    cross_user = authenticated_client.post("/api/manual-orders/batch", json=payload)
+    assert cross_user.status_code == 409
+    assert "其他用户" in cross_user.json()["detail"]
 
 
 def test_manual_arrival_is_audited_idempotent_and_concurrency_safe(

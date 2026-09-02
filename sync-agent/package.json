@@ -2,7 +2,7 @@
   "name": "arrival-ledger-sync-agent",
   "private": true,
   "version": "0.1.0",
-  "description": "Windows visible-page order sync worker for arrival-ledger (PDD / 1688)",
+  "description": "Visible-page PDD order sync worker for arrival-ledger (macOS, Windows, Linux X display)",
   "type": "module",
   "engines": {
     "node": ">=20"

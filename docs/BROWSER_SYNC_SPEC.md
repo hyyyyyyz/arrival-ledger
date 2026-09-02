@@ -1,8 +1,8 @@
 # 浏览器自动化同步技术规格（Browser Sync MVP）
 
-版本：1.5（2026-08-30）
+版本：1.6（2026-09-01）
 适用仓库：`arrival-ledger`
-状态：PDD 多账号第一阶段已实现，等待 Mac/Windows 真实账号手工验收
+状态：PDD 多账号与 Linux 服务器监督式可见浏览器已实现，等待真实账号手工验收
 
 ## 1. 目的与边界
 
@@ -20,12 +20,15 @@
 - 不自动下单、支付、退款、确认收货、评价或修改任何平台数据。
 - 不绕过验证码、滑块、登录保护、风控或人机校验；出现这些页面立即停止并等待人工。
 - 不使用代理池、IP 轮换、多账号并发、隐藏窗口、无限滚动高频轮询或“反检测”技术。
-- 第一阶段不提供远程 noVNC、服务器端浏览器、Cookie 注入、后台定时 commit 或无人值守登录。
+- 不提供公网 noVNC、Cookie 注入、后台定时 commit 或无人值守登录；服务器 noVNC 仅能经 SSH 隧道
+  进入，并始终由用户人工完成登录与验证。
 
 ## 2. 总体架构
 
 ```text
-Mac 或 Windows 10/11（有桌面会话的同步电脑）
+同步运行端（二选一）
+  ├─ Mac/Windows 10/11 有桌面会话
+  └─ Linux 服务器 Xvfb/noVNC（仅 SSH 隧道）
   ├─ Node.js 20 LTS + TypeScript 同步程序
   ├─ Playwright + 可见浏览器
   ├─ profiles/pdd-main、profiles/pdd-backup # 每个账号独立持久化 profile
@@ -33,15 +36,15 @@ Mac 或 Windows 10/11（有桌面会话的同步电脑）
   └─ logs                                   # 脱敏日志
           │ 仅上传订单必要字段
           ▼
-Ubuntu 192.168.1.5
+到货管家后端
   ├─ Nginx/FastAPI :8766
   ├─ sync worker token API
   ├─ SQLite：订单、商品行、包裹、批次、错误
   └─ 手机收货 H5：运单匹配与照片凭证
 ```
 
-服务器是纯 Server，不安装桌面环境，也不反向控制同步电脑的浏览器。同步电脑主动发起请求；服务器只接受
-结构化订单批次和脱敏账号状态。profile、Cookie 和浏览器存储不离开同步电脑。
+同步端主动发起请求；后端只接受结构化订单批次和脱敏账号状态。采用 Linux 服务器 Agent 时，虚拟桌面与
+浏览器 Profile 位于专用隔离容器/持久目录，不进入后端容器或业务数据库，也不通过公网暴露 noVNC。
 
 ### 2.1 拼多多浏览器 profile
 
@@ -53,7 +56,9 @@ profiles/pdd-main
 profiles/pdd-backup
 ```
 
-首次运行由用户在可见窗口中登录。程序只检查是否已登录，不自动填写密码、不保存密码、不代做短信/扫码确认。profile 目录永远只留在其对应同步电脑，不能进入 Git、服务器备份或同步接口。
+首次运行由用户在可见窗口中登录。程序只检查是否已登录，不自动填写密码、不保存密码、不代做短信/扫码
+确认。profile 目录永远只留在其对应同步运行端，不能进入 Git、普通未加密备份或同步接口。桌面端
+profile 不得复制到 Linux；服务器 profile 必须通过服务器上的官方登录页重新建立。
 
 多账号清单由 `PDD_ACCOUNTS_FILE` 指向的 JSON v1 文件定义，每项只含 `account_key`、可选
 `display_label` 和 `profile_dir`。`account_key` 是跨管理员网页、同步端游标和服务器订单的稳定关联键，
@@ -113,9 +118,9 @@ macOS 使用文件权限、Windows 使用 NTFS ACL，仅允许运行同步端的
 4. PDD 至少一个带运单号的订单能在手机收货页面显示商品；1688 API 的物流验收见 `docs/ALI1688_OPEN_API.md`。
 5. 登录过期、验证码、页面改版均产生明确状态，不静默写入错误数据。
 6. 服务器数据库/日志中不存在密码、Cookie、完整地址和原始 HTML；worker token 的明文只存在于服务器受限 `.env` 与同步电脑受权限保护的 `.env.local`，数据库只保存摘要。
-7. 关闭 Mac/Windows 同步程序后，P0 收货页面仍可正常使用。
+7. 关闭同步运行端后，P0 收货页面仍可正常使用。
 8. `sync-all --mode dry-run` 严格串行，账号状态能在管理员网页区分展示；没有任何 profile、Cookie 或
-   登录态出现在服务器。
+   登录态进入后端 API、业务数据库或日志。
 
 `dry-run` 只读取、解析、校验并把完整记录集保存为本地私有 snapshot（含 payload hash），不能写服务器；
 `commit` 必须通过 `--from-report <snapshot>` 读取该 snapshot 上传，**不能重新打开网页抓取**；
@@ -493,7 +498,8 @@ sync_batches(
 - 任务计划不保存明文密码，profile 目录不复制到服务器；
 - 即使未来实现计划任务，也不得注入 Cookie 或绕过 dry-run → 人工核对 → commit。
 
-远程 noVNC 登录页和服务器端 Playwright 同样未实现；第一阶段只能在同步电脑的可见窗口人工登录。
+服务器 Xvfb/noVNC 监督式 Agent 已实现，操作见 [`PDD_SERVER_AGENT.md`](PDD_SERVER_AGENT.md)；它仍只
+提供人工登录和人工命令，不改变本节“定时任务未实现”的结论。
 
 ## 11. 测试矩阵
 

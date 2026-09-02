@@ -24,6 +24,7 @@ import {
   getDashboardStats,
   listReceipts,
   createManualOrder,
+  createManualOrderBatch,
   login as loginRequest,
   logout as logoutRequest,
   updateReceiptTracking,
@@ -383,8 +384,10 @@ onBeforeUnmount(() => {
           :user="user"
           :save-server-tracking="updateServerTracking"
           :create-manual-order="createManualOrder"
+          :create-manual-order-batch="createManualOrderBatch"
           @changed="refreshQueueState"
           @server-changed="handleServerReceiptChanged"
+          @auth-required="handleAuthRequired"
         />
         <DashboardStats
           :stats="dashboardStats"

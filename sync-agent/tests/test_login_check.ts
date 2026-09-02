@@ -114,6 +114,50 @@ describe("runLoginCheck", () => {
     expect(waitCalls).toBeGreaterThanOrEqual(1);
   });
 
+  it("can watch the existing visible page without terminal input", async () => {
+    const cwd = tempCwd();
+    const output: string[] = [];
+    let checks = 0;
+    const adapter = fakeAdapter({
+      detectLogin: async () => ({
+        logged_in: ++checks >= 2,
+        detail: checks >= 2 ? "orders" : "login wall",
+      }),
+    });
+    const outcome = await runLoginCheck(
+      buildOptions(cwd, {
+        adapter,
+        waitForInput: async () => {
+          throw new Error("terminal input must not be requested");
+        },
+        nonInteractiveWait: { timeout_ms: 500, poll_interval_ms: 10 },
+        output: (line) => output.push(line),
+      }),
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.state?.status).toBe("OK");
+    expect(output.join(" ")).toContain("Watching the existing visible page");
+    expect(output.join(" ")).not.toContain("Press Enter");
+  });
+
+  it("closes with the observed state when non-interactive login wait expires", async () => {
+    const cwd = tempCwd();
+    const output: string[] = [];
+    const adapter = fakeAdapter({
+      detectLogin: async () => ({ logged_in: false, detail: "login wall" }),
+    });
+    const outcome = await runLoginCheck(
+      buildOptions(cwd, {
+        adapter,
+        nonInteractiveWait: { timeout_ms: 5, poll_interval_ms: 10 },
+        output: (line) => output.push(line),
+      }),
+    );
+    expect(outcome.exitCode).toBe(1);
+    expect(outcome.state?.status).toBe("NEEDS_LOGIN");
+    expect(output.join(" ")).toContain("manual login wait timed out");
+  });
+
   it("keeps the visible window open for manual captcha resolution", async () => {
     const cwd = tempCwd();
     let captcha = false;

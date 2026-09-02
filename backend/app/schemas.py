@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def _validate_bcrypt_password_bytes(value: str) -> str:
@@ -399,6 +399,110 @@ class ManualOrderCreateResponse(BaseModel):
     product_name: str
     courier: str | None
     source: Literal["THIRD_PARTY_MANUAL"]
+
+
+class ManualOrderBatchRow(BaseModel):
+    """One frontend-parsed spreadsheet row.
+
+    Cell values intentionally remain untyped here so a malformed row can be
+    reported alongside successful rows instead of rejecting the whole batch.
+    The endpoint performs strict per-row validation before any write.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    row_number: int | None = Field(default=None, ge=1, le=1_000_000)
+    tracking_no: Any = Field(
+        default=None,
+        description="运单号必须由 Excel 解析器保留为 JSON string",
+        json_schema_extra={"type": "string"},
+    )
+    product_name: Any = None
+    courier: Any = None
+    remark: Any = None
+
+
+class ManualOrderBatchCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    client_batch_id: str = Field(min_length=8, max_length=128)
+    tracking_text: str | None = Field(default=None, max_length=524_288)
+    product_name: str | None = Field(default=None, max_length=256)
+    courier: str | None = Field(default=None, max_length=128)
+    remark: str | None = Field(default=None, max_length=512)
+    rows: list[ManualOrderBatchRow] = Field(default_factory=list, max_length=500)
+
+    @field_validator("client_batch_id")
+    @classmethod
+    def batch_id_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be blank")
+        return value
+
+    @field_validator("tracking_text", "product_name", "courier", "remark")
+    @classmethod
+    def optional_batch_text_normalized(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @model_validator(mode="after")
+    def at_least_one_input_source(self) -> "ManualOrderBatchCreate":
+        if self.tracking_text is None and not self.rows:
+            raise ValueError("tracking_text or rows is required")
+        return self
+
+
+ManualOrderBatchItemStatus = Literal[
+    "CREATED",
+    "IDEMPOTENT",
+    "DUPLICATE_INPUT",
+    "FAILED",
+]
+
+ManualOrderBatchErrorCode = Literal[
+    "MISSING_TRACKING",
+    "INVALID_TRACKING",
+    "TRACKING_TOO_LONG",
+    "INVALID_FIELD_TYPE",
+    "PRODUCT_NAME_TOO_LONG",
+    "COURIER_TOO_LONG",
+    "REMARK_TOO_LONG",
+    "PLATFORM_ORDER_EXISTS",
+    "MANUAL_ORDER_EXISTS",
+    "EVENT_CONFLICT",
+    "DATABASE_CONFLICT",
+]
+
+
+class ManualOrderBatchItemResult(BaseModel):
+    input_index: int = Field(ge=1, le=500)
+    row_number: int | None = Field(default=None, ge=1, le=1_000_000)
+    tracking_no: str | None = None
+    tracking_no_normalized: str | None = None
+    status: ManualOrderBatchItemStatus
+    created: bool = False
+    idempotent_replay: bool = False
+    order_id: str | None = None
+    platform_order_id: str | None = None
+    product_name: str | None = None
+    courier: str | None = None
+    error_code: ManualOrderBatchErrorCode | None = None
+    message: str | None = None
+
+
+class ManualOrderBatchCreateResponse(BaseModel):
+    client_batch_id: str
+    idempotent_replay: bool
+    total_count: int = Field(ge=1, le=500)
+    unique_count: int = Field(ge=0, le=500)
+    created_count: int = Field(ge=0, le=500)
+    idempotent_count: int = Field(ge=0, le=500)
+    duplicate_count: int = Field(ge=0, le=500)
+    failed_count: int = Field(ge=0, le=500)
+    items: list[ManualOrderBatchItemResult] = Field(max_length=500)
 
 
 class ReceiptOut(BaseModel):
