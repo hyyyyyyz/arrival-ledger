@@ -84,8 +84,8 @@ def test_resolve_tracking_candidate_returns_display_value(settings) -> None:
             account_id = connection.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
             connection.execute(
                 """
-                INSERT INTO purchase_orders(platform_account_id, platform_order_id, ordered_at, order_status, source, created_at, updated_at)
-                VALUES (?, 'candidate-order', '2026-08-01T00:00:00Z', 'SHIPPED', 'WINDOWS_BROWSER', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')
+                INSERT INTO purchase_orders(platform_account_id, platform_order_id, ordered_at, order_status, source, last_seen_at, created_at, updated_at)
+                VALUES (?, 'candidate-order', '2026-08-01T00:00:00Z', 'SHIPPED', 'WINDOWS_BROWSER', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')
                 """,
                 (account_id,),
             )
@@ -130,7 +130,7 @@ def test_receipt_uses_vl_only_when_client_barcode_missing(settings, jpeg_bytes, 
             )
             account_id = connection.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
             connection.execute(
-                "INSERT INTO purchase_orders(platform_account_id, platform_order_id, ordered_at, order_status, source, created_at, updated_at) VALUES (?, 'vl-order', '2026-08-01T00:00:00Z', 'SHIPPED', 'WINDOWS_BROWSER', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')",
+                "INSERT INTO purchase_orders(platform_account_id, platform_order_id, ordered_at, order_status, source, last_seen_at, created_at, updated_at) VALUES (?, 'vl-order', '2026-08-01T00:00:00Z', 'SHIPPED', 'WINDOWS_BROWSER', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')",
                 (account_id,),
             )
             connection.execute(
