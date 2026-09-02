@@ -8,7 +8,6 @@ const NATIVE_FORMAT_NAMES = [
   'code_128', 'code_39', 'code_93', 'codabar', 'itf',
   'ean_13', 'ean_8', 'upc_a', 'upc_e', 'rss_14', 'rss_expanded',
 ] as const
-const POLYFILL_FORMAT_NAMES = ['codabar', 'code_39', 'code_93', 'code_128', 'itf', 'ean_8', 'ean_13', 'upc_a', 'upc_e'] as const
 const MAX_DECODE_DIMENSION = 2400
 
 type NativeBarcodeDetector = { detect: (source: CanvasImageSource) => Promise<Array<{ rawValue?: string }>> }
@@ -131,10 +130,19 @@ async function zxingReaders(): Promise<Array<{ decodeFromCanvas: (canvas: HTMLCa
   return [new BrowserMultiFormatOneDReader(hints), new BrowserMultiFormatReader(hints)]
 }
 
-async function zbarDetector(): Promise<{ detect: (source: CanvasImageSource) => Promise<Array<{ rawValue?: string }>> } | null> {
+async function zbarDetector(): Promise<{ detect: (canvas: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>> } | null> {
   try {
-    const { BarcodeDetectorPolyfill } = await import('@undecaf/barcode-detector-polyfill')
-    return new BarcodeDetectorPolyfill({ formats: [...POLYFILL_FORMAT_NAMES] })
+    const { getDefaultScanner, scanRGBABuffer } = await import('@undecaf/zbar-wasm')
+    const scanner = await getDefaultScanner()
+    return {
+      detect: async (canvas) => {
+        const context = canvas.getContext('2d', { willReadFrequently: true })
+        if (!context) return []
+        const image = context.getImageData(0, 0, canvas.width, canvas.height)
+        const results = await scanRGBABuffer(image.data.buffer, image.width, image.height, scanner)
+        return results.map((barcode) => ({ rawValue: barcode.decode() }))
+      },
+    }
   } catch {
     // The fallback is optional: an unavailable WASM runtime must never block
     // saving the receipt or the manual correction path.
