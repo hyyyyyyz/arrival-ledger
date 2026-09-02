@@ -117,19 +117,22 @@ async function nativeDetector(): Promise<NativeBarcodeDetector | null> {
   } catch { return null }
 }
 
-async function zxingReader(): Promise<{ decodeFromCanvas: (canvas: HTMLCanvasElement) => { getText: () => string } } | null> {
-  const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
+async function zxingReaders(): Promise<Array<{ decodeFromCanvas: (canvas: HTMLCanvasElement) => { getText: () => string } }>> {
+  const [{ BrowserMultiFormatOneDReader, BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
     import('@zxing/browser'), import('@zxing/library'),
   ])
   const hints = new Map()
   hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMAT_NAMES.map((name) => BarcodeFormat[name]))
   hints.set(DecodeHintType.TRY_HARDER, true)
-  return new BrowserMultiFormatReader(hints)
+  // The dedicated 1-D reader is both quicker and less prone to mistaking
+  // label artwork/QR fragments for a courier barcode. Keep the general
+  // reader as a fallback for carrier-specific formats.
+  return [new BrowserMultiFormatOneDReader(hints), new BrowserMultiFormatReader(hints)]
 }
 
 async function decodeVariants(photo: Blob): Promise<string | null> {
   const image = await loadImage(photo)
-  const [detector, reader] = await Promise.all([nativeDetector(), zxingReader()])
+  const [detector, readers] = await Promise.all([nativeDetector(), zxingReaders()])
   const candidates = new Map<string, number>()
   try {
     for (const spec of VARIANT_SPECS) {
@@ -141,10 +144,11 @@ async function decodeVariants(photo: Blob): Promise<string | null> {
             if (value) candidates.set(value, (candidates.get(value) ?? 0) + 2)
           }
         }
-        if (reader) {
+        for (const reader of readers) {
           try {
             const value = plausibleResult(reader.decodeFromCanvas(canvas).getText())
             if (value) candidates.set(value, (candidates.get(value) ?? 0) + 1)
+            if (value) break
           } catch { /* no barcode in this pass */ }
         }
       } finally { canvas.width = 1; canvas.height = 1 }
