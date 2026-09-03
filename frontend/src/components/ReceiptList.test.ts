@@ -11,6 +11,26 @@ import ReceiptList from './ReceiptList.vue'
 const noOpSave = vi.fn()
 
 describe('ReceiptList order matches', () => {
+  it('offers an immediate upload action for a recovered local photo', async () => {
+    const wrapper = mount(ReceiptList, {
+      props: {
+        localItems: [{
+          clientEventId: 'local-1', ownerUserId: '1', ownerDisplayName: '收货员', deviceId: 'device-1',
+          occurredAt: '2026-09-03T13:25:00.000Z', photo: new Blob(['photo'], { type: 'image/jpeg' }),
+          fileName: 'photo.jpg', trackingNo: null, barcodeState: 'NOT_FOUND', uploadState: 'QUEUED',
+          readyToUpload: true, attempts: 0, nextAttemptAt: 0, lastError: '照片处理曾意外中断',
+          createdAt: 1, updatedAt: 1, inputMethod: 'PHOTO_LIBRARY',
+        }],
+        receipts: [],
+        saveServerTracking: noOpSave,
+      },
+    })
+
+    expect(wrapper.text()).toContain('立即上传')
+    await wrapper.get('.record-actions button:last-child').trigger('click')
+    expect(wrapper.emitted('retry')).toEqual([['local-1']])
+  })
+
   it('opens a full-size photo preview for manual review', async () => {
     const wrapper = mount(ReceiptList, {
       props: {

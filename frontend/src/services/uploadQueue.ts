@@ -20,6 +20,14 @@ export class UploadQueue extends EventTarget {
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private initialized = false
 
+  // Mobile browsers pause timers and JavaScript while the tab is backgrounded.
+  // Re-run the queue when the user returns so a recovered local item does not
+  // remain in QUEUED state until another unrelated event happens.
+  private readonly resumeUpload = (): void => {
+    if (document.visibilityState === 'hidden') return
+    void this.process()
+  }
+
   async initialize(): Promise<void> {
     if (this.initialized) return
     this.initialized = true
@@ -42,6 +50,9 @@ export class UploadQueue extends EventTarget {
       })]
     }))
     window.addEventListener('online', () => void this.process())
+    window.addEventListener('focus', this.resumeUpload)
+    document.addEventListener('visibilitychange', this.resumeUpload)
+    window.addEventListener('pageshow', this.resumeUpload)
     this.emitChange()
   }
 

@@ -98,4 +98,18 @@ describe('UploadQueue recovery and retry policy', () => {
       expect(isRetryableUploadError(new ApiError(status, 'permanent'))).toBe(false)
     }
   })
+
+  it('resumes a queued upload when the page becomes active again', async () => {
+    mocks.getAllUploads.mockResolvedValue([])
+    const queue = new UploadQueue()
+    const process = vi.spyOn(queue, 'process').mockResolvedValue(undefined)
+    await queue.initialize()
+    process.mockClear()
+
+    window.dispatchEvent(new Event('focus'))
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('pageshow'))
+
+    expect(process).toHaveBeenCalledTimes(3)
+  })
 })

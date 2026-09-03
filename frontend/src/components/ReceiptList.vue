@@ -204,7 +204,9 @@ async function submitServer(receipt: Receipt): Promise<void> {
             <button type="button" :disabled="Boolean(editKey)" @click="beginEdit(`local-${item.clientEventId}`, item.trackingNo)">
               {{ item.trackingNo ? '修正单号' : '补录单号' }}
             </button>
-            <button v-if="item.uploadState === 'FAILED'" type="button" @click="emit('retry', item.clientEventId)">立即重试</button>
+            <button v-if="item.uploadState === 'FAILED' || (item.uploadState === 'QUEUED' && item.readyToUpload)" type="button" @click="emit('retry', item.clientEventId)">
+              {{ item.uploadState === 'FAILED' ? '立即重试' : '立即上传' }}
+            </button>
           </div>
         </div>
       </article>
