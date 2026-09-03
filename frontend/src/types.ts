@@ -285,10 +285,17 @@ export interface ManualArrivalUpdate {
 
 export interface OrderListResponse {
   items: PurchaseOrder[]
+  account_options?: OrderAccountOption[]
   total: number
   limit: number
   offset: number
   last_synced_at?: string | null
+}
+
+export interface OrderAccountOption {
+  id: string | number
+  platform: OrderPlatform
+  account_label: string
 }
 
 export interface OrderListParams {
@@ -297,6 +304,7 @@ export interface OrderListParams {
   query?: string
   platform?: OrderPlatformFilter
   arrival_status?: OrderArrivalFilter
+  account_id?: string | number
 }
 
 export type OrderArrivalFilter = '' | 'pending' | 'review' | 'received'

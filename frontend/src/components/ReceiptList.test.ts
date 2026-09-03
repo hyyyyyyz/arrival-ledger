@@ -11,6 +11,22 @@ import ReceiptList from './ReceiptList.vue'
 const noOpSave = vi.fn()
 
 describe('ReceiptList order matches', () => {
+  it('opens a full-size photo preview for manual review', async () => {
+    const wrapper = mount(ReceiptList, {
+      props: {
+        localItems: [],
+        receipts: [{ id: 101, tracking_no: 'SF1234567890000', photo_url: '/uploads/receipt-101.jpg' }],
+        saveServerTracking: noOpSave,
+      },
+    })
+
+    await wrapper.get('.photo-button').trigger('click')
+    expect(wrapper.get('[role="dialog"]').attributes('aria-label')).toBe('照片预览')
+    expect(wrapper.get('[role="dialog"] img').attributes('src')).toContain('/uploads/receipt-101.jpg')
+    await wrapper.get('.photo-preview-close').trigger('click')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  })
+
   it('gives an actionable next step when there are no receipts', async () => {
     const app = createSSRApp(ReceiptList, {
       localItems: [],

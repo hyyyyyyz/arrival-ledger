@@ -38,6 +38,7 @@ const editClientEventId = ref('')
 const editSubmittedTrackingNo = ref('')
 const editExpectedTrackingNo = ref<string | null>(null)
 const editSaving = ref(false)
+const selectedPhoto = ref<{ src: string; alt: string } | null>(null)
 
 function localUrl(item: UploadQueueItem): string {
   const existing = localUrls.get(item.clientEventId)
@@ -67,6 +68,14 @@ onBeforeUnmount(() => {
 
 function receiptTime(receipt: Receipt): string | undefined {
   return receipt.captured_at || receipt.first_received_at || receipt.occurred_at || receipt.server_received_at || receipt.created_at
+}
+
+function openPhoto(src: string, alt: string): void {
+  selectedPhoto.value = { src, alt }
+}
+
+function closePhoto(): void {
+  selectedPhoto.value = null
 }
 
 function beginEdit(key: string, trackingNo?: string | null): void {
@@ -164,7 +173,9 @@ async function submitServer(receipt: Receipt): Promise<void> {
     <div v-if="localItems.length" class="local-group">
       <p class="group-label">本机尚未完全同步</p>
       <article v-for="item in localItems" :key="item.clientEventId" class="receipt-card local-receipt">
-        <img :src="localUrl(item)" alt="待上传包裹照片" />
+        <button class="photo-button" type="button" aria-label="预览待上传包裹照片" @click="openPhoto(localUrl(item), '待上传包裹照片')">
+          <img :src="localUrl(item)" alt="待上传包裹照片" />
+        </button>
         <div class="receipt-body">
           <div class="receipt-topline">
             <span class="record-badge" :class="item.uploadState.toLowerCase()">
@@ -201,7 +212,9 @@ async function submitServer(receipt: Receipt): Promise<void> {
 
     <div v-if="receipts.length" class="server-group">
       <article v-for="receipt in receipts" :key="receipt.id" class="receipt-card">
-        <img :src="receiptPhotoUrl(receipt)" alt="包裹到货照片" loading="lazy" />
+        <button class="photo-button" type="button" aria-label="预览包裹到货照片" @click="openPhoto(receiptPhotoUrl(receipt), '包裹到货照片')">
+          <img :src="receiptPhotoUrl(receipt)" alt="包裹到货照片" loading="lazy" />
+        </button>
         <div class="receipt-body">
           <div class="receipt-topline">
             <span class="record-badge ready">
@@ -267,4 +280,10 @@ async function submitServer(receipt: Receipt): Promise<void> {
       <button class="empty-state-action" type="button" @click="emit('capture')">去拍摄包裹</button>
     </div>
   </section>
+  <div v-if="selectedPhoto" class="photo-preview-backdrop" role="presentation" @click.self="closePhoto">
+    <section class="photo-preview-dialog" role="dialog" aria-modal="true" aria-label="照片预览" @keydown.esc="closePhoto">
+      <button class="photo-preview-close" type="button" aria-label="关闭照片预览" @click="closePhoto">×</button>
+      <img :src="selectedPhoto.src" :alt="selectedPhoto.alt" />
+    </section>
+  </div>
 </template>

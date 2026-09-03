@@ -180,7 +180,7 @@ class PlatformAccountStatusIn(BaseModel):
 
 class PlatformAccountOut(BaseModel):
     id: int
-    platform: Literal["pdd"]
+    platform: Literal["pdd", "1688"]
     account_key: str
     display_label: str | None
     source: Literal["WINDOWS_BROWSER", "ALI1688_API"]
@@ -362,8 +362,15 @@ class PurchaseOrderOut(BaseModel):
     manual_remark: str | None = None
 
 
+class OrderAccountOptionOut(BaseModel):
+    id: int
+    platform: Literal["pdd", "1688", "other"]
+    account_label: str
+
+
 class PurchaseOrderListResponse(BaseModel):
     items: list[PurchaseOrderOut]
+    account_options: list[OrderAccountOptionOut] = Field(default_factory=list)
     total: int = Field(ge=0)
     limit: int = Field(ge=1, le=100)
     offset: int = Field(ge=0)

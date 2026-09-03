@@ -143,6 +143,7 @@ export async function listOrders(params: OrderListParams = {}): Promise<OrderLis
   if (query) search.set('query', query)
   if (params.platform) search.set('platform', params.platform)
   if (params.arrival_status) search.set('arrival_status', params.arrival_status)
+  if (params.account_id !== undefined && String(params.account_id)) search.set('account_id', String(params.account_id))
   return request<OrderListResponse>(`/orders?${search.toString()}`)
 }
 
@@ -192,7 +193,7 @@ export async function setUserActive(userId: string | number, isActive: boolean):
   return unwrapUser(payload)
 }
 
-export async function listPlatformAccounts(platform: 'pdd' = 'pdd'): Promise<PlatformAccountListResponse> {
+export async function listPlatformAccounts(platform: 'pdd' | '1688' = 'pdd'): Promise<PlatformAccountListResponse> {
   const search = new URLSearchParams({ platform })
   return request<PlatformAccountListResponse>(`/platform-accounts?${search.toString()}`)
 }

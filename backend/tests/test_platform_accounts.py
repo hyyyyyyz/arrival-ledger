@@ -330,7 +330,8 @@ def test_platform_account_create_validation(authenticated_client: TestClient) ->
     ]
     for payload in cases:
         assert authenticated_client.post("/api/platform-accounts", json=payload).status_code == 422
-    assert authenticated_client.get("/api/platform-accounts?platform=1688").status_code == 422
+    # 1688 account health is read-only but available to administrators.
+    assert authenticated_client.get("/api/platform-accounts?platform=1688").status_code == 200
 
 
 def test_v8_migration_normalizes_only_pdd_account_source(tmp_path) -> None:

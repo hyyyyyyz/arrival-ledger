@@ -19,7 +19,7 @@ describe('App order-tab behavior', () => {
     expect(activateOrders).toHaveBeenCalledTimes(1)
 
     tabs.selectTab('people')
-    expect(tabs.pageTitle.value).toBe('人员管理')
+    expect(tabs.pageTitle.value).toBe('后台管理')
     expect(activateOrders).toHaveBeenCalledTimes(1)
 
     tabs.reset()

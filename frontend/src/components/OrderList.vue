@@ -1,25 +1,30 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ApiError, updateOrderArrivalStatus } from '@/services/api'
-import type { ManualArrivalStatus, OrderArrivalFilter, OrderPlatformFilter, PurchaseOrder } from '@/types'
+import type { ManualArrivalStatus, OrderAccountOption, OrderArrivalFilter, OrderPlatformFilter, PurchaseOrder } from '@/types'
 import { formatDateTime } from '@/utils/format'
 import { createId } from '@/utils/id'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   orders: PurchaseOrder[]
   total: number
   query: string
   platform: OrderPlatformFilter
   arrivalStatus: OrderArrivalFilter
+  accountId?: string
+  accountOptions?: OrderAccountOption[]
   loading: boolean
   error: string
   lastSyncedAt: string | null
   online: boolean
   hasMore: boolean
-}>()
+}>(), {
+  accountId: '',
+  accountOptions: () => [],
+})
 
 const emit = defineEmits<{
-  search: [query: string, platform: OrderPlatformFilter, arrivalStatus: OrderArrivalFilter]
+  search: [query: string, platform: OrderPlatformFilter, arrivalStatus: OrderArrivalFilter, accountId: string]
   refresh: []
   manualChanged: [order: PurchaseOrder]
   authRequired: []
@@ -29,6 +34,7 @@ const emit = defineEmits<{
 const draftQuery = ref(props.query)
 const draftPlatform = ref<OrderPlatformFilter>(props.platform)
 const draftArrivalStatus = ref<OrderArrivalFilter>(props.arrivalStatus)
+const draftAccountId = ref(props.accountId)
 const filtersOpen = ref(false)
 const expandedOrders = ref<Set<string>>(new Set())
 const freshnessNow = ref(Date.now())
@@ -73,11 +79,13 @@ watch(
 watch(() => props.query, (value) => { draftQuery.value = value })
 watch(() => props.platform, (value) => { draftPlatform.value = value })
 watch(() => props.arrivalStatus, (value) => { draftArrivalStatus.value = value })
+watch(() => props.accountId, (value) => { draftAccountId.value = value })
 watch(() => props.error, (value) => {
   if (!value) return
   draftQuery.value = props.query
   draftPlatform.value = props.platform
   draftArrivalStatus.value = props.arrivalStatus
+  draftAccountId.value = props.accountId
 })
 
 const freshness = computed(() => {
@@ -105,11 +113,12 @@ const freshness = computed(() => {
   }
 })
 
-const activeFilterCount = computed(() => Number(Boolean(props.platform)) + Number(Boolean(props.arrivalStatus)))
+const activeFilterCount = computed(() => Number(Boolean(props.platform)) + Number(Boolean(props.arrivalStatus)) + Number(Boolean(props.accountId)))
 const activeFilterSummary = computed(() => {
   const labels: string[] = []
   if (props.platform) labels.push(props.platform === '1688' ? '1688' : props.platform === 'pdd' ? '拼多多' : '第三方')
   if (props.arrivalStatus) labels.push(props.arrivalStatus === 'pending' ? '未收货' : props.arrivalStatus === 'review' ? '待确认' : '已收货')
+  if (props.accountId) labels.push(props.accountOptions.find((option) => String(option.id) === props.accountId)?.account_label || '指定账号')
   return labels.join(' · ')
 })
 
@@ -302,22 +311,28 @@ function packageArrivalTone(orderPackage: PurchaseOrder['packages'][number]): st
 }
 
 function submitSearch(): void {
-  emit('search', draftQuery.value.trim(), draftPlatform.value, draftArrivalStatus.value)
+  emit('search', draftQuery.value.trim(), draftPlatform.value, draftArrivalStatus.value, draftAccountId.value)
 }
 
 function applyPlatform(platform: OrderPlatformFilter): void {
   draftPlatform.value = platform
-  emit('search', draftQuery.value.trim(), platform, draftArrivalStatus.value)
+  emit('search', draftQuery.value.trim(), platform, draftArrivalStatus.value, draftAccountId.value)
 }
 
 function applyArrivalStatus(arrivalStatus: OrderArrivalFilter): void {
   draftArrivalStatus.value = arrivalStatus
-  emit('search', draftQuery.value.trim(), draftPlatform.value, arrivalStatus)
+  emit('search', draftQuery.value.trim(), draftPlatform.value, arrivalStatus, draftAccountId.value)
+}
+
+function applyAccount(account: string): void {
+  draftAccountId.value = account
+  emit('search', draftQuery.value.trim(), draftPlatform.value, draftArrivalStatus.value, account)
 }
 
 function clearFilters(): void {
   draftPlatform.value = ''
   draftArrivalStatus.value = ''
+  draftAccountId.value = ''
   submitSearch()
 }
 </script>
@@ -375,6 +390,15 @@ function clearFilters(): void {
           <button type="button" :class="{ active: draftArrivalStatus === 'pending' }" :aria-pressed="draftArrivalStatus === 'pending'" :disabled="!online" @click="applyArrivalStatus('pending')">未收货</button>
           <button type="button" :class="{ active: draftArrivalStatus === 'review' }" :aria-pressed="draftArrivalStatus === 'review'" :disabled="!online" @click="applyArrivalStatus('review')">待确认</button>
           <button type="button" :class="{ active: draftArrivalStatus === 'received' }" :aria-pressed="draftArrivalStatus === 'received'" :disabled="!online" @click="applyArrivalStatus('received')">已收货</button>
+        </div>
+        <div class="account-filters" role="group" aria-label="采购账号筛选">
+          <span class="filter-label">采购账号</span>
+          <select :value="draftAccountId" :disabled="!online" aria-label="选择采购账号" @change="applyAccount(($event.target as HTMLSelectElement).value)">
+            <option value="">全部账号</option>
+            <option v-for="account in accountOptions" :key="account.id" :value="String(account.id)">
+              {{ account.account_label }}（{{ account.platform === '1688' ? '1688' : '拼多多' }}）
+            </option>
+          </select>
         </div>
       </div>
     </div>
@@ -520,7 +544,7 @@ function clearFilters(): void {
 
     <div v-else-if="!error" class="empty-state orders-empty">
       <span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5" /></svg></span>
-      <p>{{ query || platform || arrivalStatus ? '没有符合当前筛选条件的采购订单。' : '还没有导入采购订单。' }}</p>
+      <p>{{ query || platform || arrivalStatus || accountId ? '没有符合当前筛选条件的采购订单。' : '还没有导入采购订单。' }}</p>
     </div>
 
     <footer v-if="orders.length" class="orders-load-footer" aria-label="订单加载状态">

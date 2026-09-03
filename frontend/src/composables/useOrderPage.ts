@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import type { OrderArrivalFilter, OrderListParams, OrderListResponse, OrderPlatformFilter, PurchaseOrder } from '@/types'
+import type { OrderAccountOption, OrderArrivalFilter, OrderListParams, OrderListResponse, OrderPlatformFilter, PurchaseOrder } from '@/types'
 import { ApiError, listOrders } from '@/services/api'
 
 interface OrderPageOptions {
@@ -13,6 +13,7 @@ interface OrderFilters {
   query: string
   platform: OrderPlatformFilter
   arrivalStatus: OrderArrivalFilter
+  accountId: string
 }
 
 export function useOrderPage(options: OrderPageOptions) {
@@ -24,6 +25,8 @@ export function useOrderPage(options: OrderPageOptions) {
   const query = ref('')
   const platform = ref<OrderPlatformFilter>('')
   const arrivalStatus = ref<OrderArrivalFilter>('')
+  const accountId = ref('')
+  const accountOptions = ref<OrderAccountOption[]>([])
   const loading = ref(false)
   const error = ref('')
   const lastSyncedAt = ref<string | null>(null)
@@ -39,6 +42,7 @@ export function useOrderPage(options: OrderPageOptions) {
       query: query.value,
       platform: platform.value,
       arrivalStatus: arrivalStatus.value,
+      accountId: accountId.value,
     }
   }
 
@@ -64,6 +68,7 @@ export function useOrderPage(options: OrderPageOptions) {
         query: filters.query,
         platform: filters.platform,
         arrival_status: filters.arrivalStatus,
+        account_id: filters.accountId || undefined,
       })
       if (activeVersion !== requestVersion) return false
 
@@ -93,8 +98,10 @@ export function useOrderPage(options: OrderPageOptions) {
         query.value = filters.query
         platform.value = filters.platform
         arrivalStatus.value = filters.arrivalStatus
+        accountId.value = filters.accountId
       }
       lastSyncedAt.value = response.last_synced_at ?? null
+      if (response.account_options) accountOptions.value = response.account_options
       loaded.value = true
       if (activeInvalidationVersion === invalidationVersion) invalidated.value = false
       return true
@@ -122,11 +129,13 @@ export function useOrderPage(options: OrderPageOptions) {
     nextQuery: string,
     nextPlatform: OrderPlatformFilter,
     nextArrivalStatus: OrderArrivalFilter,
+    nextAccountId = '',
   ): Promise<void> {
     const filters = {
       query: nextQuery.trim(),
       platform: nextPlatform,
       arrivalStatus: nextArrivalStatus,
+      accountId: nextAccountId,
     }
     // Keep the currently applied query and results until the new request
     // succeeds. The generation token invalidates any in-flight append, so a
@@ -165,6 +174,8 @@ export function useOrderPage(options: OrderPageOptions) {
     query.value = ''
     platform.value = ''
     arrivalStatus.value = ''
+    accountId.value = ''
+    accountOptions.value = []
     loading.value = false
     error.value = ''
     lastSyncedAt.value = null
@@ -181,6 +192,8 @@ export function useOrderPage(options: OrderPageOptions) {
     query,
     platform,
     arrivalStatus,
+    accountId,
+    accountOptions,
     hasMore,
     loading,
     error,

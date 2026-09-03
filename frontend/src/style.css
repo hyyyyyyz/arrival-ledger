@@ -450,7 +450,7 @@ svg {
 
 .receipt-card { position: relative; display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: var(--space-3); min-height: 88px; padding: var(--space-3) 0; border-top: 1px solid var(--border-subtle); }
 .group-label + .receipt-card, .server-group .receipt-card:first-child { border-top: 0; }
-.receipt-card > img { width: 64px; height: 64px; border-radius: var(--radius-sm); object-fit: cover; background: var(--color-neutral-100); }
+.receipt-card > .photo-button { width: 64px; height: 64px; border-radius: var(--radius-sm); background: var(--color-neutral-100); }
 .receipt-body { min-width: 0; }
 .receipt-body > strong { display: block; margin-top: var(--space-1); overflow: hidden; font-family: var(--font-mono); font-size: 14px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .receipt-body > strong.muted { color: var(--color-neutral-700); font-family: var(--font-sans); }
@@ -572,6 +572,8 @@ svg {
 .manual-correction-button .spinner { width: 14px; height: 14px; }
 .order-action-error { flex-basis: 100%; margin: 0; padding: 5px 7px; color: var(--color-danger-800); border-radius: var(--radius-sm); background: var(--color-danger-50); font-size: var(--text-meta); line-height: 1.4; }
 .orders-empty { min-height: 180px; border-radius: var(--radius-lg); }
+.account-filters { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.account-filters select { min-height: 40px; min-width: min(100%, 260px); padding: 0 34px 0 10px; color: var(--color-neutral-900); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-panel); font-size: var(--text-meta); }
 
 .orders-load-footer { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-3) 2px var(--space-1); }
 .orders-load-footer p { margin: 0; color: var(--color-neutral-700); font-size: var(--text-meta); }
@@ -646,6 +648,14 @@ svg {
 .pdd-account-message, .pdd-account-footnote { margin: 0; color: var(--color-warning-800); font-size: var(--text-meta); line-height: 1.45; overflow-wrap: anywhere; }
 .pdd-account-footnote { color: var(--color-neutral-600); }
 
+.photo-button { display: block; width: 92px; height: 92px; flex: none; padding: 0; overflow: hidden; border: 0; border-radius: var(--radius-md); background: var(--surface-subtle); cursor: zoom-in; }
+.photo-button img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.photo-button:focus-visible { outline: 3px solid var(--color-brand-500); outline-offset: 2px; }
+.photo-preview-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: var(--space-3); background: rgb(0 0 0 / 78%); }
+.photo-preview-dialog { position: relative; display: grid; max-width: min(96vw, 900px); max-height: 94vh; place-items: center; }
+.photo-preview-dialog img { display: block; max-width: 96vw; max-height: 90vh; object-fit: contain; border-radius: var(--radius-md); box-shadow: var(--shadow-float); }
+.photo-preview-close { position: absolute; z-index: 1; top: -12px; right: -12px; display: grid; width: 40px; height: 40px; place-items: center; color: var(--color-white); border: 1px solid rgb(255 255 255 / 45%); border-radius: 50%; background: rgb(0 0 0 / 70%); font-size: 26px; line-height: 1; }
+
 .modal-backdrop { position: fixed; z-index: 80; inset: 0; display: grid; align-items: end; padding: var(--space-3); padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); background: rgb(8 23 15 / 54%); }
 .confirmation-dialog { width: min(100%, 440px); margin: 0 auto; padding: var(--space-4); color: var(--color-neutral-950); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-panel); box-shadow: var(--shadow-float); }
 .dialog-icon { display: grid; width: 44px; height: 44px; margin-bottom: var(--space-3); place-items: center; color: var(--color-success-800); border-radius: var(--radius-md); background: var(--color-success-50); font-size: 23px; }
@@ -708,7 +718,7 @@ svg {
   .camera-button { padding-right: var(--space-3); padding-left: var(--space-3); }
   .camera-icon { width: 42px; height: 42px; }
   .receipt-card { grid-template-columns: 48px minmax(0, 1fr); gap: var(--space-2); }
-  .receipt-card > img { width: 48px; height: 48px; }
+  .receipt-card > .photo-button { width: 48px; height: 48px; }
   .inline-edit { grid-template-columns: minmax(0, 1fr); }
   .inline-edit-actions { justify-content: flex-end; }
   .people-page { padding: var(--space-3); }

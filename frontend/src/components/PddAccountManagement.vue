@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ApiError, createPlatformAccount, listPlatformAccounts } from '@/services/api'
 import type { CreatePlatformAccountInput, PlatformAccount, PlatformAccountSyncStatus } from '@/types'
 import { formatDateTime } from '@/utils/format'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   online: boolean
-}>()
+  platform?: 'pdd' | '1688'
+}>(), { platform: 'pdd' })
 
 const emit = defineEmits<{
   authRequired: []
@@ -29,6 +30,8 @@ const form = ref<CreatePlatformAccountInput>({
   display_label: '',
 })
 
+const platformName = computed(() => props.platform === '1688' ? '1688' : '拼多多')
+
 function handleRequestError(reason: unknown, fallback: string): string {
   if (reason instanceof ApiError && reason.status === 401) {
     emit('authRequired')
@@ -36,7 +39,9 @@ function handleRequestError(reason: unknown, fallback: string): string {
   }
   if (reason instanceof ApiError && reason.status === 403) {
     permissionDenied.value = true
-    return '仅管理员可以查看和登记拼多多采购账号。'
+    return props.platform === 'pdd'
+      ? '仅管理员可以查看和登记拼多多采购账号。'
+      : `仅管理员可以查看和管理${platformName.value}采购账号。`
   }
   if (reason instanceof ApiError && reason.status === 0) return '网络不可用，暂时无法连接账号管理服务。'
   return reason instanceof Error ? reason.message : fallback
@@ -47,11 +52,11 @@ async function load(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    const response = await listPlatformAccounts('pdd')
+    const response = await listPlatformAccounts(props.platform)
     accounts.value = response.items
     total.value = response.total
   } catch (reason) {
-    loadError.value = handleRequestError(reason, '拼多多账号列表加载失败')
+    loadError.value = handleRequestError(reason, `${platformName.value}账号列表加载失败`)
   } finally {
     loading.value = false
   }
@@ -139,24 +144,25 @@ onMounted(() => void load())
 </script>
 
 <template>
-  <section class="pdd-account-panel" aria-labelledby="pdd-accounts-title">
+  <section class="pdd-account-panel" :aria-labelledby="`${props.platform}-accounts-title`">
     <div class="pdd-account-heading">
       <div>
         <p class="eyebrow">采购来源</p>
-        <h2 id="pdd-accounts-title">拼多多账号</h2>
-        <p>这里只登记账号，不保存密码或 Cookie。首次登录和重新验证都在同步电脑完成。</p>
+        <h2 :id="`${props.platform}-accounts-title`">{{ platformName }}账号</h2>
+        <p v-if="props.platform === '1688'">查看 1688 账号健康状态、最近检查和同步结果。</p>
+        <p v-else>这里只登记账号，不保存密码或 Cookie。首次登录和重新验证都在同步电脑完成。</p>
       </div>
       <div class="pdd-account-heading-actions">
         <button class="secondary-compact-button" type="button" :disabled="!online || loading || permissionDenied" @click="load">
           {{ loading ? '刷新中…' : '刷新状态' }}
         </button>
-        <button ref="createButton" class="primary-compact-button" type="button" :disabled="!online || permissionDenied" @click="toggleCreate">
+        <button v-if="props.platform === 'pdd'" ref="createButton" class="primary-compact-button" type="button" :disabled="!online || permissionDenied" @click="toggleCreate">
           {{ showCreate ? '取消登记' : '登记账号' }}
         </button>
       </div>
     </div>
 
-    <form v-if="showCreate" class="pdd-account-form" @submit.prevent="submitCreate">
+    <form v-if="showCreate && props.platform === 'pdd'" class="pdd-account-form" @submit.prevent="submitCreate">
       <label>
         <span>账号名称</span>
         <input ref="labelInput" v-model="form.display_label" maxlength="128" autocomplete="off" placeholder="例如 主采购账号" />
@@ -181,13 +187,14 @@ onMounted(() => void load())
 
     <div v-if="loading && !accounts.length" class="people-loading" role="status">
       <span class="spinner" aria-hidden="true"></span>
-      <p>正在加载拼多多账号…</p>
+      <p>正在加载{{ platformName }}账号…</p>
     </div>
     <div v-else-if="!accounts.length && !loadError" class="pdd-account-empty">
-      <strong>还没有登记拼多多账号</strong>
-      <p>先登记账号名称和稳定标识，再到同步电脑完成登录。</p>
+      <strong>还没有登记{{ platformName }}账号</strong>
+      <p v-if="props.platform === 'pdd'">先登记账号名称和稳定标识，再到同步电脑完成登录。</p>
+      <p v-else>请先完成 1688 账号配置并执行一次同步。</p>
     </div>
-    <div v-else class="pdd-account-list" :aria-label="`共 ${total} 个拼多多账号`">
+    <div v-else class="pdd-account-list" :aria-label="`共 ${total} 个${platformName}账号`">
       <article v-for="account in accounts" :key="account.id" class="pdd-account-card">
         <div class="pdd-account-card-topline">
           <div class="pdd-account-identity">

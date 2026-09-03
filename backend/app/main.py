@@ -58,6 +58,7 @@ from .schemas import (
     OrderArrivalAuditListResponse,
     OrderArrivalStateOut,
     OrderArrivalStatusUpdate,
+    OrderAccountOptionOut,
     PasswordChangeRequest,
     PlatformAccountCreate,
     PlatformAccountListResponse,
@@ -315,23 +316,39 @@ SELECT
     accounts.account_key,
     accounts.display_label,
     accounts.source,
-    COALESCE(sync_state.status, 'NEEDS_LOGIN') AS status,
-    sync_state.worker_id,
+    COALESCE(
+        sync_state.status,
+        CASE
+            WHEN accounts.platform = '1688' AND ali_state.last_error_code IS NOT NULL
+                THEN 'NETWORK_ERROR'
+            WHEN accounts.platform = '1688' AND ali_state.last_success_at IS NOT NULL
+                THEN 'OK'
+            ELSE 'NEEDS_LOGIN'
+        END
+    ) AS status,
+    COALESCE(
+        sync_state.worker_id,
+        CASE WHEN accounts.platform = '1688' AND ali_state.account_key IS NOT NULL
+             THEN 'ali1688-api' END
+    ) AS worker_id,
     (
         SELECT COUNT(*)
         FROM purchase_orders
         WHERE purchase_orders.platform_account_id = accounts.id
     ) AS order_count,
-    sync_state.last_attempt_at,
-    sync_state.last_success_at,
-    COALESCE(sync_state.last_count, 0) AS last_count,
-    sync_state.message,
+    COALESCE(sync_state.last_attempt_at, ali_state.updated_at) AS last_attempt_at,
+    COALESCE(sync_state.last_success_at, ali_state.last_success_at) AS last_success_at,
+    COALESCE(sync_state.last_count, ali_state.last_count, 0) AS last_count,
+    COALESCE(sync_state.message, ali_state.last_error_message) AS message,
     accounts.created_at,
     accounts.updated_at,
-    COALESCE(sync_state.updated_at, accounts.updated_at) AS status_updated_at
+    COALESCE(sync_state.updated_at, ali_state.updated_at, accounts.updated_at) AS status_updated_at
 FROM platform_accounts AS accounts
 LEFT JOIN platform_account_sync_state AS sync_state
   ON sync_state.platform_account_id = accounts.id
+LEFT JOIN ali1688_sync_state AS ali_state
+  ON accounts.platform = '1688'
+ AND ali_state.account_key = accounts.account_key
 """
 
 
@@ -1068,7 +1085,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     def list_platform_accounts(
         request: Request,
         admin: Annotated[AuthenticatedUser, Depends(require_admin)],
-        platform: Annotated[Literal["pdd"], Query()] = "pdd",
+        platform: Annotated[Literal["pdd", "1688"], Query()] = "pdd",
     ) -> PlatformAccountListResponse:
         del admin
         with _database(request).connect() as connection:
@@ -2265,6 +2282,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         arrival_status: Annotated[
             Literal["all", "pending", "review", "received"], Query()
         ] = "all",
+        account_id: Annotated[int | None, Query(ge=1)] = None,
     ) -> PurchaseOrderListResponse:
         del user
         filters: list[str] = []
@@ -2272,6 +2290,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         if platform is not None:
             filters.append("accounts.platform = :platform")
             parameters["platform"] = platform
+        if account_id is not None:
+            filters.append("accounts.id = :account_id")
+            parameters["account_id"] = account_id
 
         search = query.strip() if query is not None else ""
         if search:
@@ -2668,6 +2689,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                     """,
                     order_ids,
                 ).fetchall()
+
                 package_rows = connection.execute(
                     f"""
                     WITH canonical_receipt_tracking AS (
@@ -2747,6 +2769,19 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                     order_ids,
                 ).fetchall()
 
+            account_options = connection.execute(
+                """
+                SELECT
+                    accounts.id AS id,
+                    accounts.platform AS platform,
+                    COALESCE(NULLIF(TRIM(accounts.display_label), ''), '账号 ' || accounts.id)
+                        AS account_label
+                FROM platform_accounts AS accounts
+                WHERE accounts.platform IN ('pdd', '1688')
+                ORDER BY accounts.platform, account_label, accounts.id
+                """
+            ).fetchall()
+
         items_by_order: dict[int, list[dict[str, str | None]]] = {
             order_id: [] for order_id in order_ids
         }
@@ -2775,6 +2810,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             )
 
         return PurchaseOrderListResponse(
+            account_options=[OrderAccountOptionOut(**dict(row)) for row in account_options],
             items=[
                 PurchaseOrderOut(
                     id=str(row["id"]),

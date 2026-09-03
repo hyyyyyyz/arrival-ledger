@@ -64,6 +64,8 @@ const {
   query: orderQuery,
   platform: orderPlatform,
   arrivalStatus: orderArrivalStatus,
+  accountId: orderAccountId,
+  accountOptions: orderAccountOptions,
   loading: ordersLoading,
   error: ordersError,
   lastSyncedAt: ordersLastSyncedAt,
@@ -439,6 +441,11 @@ onBeforeUnmount(() => {
           :online="online"
           @auth-required="handleAuthRequired"
         />
+        <PddAccountManagement
+          :online="online"
+          platform="1688"
+          @auth-required="handleAuthRequired"
+        />
       </div>
 
       <OrderList
@@ -448,6 +455,8 @@ onBeforeUnmount(() => {
         :query="orderQuery"
         :platform="orderPlatform"
         :arrival-status="orderArrivalStatus"
+        :account-id="orderAccountId"
+        :account-options="orderAccountOptions"
         :loading="ordersLoading"
         :error="ordersError"
         :last-synced-at="ordersLastSyncedAt"
@@ -480,7 +489,7 @@ onBeforeUnmount(() => {
       </button>
       <button v-if="user.role === 'ADMIN'" type="button" :class="{ active: activeTab === 'people' }" :aria-current="activeTab === 'people' ? 'page' : undefined" @click="selectTab('people')">
         <span aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3" /><path d="M4 19v-2a5 5 0 0 1 10 0v2M16 8h4M18 6v4" /></svg></span>
-        <strong>人员</strong>
+        <strong>后台管理</strong>
       </button>
     </nav>
   </div>
