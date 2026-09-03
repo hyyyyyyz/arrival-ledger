@@ -207,6 +207,52 @@ def test_password_byte_limit_accepts_72_and_rejects_more_than_72(
     assert "72 UTF-8 bytes" in oversized_login.text
 
 
+def test_user_can_change_own_password_and_other_sessions_are_revoked(
+    authenticated_client: TestClient,
+) -> None:
+    created = _create_user(authenticated_client, username="password.receiver")
+    assert created.status_code == 201
+    receiver_client = TestClient(authenticated_client.app)
+    assert _login(receiver_client, "password.receiver", RECEIVER_PASSWORD).status_code == 200
+    assert authenticated_client.post("/api/auth/login", json={
+        "username": "password.receiver",
+        "password": RECEIVER_PASSWORD,
+    }).status_code == 200
+
+    changed = receiver_client.post(
+        "/api/auth/change-password",
+        json={"current_password": RECEIVER_PASSWORD, "new_password": "New-Receiver-2026!"},
+    )
+    assert changed.status_code == 204
+    assert receiver_client.get("/api/auth/me").status_code == 200
+
+    old_session = TestClient(authenticated_client.app)
+    assert _login(old_session, "password.receiver", RECEIVER_PASSWORD).status_code == 401
+    assert _login(old_session, "password.receiver", "New-Receiver-2026!").status_code == 200
+    receiver_client.close()
+    old_session.close()
+
+
+def test_change_password_rejects_wrong_current_and_weak_new_password(
+    authenticated_client: TestClient,
+) -> None:
+    created = _create_user(authenticated_client, username="password.validation")
+    assert created.status_code == 201
+    client = TestClient(authenticated_client.app)
+    assert _login(client, "password.validation", RECEIVER_PASSWORD).status_code == 200
+    assert client.post(
+        "/api/auth/change-password",
+        json={"current_password": "wrong", "new_password": "New-Receiver-2026!"},
+    ).status_code == 401
+    weak = client.post(
+        "/api/auth/change-password",
+        json={"current_password": RECEIVER_PASSWORD, "new_password": "123456"},
+    )
+    assert weak.status_code == 422
+    assert _login(client, "password.validation", RECEIVER_PASSWORD).status_code == 200
+    client.close()
+
+
 def test_user_management_audit_records_actor_target_and_history(
     authenticated_client: TestClient,
 ) -> None:

@@ -117,6 +117,14 @@ export async function logout(): Promise<void> {
   await request('/auth/logout', { method: 'POST' })
 }
 
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  await request('/auth/change-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  })
+}
+
 export async function listReceipts(limit = 50): Promise<Receipt[]> {
   const payload = await request<Receipt[] | { items: Receipt[] }>(`/receipts?limit=${limit}`)
   return Array.isArray(payload) ? payload : payload.items

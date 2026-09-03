@@ -220,6 +220,7 @@ svg {
 
 .app-kicker { margin: 0 0 2px; color: var(--color-brand-100); font-size: var(--text-meta); font-weight: 700; }
 .app-header h1 { margin: 0; font-size: var(--text-page-title); line-height: 1.2; letter-spacing: -.025em; }
+.header-actions { display: flex; align-items: center; gap: var(--space-2); }
 
 .user-button {
   display: flex;
@@ -236,6 +237,8 @@ svg {
 .user-button-static { cursor: default; user-select: none; }
 .user-button > span { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 50%; color: var(--color-brand-950); background: var(--color-brand-100); font-weight: 800; }
 .user-button small { max-width: 76px; overflow: hidden; font-size: var(--text-meta); text-overflow: ellipsis; white-space: nowrap; }
+.header-action-button { min-height: 40px; padding: 0 10px; color: var(--color-brand-800); border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-panel); font-size: var(--text-meta); font-weight: 750; }
+.header-action-button:disabled { color: var(--color-neutral-500); background: var(--surface-subtle); }
 
 .notice-banner {
   padding: 10px var(--space-4);
@@ -656,6 +659,16 @@ svg {
 .dialog-actions button { min-height: 48px; color: var(--color-neutral-800); border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-panel); font-weight: 750; }
 .dialog-actions button.confirm { color: var(--color-white); border-color: var(--color-success-800); background: var(--color-success-800); }
 .dialog-actions button.confirm.danger { border-color: var(--color-danger-800); background: var(--color-danger-800); }
+.password-dialog { width: min(100%, 440px); margin: 0 auto; padding: var(--space-4); color: var(--color-neutral-950); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-panel); box-shadow: var(--shadow-float); }
+.password-dialog h2 { margin: 0; font-size: 20px; line-height: 1.3; }
+.password-dialog > p { margin: var(--space-2) 0 0; color: var(--color-neutral-700); font-size: var(--text-body); line-height: 1.55; }
+.password-form { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
+.password-form label { display: grid; gap: var(--space-1); color: var(--color-neutral-800); font-size: var(--text-meta); font-weight: 700; }
+.password-form input { width: 100%; min-height: 48px; padding: 10px var(--space-3); color: var(--color-neutral-950); border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-panel); font-size: 16px; }
+.password-error, .password-notice { margin: 0; padding: 10px var(--space-3); border-radius: var(--radius-sm); font-size: var(--text-meta); line-height: 1.45; }
+.password-error { color: var(--color-danger-800); background: var(--color-danger-50); }
+.password-notice { color: var(--color-success-800); background: var(--color-success-50); }
+.password-actions { margin-top: var(--space-2); }
 
 .desktop-brand { display: none; }
 .bottom-nav { position: fixed; z-index: 20; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: repeat(3, 1fr); min-height: 68px; padding: var(--space-1) max(var(--space-3), env(safe-area-inset-right)) max(var(--space-1), env(safe-area-inset-bottom)) max(var(--space-3), env(safe-area-inset-left)); border-top: 1px solid var(--border-subtle); background: var(--surface-panel); background: color-mix(in srgb, var(--surface-panel) 94%, transparent); box-shadow: 0 -8px 24px rgb(18 53 36 / 8%); box-shadow: 0 -8px 24px color-mix(in srgb, var(--color-brand-950) 8%, transparent); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }

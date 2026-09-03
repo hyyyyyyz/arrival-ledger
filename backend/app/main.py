@@ -58,6 +58,7 @@ from .schemas import (
     OrderArrivalAuditListResponse,
     OrderArrivalStateOut,
     OrderArrivalStatusUpdate,
+    PasswordChangeRequest,
     PlatformAccountCreate,
     PlatformAccountListResponse,
     PlatformAccountOut,
@@ -1765,6 +1766,60 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             user=user.public(),
             auth_required=_settings(request).auth_required,
         )
+
+    @application.post(
+        "/api/auth/change-password",
+        status_code=204,
+        response_class=Response,
+        response_model=None,
+    )
+    def change_password(
+        payload: PasswordChangeRequest,
+        request: Request,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> None:
+        """Change only the authenticated user's password.
+
+        The current session remains valid so the operator is not abruptly
+        logged out, while every other session for the account is revoked.
+        This also works in trusted-LAN mode, where there is no cookie session
+        to preserve.
+        """
+        if payload.current_password == payload.new_password:
+            raise HTTPException(status_code=422, detail="new password must differ from current password")
+        _validate_strong_password(payload.new_password)
+        database = _database(request)
+        timestamp = db_timestamp(utc_now())
+        with database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT id, password_hash, is_active FROM users WHERE id = ?",
+                (user.id,),
+            ).fetchone()
+            if row is None or not row["is_active"]:
+                connection.rollback()
+                raise HTTPException(status_code=401, detail="account is no longer active")
+            if not verify_password(payload.current_password, row["password_hash"]):
+                connection.rollback()
+                raise HTTPException(status_code=401, detail="current password is incorrect")
+            connection.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (hash_password(payload.new_password), user.id),
+            )
+            if user.session_id == "trusted-lan":
+                connection.execute(
+                    "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                    (timestamp, user.id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE sessions SET revoked_at = ?
+                    WHERE user_id = ? AND id <> ? AND revoked_at IS NULL
+                    """,
+                    (timestamp, user.id, user.session_id),
+                )
+            connection.commit()
 
     @application.get("/api/users", response_model=UserListResponse)
     def list_users(

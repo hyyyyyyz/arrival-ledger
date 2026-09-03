@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import DashboardStats from '@/components/DashboardStats.vue'
+import ChangePassword from '@/components/ChangePassword.vue'
 import LoginView from '@/components/LoginView.vue'
 import OrderList from '@/components/OrderList.vue'
 import PddAccountManagement from '@/components/PddAccountManagement.vue'
@@ -365,13 +366,16 @@ onBeforeUnmount(() => {
         <p class="app-kicker">到货管家</p>
         <h1>{{ pageTitle }}</h1>
       </div>
-      <button v-if="authRequired" class="user-button" type="button" title="退出登录" @click="handleLogout">
-        <span>{{ user.display_name.slice(0, 1) }}</span>
-        <small>{{ user.display_name }}</small>
-      </button>
-      <div v-else class="user-button user-button-static" title="局域网直接使用">
-        <span>✓</span>
-        <small>直接使用</small>
+      <div class="header-actions">
+        <ChangePassword v-if="authRequired" :online="online" @auth-required="handleAuthRequired" />
+        <button v-if="authRequired" class="user-button" type="button" title="退出登录" @click="handleLogout">
+          <span>{{ user.display_name.slice(0, 1) }}</span>
+          <small>{{ user.display_name }}</small>
+        </button>
+        <div v-else class="user-button user-button-static" title="局域网直接使用">
+          <span>✓</span>
+          <small>直接使用</small>
+        </div>
       </div>
     </header>
 
