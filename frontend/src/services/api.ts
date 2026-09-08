@@ -20,6 +20,9 @@ import type {
 } from '@/types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '')
+export const API_REQUEST_TIMEOUT_MS = 30_000
+export const RECEIPT_UPLOAD_TIMEOUT_MS = 60_000
+export const RECEIPT_PHOTO_READ_TIMEOUT_MS = 15_000
 
 export class ApiError extends Error {
   readonly status: number
@@ -51,28 +54,72 @@ async function parseResponse(response: Response): Promise<unknown> {
   return response.text()
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  let response: Response
-  try {
-    response = await fetch(`${API_BASE}${path}`, {
-      ...init,
-      credentials: 'include',
-      cache: 'no-store',
-      headers: {
-        Accept: 'application/json',
-        'X-Arrival-Client': 'wechat-h5',
-        ...init.headers,
-      },
-    })
-  } catch {
-    throw new ApiError(0, '网络不可用，已保留在本机等待重试')
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  timeoutMs = API_REQUEST_TIMEOUT_MS,
+  prepareBody?: (signal: AbortSignal) => Promise<BodyInit>,
+): Promise<T> {
+  const controller = new AbortController()
+  const externalSignal = init.signal
+  let interrupt!: (error: ApiError) => void
+  const interrupted = new Promise<never>((_, reject) => { interrupt = reject })
+  const cancel = (): void => {
+    interrupt(new ApiError(0, '请求已取消，服务器结果尚未确认', { cancelled: true, responseUncertain: true }))
+    controller.abort()
   }
+  const timeout = setTimeout(() => {
+    interrupt(new ApiError(408, '请求超时，服务器结果尚未确认，请重试', { timeout: true, responseUncertain: true }))
+    controller.abort()
+  }, timeoutMs)
 
-  const payload = await parseResponse(response)
-  if (!response.ok) {
-    throw new ApiError(response.status, errorMessage(payload, `请求失败（${response.status}）`), payload)
+  try {
+    externalSignal?.addEventListener('abort', cancel, { once: true })
+    if (externalSignal?.aborted) {
+      cancel()
+      return await interrupted
+    }
+
+    const operation = (async (): Promise<T> => {
+      try {
+        const body = prepareBody ? await prepareBody(controller.signal) : init.body
+        if (controller.signal.aborted) return await interrupted
+        const response = await fetch(`${API_BASE}${path}`, {
+          ...init,
+          body,
+          signal: controller.signal,
+          credentials: 'include',
+          cache: 'no-store',
+          headers: {
+            Accept: 'application/json',
+            'X-Arrival-Client': 'wechat-h5',
+            ...init.headers,
+          },
+        })
+        const payload = await parseResponse(response)
+        if (!response.ok) {
+          // Nginx may reject an interrupted multipart body before the app is
+          // reached. Do not confuse its empty/HTML 400 with a JSON validation
+          // failure; only the former is safe for automatic transport retries.
+          if (path === '/receipts' && response.status === 400 && typeof payload === 'string'
+            && (!payload.trim() || /^\s*(?:<!doctype html|<html)/i.test(payload))) {
+            throw new ApiError(400, '照片传输中断，将自动重试；本机照片仍保留', { transportFailure: true, responseUncertain: true })
+          }
+          throw new ApiError(response.status, errorMessage(payload, `请求失败（${response.status}）`), payload)
+        }
+        return payload as T
+      } catch (error) {
+        if (error instanceof ApiError) throw error
+        throw new ApiError(0, '网络连接或服务器响应中断，结果尚未确认，请重试', { responseUncertain: true })
+      }
+    })()
+    // Abort is best-effort in embedded browsers. The race also bounds body parsing
+    // and settles the caller if fetch/body consumption ignores the abort signal.
+    return await Promise.race([operation, interrupted])
+  } finally {
+    clearTimeout(timeout)
+    externalSignal?.removeEventListener('abort', cancel)
   }
-  return payload as T
 }
 
 type AuthPayload = User | { user: User; auth_required?: boolean }
@@ -223,20 +270,57 @@ export async function createManualOrderBatch(input: ManualOrderBatchCreateInput)
   })
 }
 
-export async function createReceipt(item: UploadQueueItem): Promise<Receipt> {
-  const body = new FormData()
-  body.append('client_event_id', item.clientEventId)
-  body.append('captured_at', item.occurredAt)
-  body.append('input_method', item.inputMethod || 'PHOTO_CAPTURE')
-  body.append('device_id', item.deviceId)
-  if (item.trackingNo) body.append('tracking_no', item.trackingNo)
-  body.append('photo', item.photo, item.fileName)
+async function receiptBody(item: UploadQueueItem, signal: AbortSignal): Promise<FormData> {
+  let interrupt!: (error: ApiError) => void
+  const interrupted = new Promise<never>((_, reject) => { interrupt = reject })
+  const cancel = (): void => interrupt(new ApiError(0, '照片读取已取消', { cancelled: true, localPhotoRead: true }))
+  const timeout = setTimeout(() => {
+    interrupt(new ApiError(0, '本机照片读取超时，请保留照片并重试', { localPhotoRead: true, timeout: true }))
+  }, RECEIPT_PHOTO_READ_TIMEOUT_MS)
+  try {
+    signal.addEventListener('abort', cancel, { once: true })
+    if (signal.aborted) {
+      cancel()
+      return await interrupted
+    }
+    // Materialize IndexedDB-backed Blob bytes before multipart encoding. Wrapping
+    // the stored Blob itself can retain its disk backing in embedded WebKit.
+    const bytes = await Promise.race([item.photo.arrayBuffer(), interrupted])
+    if (bytes.byteLength === 0 || bytes.byteLength !== item.photo.size) {
+      throw new ApiError(0, '本机照片内容不完整，请保留照片并重试', { localPhotoRead: true })
+    }
+    const body = new FormData()
+    body.append('client_event_id', item.clientEventId)
+    body.append('captured_at', item.occurredAt)
+    body.append('input_method', item.inputMethod || 'PHOTO_CAPTURE')
+    body.append('device_id', item.deviceId)
+    if (item.trackingNo) body.append('tracking_no', item.trackingNo)
+    body.append('photo', new Blob([bytes], { type: item.photo.type }), item.fileName)
+    return body
+  } catch (error) {
+    if (error instanceof ApiError) throw error
+    throw new ApiError(0, '无法读取本机照片，请保留照片并重试', { localPhotoRead: true })
+  } finally {
+    clearTimeout(timeout)
+    signal.removeEventListener('abort', cancel)
+  }
+}
 
-  const payload = await request<Receipt | { receipt: Receipt }>('/receipts', {
+export async function createReceipt(item: UploadQueueItem, signal?: AbortSignal): Promise<Receipt> {
+  const payload = await request<unknown>('/receipts', {
     method: 'POST',
-    body,
+    signal,
+  }, RECEIPT_UPLOAD_TIMEOUT_MS, (requestSignal) => receiptBody(item, requestSignal))
+  const receipt = payload && typeof payload === 'object' && 'receipt' in payload ? payload.receipt : payload
+  if (receipt && typeof receipt === 'object' && 'id' in receipt && 'client_event_id' in receipt) {
+    const validId = (typeof receipt.id === 'string' && receipt.id.trim().length > 0) ||
+      (typeof receipt.id === 'number' && Number.isSafeInteger(receipt.id) && receipt.id > 0)
+    if (validId && receipt.client_event_id === item.clientEventId) return receipt as Receipt
+  }
+  // A 2xx status alone must not authorize deleting durable photo evidence.
+  throw new ApiError(0, '服务器收货确认无效，结果尚未确认，请重试', {
+    invalidReceiptConfirmation: true, responseUncertain: true,
   })
-  return unwrapReceipt(payload)
 }
 
 export async function updateReceiptTracking(

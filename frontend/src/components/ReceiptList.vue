@@ -183,11 +183,11 @@ async function submitServer(receipt: Receipt): Promise<void> {
                 <path v-if="item.uploadState === 'FAILED'" d="M12 4 21 20H3Zm0 5v5m0 3h.01" />
                 <template v-else><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></template>
               </svg>
-              {{ item.uploadState === 'UPLOADING' ? '上传中' : item.uploadState === 'FAILED' ? '同步失败' : item.readyToUpload ? '待上传' : '识别中' }}
+              {{ item.uploadState === 'UPLOADING' ? '上传中' : item.uploadState === 'FAILED' ? '同步失败' : item.needsPreparation ? '待处理' : item.readyToUpload ? '待上传' : '识别中' }}
             </span>
             <time>{{ formatDateTime(item.occurredAt) }}</time>
           </div>
-          <strong :class="{ muted: !item.trackingNo }">{{ item.trackingNo || '待补快递单号' }}</strong>
+          <strong :class="{ muted: !item.trackingNo }">{{ item.trackingNo || '等待自动识别单号' }}</strong>
           <p v-if="item.lastError" class="record-error">{{ item.lastError }}</p>
           <p v-else>照片已安全保存在当前手机</p>
           <p class="operator-name">拍摄人：{{ item.ownerDisplayName }}</p>
@@ -204,7 +204,7 @@ async function submitServer(receipt: Receipt): Promise<void> {
             <button type="button" :disabled="Boolean(editKey)" @click="beginEdit(`local-${item.clientEventId}`, item.trackingNo)">
               {{ item.trackingNo ? '修正单号' : '补录单号' }}
             </button>
-            <button v-if="item.uploadState === 'FAILED' || (item.uploadState === 'QUEUED' && item.readyToUpload)" type="button" @click="emit('retry', item.clientEventId)">
+            <button v-if="item.uploadState === 'FAILED' || item.uploadState === 'QUEUED'" type="button" @click="emit('retry', item.clientEventId)">
               {{ item.uploadState === 'FAILED' ? '立即重试' : '立即上传' }}
             </button>
           </div>

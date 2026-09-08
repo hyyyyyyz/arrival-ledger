@@ -68,7 +68,7 @@ function canvasToJpeg(canvas: HTMLCanvasElement, quality: number): Promise<Blob>
 }
 
 export async function compressImage(
-  file: File,
+  file: Blob,
   maxDimension = DEFAULT_MAX_DIMENSION,
   quality = DEFAULT_QUALITY,
 ): Promise<CompressedImage> {

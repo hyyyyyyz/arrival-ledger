@@ -56,6 +56,7 @@ const dashboardStatsError = ref('')
 const queueItems = ref<UploadQueueItem[]>([])
 const queueStats = ref<QueueStats>({ pending: 0, failed: 0, uploading: 0 })
 const dashboardRefresh = createQueuedRefresh()
+const queueRefresh = createQueuedRefresh()
 let dashboardRequestVersion = 0
 
 const {
@@ -177,10 +178,22 @@ async function handleLogout(): Promise<void> {
 }
 
 async function refreshQueueState(): Promise<void> {
-  if (!user.value) return
-  const [items, stats] = await Promise.all([uploadQueue.itemsForCurrentUser(), uploadQueue.stats()])
-  queueItems.value = items
-  queueStats.value = stats
+  return queueRefresh.request(async () => {
+    const owner = user.value?.id
+    if (!owner) return
+    try {
+      const items = await uploadQueue.itemsForCurrentUser()
+      if (user.value?.id !== owner) return
+      queueItems.value = items
+      queueStats.value = {
+        pending: items.filter((item) => item.uploadState === 'QUEUED').length,
+        uploading: items.filter((item) => item.uploadState === 'UPLOADING').length,
+        failed: items.filter((item) => item.uploadState === 'FAILED').length,
+      }
+    } catch (error) {
+      sessionNotice.value = error instanceof Error ? error.message : '暂时无法读取本机队列，请保留照片后重试'
+    }
+  })
 }
 
 function resetDashboardStats(): void {
@@ -271,6 +284,15 @@ function handleQueueChange(): void {
   void refreshQueueState()
 }
 
+function handleQueueError(event: Event): void {
+  sessionNotice.value = (event as CustomEvent<string>).detail
+}
+
+async function retryUploads(clientEventId?: string): Promise<void> {
+  try { await uploadQueue.retryNow(clientEventId) }
+  catch (error) { sessionNotice.value = error instanceof Error ? error.message : '重试失败，请保留本机照片' }
+}
+
 function handleSynced(event: Event): void {
   const receipt = (event as CustomEvent<Receipt>).detail
   const existing = receipts.value.findIndex((item) => item.id === receipt.id)
@@ -307,7 +329,7 @@ function handleAuthRequired(): void {
 function handleOnline(): void {
   online.value = true
   if (user.value) {
-    uploadQueue.setAuthenticatedUser(user.value.id)
+    void uploadQueue.process()
     void refreshReceipts()
     if (activeTab.value === 'orders') void refreshOrders()
   }
@@ -323,6 +345,7 @@ function reloadPage(): void {
 
 onMounted(() => {
   uploadQueue.addEventListener('change', handleQueueChange)
+  uploadQueue.addEventListener('queue-error', handleQueueError)
   uploadQueue.addEventListener('synced', handleSynced)
   uploadQueue.addEventListener('auth-required', handleAuthRequired)
   window.addEventListener('online', handleOnline)
@@ -332,6 +355,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   uploadQueue.removeEventListener('change', handleQueueChange)
+  uploadQueue.removeEventListener('queue-error', handleQueueError)
   uploadQueue.removeEventListener('synced', handleSynced)
   uploadQueue.removeEventListener('auth-required', handleAuthRequired)
   window.removeEventListener('online', handleOnline)
@@ -385,7 +409,7 @@ onBeforeUnmount(() => {
 
     <main class="app-content">
       <template v-if="activeTab === 'capture'">
-        <SyncStatus :stats="queueStats" :online="online" @retry="uploadQueue.retryNow()" />
+        <SyncStatus :stats="queueStats" :online="online" @retry="retryUploads()" />
         <ReceiptCapture
           :user="user"
           :save-server-tracking="updateServerTracking"
@@ -410,13 +434,13 @@ onBeforeUnmount(() => {
           title="最近到货"
           @refresh="refreshReceipts"
           @capture="selectTab('capture')"
-          @retry="uploadQueue.retryNow"
+          @retry="retryUploads"
           @update-local="updateLocalTracking"
         />
       </template>
 
       <template v-else-if="activeTab === 'records'">
-        <SyncStatus :stats="queueStats" :online="online" @retry="uploadQueue.retryNow()" />
+        <SyncStatus :stats="queueStats" :online="online" @retry="retryUploads()" />
         <ReceiptList
           :receipts="receipts"
           :local-items="queueItems"
@@ -426,7 +450,7 @@ onBeforeUnmount(() => {
           empty-text="还没有可查看的到货记录。"
           @refresh="refreshReceipts"
           @capture="selectTab('capture')"
-          @retry="uploadQueue.retryNow"
+          @retry="retryUploads"
           @update-local="updateLocalTracking"
         />
       </template>

@@ -18,16 +18,16 @@ const emit = defineEmits<{
       <span>网络</span>
       <strong>{{ online ? '在线' : '离线' }}</strong>
     </div>
-    <div class="sync-item" :class="{ 'sync-warn': stats.pending + stats.uploading > 0 }">
+    <button class="sync-item" type="button" :disabled="stats.pending + stats.uploading === 0" aria-label="同步本机待上传照片" :class="{ 'sync-warn': stats.pending + stats.uploading > 0 }" @click="emit('retry')">
       <span class="sync-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 16V4m-4 4 4-4 4 4M5 14v5h14v-5" /></svg></span>
       <span>{{ stats.uploading ? '上传中' : '待上传' }}</span>
       <strong>{{ stats.pending + stats.uploading }}</strong>
-    </div>
+    </button>
     <button
       class="sync-item sync-error"
       :class="{ active: stats.failed > 0 }"
       type="button"
-      :disabled="stats.failed === 0 || !online"
+      :disabled="stats.failed === 0"
       @click="emit('retry')"
     >
       <span class="sync-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4 21 20H3Zm0 5v5m0 3h.01" /></svg></span>
@@ -35,5 +35,6 @@ const emit = defineEmits<{
       <strong>{{ stats.failed }}</strong>
     </button>
     <p v-if="!online" class="offline-caption">当前离线，照片会留在本机并在联网后自动上传</p>
+    <p v-else-if="stats.pending + stats.uploading > 0" class="offline-caption">可以继续拍摄，照片正在排队处理和上传。保持页面打开，返回前台后自动续传。</p>
   </section>
 </template>

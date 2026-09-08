@@ -1,3 +1,23 @@
+log_format arrival_upload_diagnostic escape=json
+    '{"event":"receipt_upload","time":"$time_iso8601",'
+    '"request_id":"$request_id","method":"$request_method","path":"$uri",'
+    '"status":$status,"content_length":"$http_content_length",'
+    '"request_length":$request_length,"request_time":$request_time,'
+    '"upstream_status":"$upstream_status",'
+    '"upstream_response_time":"$upstream_response_time"}';
+
+# Match the normalized path, never query parameters. Keep other API access logs
+# in the image's existing main format; receipt uploads use the safe diagnostic.
+map $uri $arrival_upload_log_enabled {
+    default 0;
+    /api/receipts 1;
+}
+
+map $uri $arrival_standard_api_log_enabled {
+    default 1;
+    /api/receipts 0;
+}
+
 server {
     listen 80;
     server_name _;
@@ -5,6 +25,9 @@ server {
     client_max_body_size 15m;
 
     location /api/ {
+        access_log /var/log/nginx/access.log main if=$arrival_standard_api_log_enabled;
+        access_log /var/log/nginx/access.log arrival_upload_diagnostic if=$arrival_upload_log_enabled;
+
         proxy_pass ${BACKEND_URL};
         proxy_http_version 1.1;
         proxy_set_header Host $host;

@@ -1,7 +1,12 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { UploadQueueItem } from '@/types'
 
 import {
+  API_REQUEST_TIMEOUT_MS,
+  RECEIPT_PHOTO_READ_TIMEOUT_MS,
+  RECEIPT_UPLOAD_TIMEOUT_MS,
   createPlatformAccount,
+  createReceipt,
   createManualOrderBatch,
   createUser,
   getCurrentSession,
@@ -13,6 +18,238 @@ import {
   updateOrderArrivalStatus,
   updateReceiptTracking,
 } from './api'
+
+function uploadItem(): UploadQueueItem {
+  return {
+    clientEventId: 'upload-event-stable-1',
+    ownerUserId: 'operator-a',
+    ownerDisplayName: '收货员',
+    deviceId: 'test-device',
+    occurredAt: '2026-09-08T00:00:00Z',
+    photo: new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: 'image/jpeg' }),
+    fileName: 'evidence.jpg',
+    trackingNo: 'SF12345678',
+    barcodeState: 'FOUND',
+    uploadState: 'QUEUED',
+    readyToUpload: true,
+    attempts: 0,
+    nextAttemptAt: 0,
+    lastError: null,
+    createdAt: 1,
+    updatedAt: 1,
+  }
+}
+
+describe('bounded transport and photo preparation', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it.each(['', '<html><head><title>400 Bad Request</title></head></html>'])('classifies proxy body interruption as retryable transport failure: %s', async (body) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status: 400, headers: { 'Content-Type': 'text/html' } })))
+    await expect(createReceipt(uploadItem())).rejects.toMatchObject({ status: 400, details: { transportFailure: true } })
+  })
+
+  it('retains explicit application validation errors without transport retry classification', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: 'image is empty' }), { status: 400, headers: { 'Content-Type': 'application/json' } })))
+    await expect(createReceipt(uploadItem())).rejects.toMatchObject({ status: 400, details: { detail: 'image is empty' } })
+  })
+
+  it('settles an ordinary request even if fetch ignores abort forever', async () => {
+    const fetchMock = vi.fn().mockReturnValue(new Promise<never>(() => {}))
+    vi.stubGlobal('fetch', fetchMock)
+    const outcome = expect(getDashboardStats()).rejects.toMatchObject({ status: 408, details: { timeout: true } })
+    await vi.advanceTimersByTimeAsync(API_REQUEST_TIMEOUT_MS)
+    await outcome
+    expect(fetchMock.mock.calls[0]?.[1].signal.aborted).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each(['application/json', 'text/plain'])('bounds a stalled %s response body', async (contentType) => {
+    const response = new Response('', { headers: { 'Content-Type': contentType } })
+    vi.spyOn(response, contentType === 'application/json' ? 'json' : 'text').mockImplementation(() => new Promise<never>(() => {}))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+    const outcome = expect(getDashboardStats()).rejects.toMatchObject({ status: 408 })
+    await vi.advanceTimersByTimeAsync(API_REQUEST_TIMEOUT_MS)
+    await outcome
+  })
+
+  it('uses the longer upload deadline and retains the uncertain-result warning', async () => {
+    const fetchMock = vi.fn().mockReturnValue(new Promise<never>(() => {}))
+    vi.stubGlobal('fetch', fetchMock)
+    let settled = false
+    const pending = createReceipt(uploadItem())
+    const outcome = expect(pending).rejects.toMatchObject({
+      status: 408,
+      message: expect.stringContaining('服务器结果尚未确认'),
+    })
+    void pending.then(() => { settled = true }, () => { settled = true })
+    await vi.advanceTimersByTimeAsync(API_REQUEST_TIMEOUT_MS)
+    expect(settled).toBe(false)
+    await vi.advanceTimersByTimeAsync(RECEIPT_UPLOAD_TIMEOUT_MS - API_REQUEST_TIMEOUT_MS)
+    await outcome
+    expect(fetchMock.mock.calls[0]?.[1].signal.aborted).toBe(true)
+  })
+
+  it('cancels an in-flight upload even when fetch ignores its signal', async () => {
+    const fetchMock = vi.fn().mockReturnValue(new Promise<never>(() => {}))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    const outcome = expect(createReceipt(uploadItem(), controller.signal)).rejects.toMatchObject({
+      status: 0, details: { cancelled: true },
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    controller.abort()
+    await outcome
+    expect(fetchMock.mock.calls[0]?.[1].signal.aborted).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('cancels while a response body remains pending', async () => {
+    const response = new Response('', { headers: { 'Content-Type': 'application/json' } })
+    const readBody = vi.spyOn(response, 'json').mockReturnValue(new Promise<never>(() => {}))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+    const controller = new AbortController()
+    const outcome = expect(createReceipt(uploadItem(), controller.signal)).rejects.toMatchObject({ details: { cancelled: true } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(readBody).toHaveBeenCalledOnce()
+    controller.abort()
+    await outcome
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('counts photo preparation against the overall upload deadline', async () => {
+    const item = uploadItem()
+    let finishRead!: (bytes: ArrayBuffer) => void
+    vi.spyOn(item.photo, 'arrayBuffer').mockReturnValue(new Promise<ArrayBuffer>((resolve) => { finishRead = resolve }))
+    const fetchMock = vi.fn().mockReturnValue(new Promise<never>(() => {}))
+    vi.stubGlobal('fetch', fetchMock)
+    const outcome = expect(createReceipt(item)).rejects.toMatchObject({ status: 408 })
+    await vi.advanceTimersByTimeAsync(10_000)
+    finishRead(new ArrayBuffer(item.photo.size))
+    await vi.advanceTimersByTimeAsync(RECEIPT_UPLOAD_TIMEOUT_MS - 10_000)
+    await outcome
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('does not read or send an already-cancelled photo', async () => {
+    const item = uploadItem()
+    const read = vi.spyOn(item.photo, 'arrayBuffer')
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    controller.abort()
+    await expect(createReceipt(item, controller.signal)).rejects.toMatchObject({ details: { cancelled: true } })
+    expect(read).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('settles and cleans up when photo-byte reading never returns', async () => {
+    const item = uploadItem()
+    vi.spyOn(item.photo, 'arrayBuffer').mockReturnValue(new Promise<never>(() => {}))
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const outcome = expect(createReceipt(item)).rejects.toMatchObject({ status: 0, details: { localPhotoRead: true, timeout: true } })
+    await vi.advanceTimersByTimeAsync(RECEIPT_PHOTO_READ_TIMEOUT_MS)
+    await outcome
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(item.photo.size).toBe(4)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('cancels during stalled photo-byte reading without starting fetch', async () => {
+    const item = uploadItem()
+    vi.spyOn(item.photo, 'arrayBuffer').mockReturnValue(new Promise<never>(() => {}))
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    const outcome = expect(createReceipt(item, controller.signal)).rejects.toMatchObject({ details: { cancelled: true } })
+    controller.abort()
+    await outcome
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('rehydrates the exact bytes and keeps the original event ID, MIME type and filename', async () => {
+    const item = uploadItem()
+    const read = vi.spyOn(item.photo, 'arrayBuffer')
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 1, client_event_id: item.clientEventId }), { headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(createReceipt(item)).resolves.toMatchObject({ id: 1 })
+    const body = fetchMock.mock.calls[0]?.[1].body as FormData
+    const sentPhoto = body.get('photo') as File
+    expect(read).toHaveBeenCalledOnce()
+    expect(body.get('client_event_id')).toBe(item.clientEventId)
+    expect(body.get('tracking_no')).toBe(item.trackingNo)
+    expect(sentPhoto).not.toBe(item.photo)
+    expect(sentPhoto.name).toBe(item.fileName)
+    expect(sentPhoto.type).toBe('image/jpeg')
+    expect(new Uint8Array(await sentPhoto.arrayBuffer())).toEqual(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]))
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each([0, 3])('does not send a photo when materialized bytes have invalid length %s', async (length) => {
+    const item = uploadItem()
+    vi.spyOn(item.photo, 'arrayBuffer').mockResolvedValue(new ArrayBuffer(length))
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(createReceipt(item)).rejects.toMatchObject({ status: 0, details: { localPhotoRead: true } })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    null,
+    {},
+    { id: 1 },
+    { id: 1, client_event_id: 'different-event' },
+    { id: '', client_event_id: 'upload-event-stable-1' },
+    { id: 0, client_event_id: 'upload-event-stable-1' },
+    { receipt: null },
+  ])('rejects a 200 response that cannot confirm the same receipt: %j', async (payload) => {
+    const item = uploadItem()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), {
+      headers: { 'Content-Type': 'application/json' },
+    })))
+    await expect(createReceipt(item)).rejects.toMatchObject({
+      status: 0, details: { invalidReceiptConfirmation: true, responseUncertain: true },
+    })
+    expect(item.clientEventId).toBe('upload-event-stable-1')
+    expect(item.photo.size).toBe(4)
+  })
+
+  it('accepts a wrapped receipt only when its event ID confirms the current upload', async () => {
+    const item = uploadItem()
+    const receipt = { id: 1, client_event_id: item.clientEventId }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ receipt }), {
+      headers: { 'Content-Type': 'application/json' },
+    })))
+    await expect(createReceipt(item)).resolves.toEqual(receipt)
+  })
+
+  it('handles a late fetch rejection after the request timed out', async () => {
+    let rejectFetch!: (error: Error) => void
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(new Promise<Response>((_, reject) => { rejectFetch = reject })))
+    const outcome = expect(getDashboardStats()).rejects.toMatchObject({ status: 408 })
+    await vi.advanceTimersByTimeAsync(API_REQUEST_TIMEOUT_MS)
+    await outcome
+    rejectFetch(new Error('late network rejection'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('preserves a completed HTTP failure instead of treating it as a network timeout', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: '请登录' }), {
+      status: 401, headers: { 'Content-Type': 'application/json' },
+    })))
+    await expect(getDashboardStats()).rejects.toMatchObject({ status: 401, message: '请登录' })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
 
 describe('authentication mode discovery', () => {
   afterEach(() => vi.unstubAllGlobals())

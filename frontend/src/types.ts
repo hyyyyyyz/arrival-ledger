@@ -198,6 +198,8 @@ export interface UploadQueueItem {
   barcodeState: BarcodeState
   uploadState: UploadState
   readyToUpload: boolean
+  needsPreparation?: boolean
+  requiresAuth?: boolean
   attempts: number
   nextAttemptAt: number
   lastError: string | null
